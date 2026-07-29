@@ -4,6 +4,7 @@ from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
+from sunpack.analysis.probes.seven_zip import SevenZipProbeOptions, probe_seven_zip_view
 
 
 class SevenZipAnalysisModule:
@@ -15,11 +16,11 @@ class SevenZipAnalysisModule:
             return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found")
         candidates = []
         for start in sorted({int(hit["offset"]) for hit in hits}):
-            native = view.probe_seven_zip(
+            observation = probe_seven_zip_view(view, SevenZipProbeOptions(
                 start_offset=start,
                 max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
-            )
-            candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
+            ))
+            candidates.append(self._from_native(observation.to_raw_dict(), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
         return combine_format_candidates("7z", candidates, preserve_multiple=prepass.get("source") == "embedded_scan")
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:

@@ -1,23 +1,23 @@
 import struct
 import zlib
 
-from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.coordinator.task_scan import direct_file_task
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.detection.input_planning import ArchiveInputPlanningStage
+from sunpack.inspect import ArchiveInspector
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
-class _FakeAnalysisScheduler:
+class _FakeAnalyzer:
     def __init__(self, report):
         self.report = report
         self.calls = 0
 
-    def analyze_task(self, task):
+    def analyze(self, source, request):
         self.calls += 1
         return self.report
 
@@ -56,7 +56,7 @@ def _multi_report(path, evidences):
     )
 
 
-def test_analysis_stage_writes_extractable_segment_without_switching_task_source(tmp_path):
+def test_input_planning_stage_writes_extractable_segment_without_switching_task_source(tmp_path):
     archive = tmp_path / "carrier.bin"
     archive.write_bytes(b"junk" + b"PK\x03\x04" + b"x" * 32 + b"tail")
     evidence = ArchiveFormatEvidence(
@@ -66,15 +66,15 @@ def test_analysis_stage_writes_extractable_segment_without_switching_task_source
         segments=[ArchiveSegment(start_offset=4, end_offset=40, confidence=0.99)],
     )
     task = _task(archive)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_report(archive, evidence))
+    stage.analyzer = _FakeAnalyzer(_report(archive, evidence))
 
-    stage.analyze_task(task)
+    stage.plan_task(task)
 
-    assert task.fact_bag.get("analysis.selected_format") == "zip"
-    assert task.fact_bag.get("analysis.segment")["start_offset"] == 4
-    segments = knowledge_view.analysis_extractable_segments(task)
+    assert task.fact_bag.get("archive.format_hint") == "zip"
+    assert task.fact_bag.get("source.segment")["start_offset"] == 4
+    segments = knowledge_view.source_extractable_segments(task)
     assert len(segments) == 1
     assert segments[0]["archive_input"] == {
         "kind": "archive_input",
@@ -94,7 +94,7 @@ def test_analysis_stage_writes_extractable_segment_without_switching_task_source
     assert state["patches"] == []
 
 
-def test_analysis_stage_keeps_sfx_segment_for_standard_archive_extension(tmp_path):
+def test_input_planning_stage_keeps_sfx_segment_for_standard_archive_extension(tmp_path):
     archive = tmp_path / "carrier.zip"
     archive.write_bytes(b"MZ-stub" + b"PK\x03\x04" + b"x" * 64)
     evidence = ArchiveFormatEvidence(
@@ -112,13 +112,13 @@ def test_analysis_stage_keeps_sfx_segment_for_standard_archive_extension(tmp_pat
         ],
     )
     task = _task(archive)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_report(archive, evidence))
+    stage.analyzer = _FakeAnalyzer(_report(archive, evidence))
 
-    stage.analyze_task(task)
+    stage.plan_task(task)
 
-    segments = knowledge_view.analysis_extractable_segments(task)
+    segments = knowledge_view.source_extractable_segments(task)
     assert len(segments) == 1
     assert segments[0]["archive_input"]["open_mode"] == "file_range"
     assert segments[0]["archive_input"]["parts"][0]["path"] == str(archive)
@@ -126,7 +126,7 @@ def test_analysis_stage_keeps_sfx_segment_for_standard_archive_extension(tmp_pat
     assert task.archive_input().open_mode == "file"
 
 
-def test_analysis_stage_records_multiple_segments_on_original_task(tmp_path):
+def test_input_planning_stage_records_multiple_segments_on_original_task(tmp_path):
     carrier = tmp_path / "carrier.bin"
     carrier.write_bytes(b"junk" + b"Rar!\x1a\x07\x01\x00" + b"x" * 20 + b"pad" + b"7z\xbc\xaf\x27\x1c" + b"y" * 20)
     rar = ArchiveFormatEvidence(
@@ -142,15 +142,15 @@ def test_analysis_stage_records_multiple_segments_on_original_task(tmp_path):
         segments=[ArchiveSegment(start_offset=35, end_offset=61, confidence=0.96)],
     )
     task = _task(carrier)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_multi_report(carrier, [rar, seven]))
+    stage.analyzer = _FakeAnalyzer(_multi_report(carrier, [rar, seven]))
 
-    tasks = stage.analyze_tasks([task])
+    tasks = stage.plan_tasks([task])
 
     assert tasks == [task]
-    assert task.fact_bag.get("analysis.selected_format") == "rar"
-    segments = knowledge_view.analysis_extractable_segments(task)
+    assert task.fact_bag.get("archive.format_hint") == "rar"
+    segments = knowledge_view.source_extractable_segments(task)
     assert [item["logical_name"] for item in segments] == ["case_01_rar", "case_02_7z"]
     assert segments[0]["archive_input"] == {
         "kind": "archive_input",
@@ -166,7 +166,7 @@ def test_analysis_stage_records_multiple_segments_on_original_task(tmp_path):
     assert segments[1]["archive_input"]["parts"][0]["start"] == 35
 
 
-def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
+def test_input_planning_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
     archive = tmp_path / "same.zip"
     archive.write_bytes(b"zip")
     evidence = ArchiveFormatEvidence(
@@ -178,20 +178,20 @@ def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
     first = _task(archive)
     second = _task(archive)
     second.logical_name = "case_copy"
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False, "task_parallel": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False, "task_parallel": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_report(archive, evidence))
+    stage.analyzer = _FakeAnalyzer(_report(archive, evidence))
 
-    tasks = stage.analyze_tasks([first, second])
+    tasks = stage.plan_tasks([first, second])
 
     assert tasks == [first, second]
-    assert stage.scheduler.calls == 1
-    assert first.fact_bag.get("analysis.selected_format") == "zip"
-    assert second.fact_bag.get("analysis.selected_format") == "zip"
-    assert second.fact_bag.get("analysis.cache_hits") == 2
+    assert stage.analyzer.calls == 1
+    assert first.fact_bag.get("archive.format_hint") == "zip"
+    assert second.fact_bag.get("archive.format_hint") == "zip"
+    assert second.fact_bag.get("input_planning.cache_hits") == 2
 
 
-def test_analysis_stage_does_not_treat_primary_multipart_archive_as_embedded_segment(tmp_path):
+def test_input_planning_stage_does_not_treat_primary_multipart_archive_as_embedded_segment(tmp_path):
     part1 = tmp_path / "archive.7z.001"
     part2 = tmp_path / "archive.7z.002"
     part1.write_bytes(b"7z-main")
@@ -203,17 +203,17 @@ def test_analysis_stage_does_not_treat_primary_multipart_archive_as_embedded_seg
         segments=[ArchiveSegment(start_offset=0, end_offset=14, confidence=0.97, role="primary")],
     )
     task = _task(part1, parts=[part1, part2])
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_report(part1, evidence))
+    stage.analyzer = _FakeAnalyzer(_report(part1, evidence))
 
-    stage.analyze_task(task)
+    stage.plan_task(task)
 
-    assert task.fact_bag.get("analysis.selected_format") == "7z"
-    assert knowledge_view.analysis_extractable_segments(task) == []
+    assert task.fact_bag.get("archive.format_hint") == "7z"
+    assert knowledge_view.source_extractable_segments(task) == []
 
 
-def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_path):
+def test_input_planning_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_path):
     archive = tmp_path / "payload.tar.gz"
     archive.write_bytes(b"gzipped tar")
     gzip = ArchiveFormatEvidence(
@@ -229,17 +229,17 @@ def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_pa
         segments=[ArchiveSegment(start_offset=0, end_offset=100, confidence=0.93)],
     )
     task = _task(archive)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_multi_report(archive, [gzip, tar_gz]))
+    stage.analyzer = _FakeAnalyzer(_multi_report(archive, [gzip, tar_gz]))
 
-    tasks = stage.analyze_tasks([task])
+    tasks = stage.plan_tasks([task])
 
     assert tasks == [task]
-    assert task.fact_bag.get("analysis.selected_format") == "tar.gz"
+    assert task.fact_bag.get("archive.format_hint") == "tar.gz"
 
 
-def test_analysis_stage_suppresses_inner_tar_shadowed_by_whole_compressed_tar(tmp_path):
+def test_input_planning_stage_suppresses_inner_tar_shadowed_by_whole_compressed_tar(tmp_path):
     archive = tmp_path / "payload.tar.zst"
     archive.write_bytes(b"zstd compressed tar bytes")
     tar_zst = ArchiveFormatEvidence(
@@ -263,18 +263,18 @@ def test_analysis_stage_suppresses_inner_tar_shadowed_by_whole_compressed_tar(tm
         ],
     )
     task = _task(archive)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_multi_report(archive, [false_inner_tar, tar_zst]))
+    stage.analyzer = _FakeAnalyzer(_multi_report(archive, [false_inner_tar, tar_zst]))
 
-    tasks = stage.analyze_tasks([task])
+    tasks = stage.plan_tasks([task])
 
     assert tasks == [task]
-    assert task.fact_bag.get("analysis.selected_format") == "tar.zst"
-    assert knowledge_view.analysis_extractable_segments(task) == []
+    assert task.fact_bag.get("archive.format_hint") == "tar.zst"
+    assert knowledge_view.source_extractable_segments(task) == []
 
 
-def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(tmp_path):
+def test_input_planning_stage_uses_range_input_for_embedded_password_required_archive(tmp_path):
     carrier = tmp_path / "payload.exe"
     carrier.write_bytes(b"MZ" + b"x" * 198)
     evidence = ArchiveFormatEvidence(
@@ -292,14 +292,14 @@ def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(
         details={"password_required": True, "header_encrypted": True},
     )
     task = _task(carrier)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_multi_report(carrier, [evidence]))
+    stage.analyzer = _FakeAnalyzer(_multi_report(carrier, [evidence]))
 
-    stage.analyze_task(task)
+    stage.plan_task(task)
 
-    assert task.fact_bag.get("analysis.selected_format") == "rar"
-    segments = knowledge_view.analysis_extractable_segments(task)
+    assert task.fact_bag.get("archive.format_hint") == "rar"
+    segments = knowledge_view.source_extractable_segments(task)
     assert len(segments) == 1
     assert segments[0]["archive_input"] == {
         "kind": "archive_input",
@@ -317,7 +317,7 @@ def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(
     }
 
 
-def test_analysis_scheduler_understands_rar_patch_state_without_reading_carrier_prefix(tmp_path):
+def test_input_planner_understands_rar_patch_state_without_reading_carrier_prefix(tmp_path):
     prefix = b"MZ-RAR-SFX-STUB" * 8
     rar_payload = _rar4_bytes()
     carrier = tmp_path / "rar-carrier.exe"
@@ -333,7 +333,7 @@ def test_analysis_scheduler_understands_rar_patch_state_without_reading_carrier_
     )
     task.set_archive_state(state)
 
-    report = ArchiveAnalysisScheduler().analyze_task(task)
+    report = ArchiveInspector().analyze_task(task)
 
     assert task.archive_state().effective_patch_digest() == state.effective_patch_digest()
     assert any(evidence.format == "rar" for evidence in report.evidences)
@@ -341,7 +341,7 @@ def test_analysis_scheduler_understands_rar_patch_state_without_reading_carrier_
     assert report.size == len(rar_payload)
 
 
-def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
+def test_input_planning_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
     part1 = tmp_path / "case.7z.001"
     part2 = tmp_path / "case.7z.002"
     part3 = tmp_path / "case.7z.003"
@@ -360,13 +360,13 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
         segments=[ArchiveSegment(start_offset=8, end_offset=24, confidence=0.97)],
     )
     task = _task(part1, parts=[part1, part2, part3], volumes=volumes)
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
     stage.enabled = True
-    stage.scheduler = _FakeAnalysisScheduler(_report(part1, evidence))
+    stage.analyzer = _FakeAnalyzer(_report(part1, evidence))
 
-    stage.analyze_task(task)
+    stage.plan_task(task)
 
-    segments = knowledge_view.analysis_extractable_segments(task)
+    segments = knowledge_view.source_extractable_segments(task)
     assert len(segments) == 1
     assert segments[0]["archive_input"] == {
         "kind": "archive_input",

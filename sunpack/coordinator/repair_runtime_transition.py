@@ -12,7 +12,7 @@ from typing import Any, Callable
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.inspect import ArchiveInspector
 from sunpack.coordinator.verification_stage import verify_and_project
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
@@ -35,6 +35,7 @@ class RepairRuntimeTransition:
     accepted_complete: bool = False
     accepted_partial: bool = False
     task_snapshot: dict[str, Any] | None = None
+    inspection_feedback: dict[str, Any] | None = None
 
 
 class RepairRuntimeTransitionEvaluator:
@@ -53,7 +54,7 @@ class RepairRuntimeTransitionEvaluator:
         extractor: ExtractionScheduler,
         verifier: VerificationScheduler,
         repair_stage: Any,
-        analysis_stage: ArchiveAnalysisStage | None = None,
+        inspector: ArchiveInspector | None = None,
         runtime_scheduler: Any = None,
         light_verify: Callable[[ArchiveTask, ExtractionResult], VerificationResult] | None = None,
         needs_full_verification: Callable[[RepairCandidate, VerificationResult], bool] | None = None,
@@ -62,7 +63,7 @@ class RepairRuntimeTransitionEvaluator:
         self.extractor = extractor
         self.verifier = verifier
         self.repair_stage = repair_stage
-        self.analysis_stage = analysis_stage
+        self.inspector = inspector
         self.runtime_scheduler = runtime_scheduler
         self.light_verify = light_verify
         self.needs_full_verification = needs_full_verification
@@ -76,6 +77,7 @@ class RepairRuntimeTransitionEvaluator:
         temp_dir: str | Path,
         restore: bool = True,
         refresh_analysis: bool = False,
+        inspect_candidate: bool = False,
         record_repair_history: bool = False,
         phase_timer: Callable[..., Any] | None = None,
         state_id: str = "",
@@ -89,18 +91,30 @@ class RepairRuntimeTransitionEvaluator:
         with _phase(phase_timer, "transition_source_digest", state_id=state_id, candidate_id=candidate_id):
             digest = self._candidate_source_digest(candidate)
         try:
+            inspection_feedback = None
             if record_repair_history:
                 with _phase(phase_timer, "transition_record_history", state_id=state_id, candidate_id=candidate_id):
                     self.record_candidate_repair(task, candidate, phase_timer=phase_timer)
             with _phase(phase_timer, "transition_apply_candidate", state_id=state_id, candidate_id=candidate_id):
                 self.apply_candidate_to_task(task, candidate, phase_timer=phase_timer)
-            if refresh_analysis and self.analysis_stage is not None:
-                with _phase(phase_timer, "transition_analysis_refresh", state_id=state_id, candidate_id=candidate_id):
-                    _refresh_analysis_with_optional_timer(
-                        self.analysis_stage,
+            if inspect_candidate and self.inspector is not None:
+                with _phase(phase_timer, "transition_inspect_candidate", state_id=state_id, candidate_id=candidate_id):
+                    try:
+                        inspection_feedback = self.inspector.inspect_task(
+                            task,
+                            use_cache=True,
+                        ).to_score_payload()
+                    except Exception as exc:
+                        inspection_feedback = {
+                            "status": "error",
+                            "error": str(exc),
+                        }
+            if refresh_analysis and self.inspector is not None:
+                with _phase(phase_timer, "transition_inspection_refresh", state_id=state_id, candidate_id=candidate_id):
+                    self.inspector.refresh_task(
                         task,
                         phase_timer=phase_timer,
-                        phase_prefix="transition_analysis_refresh",
+                        phase_prefix="transition_inspection_refresh",
                     )
             with _phase(phase_timer, "transition_extract", state_id=state_id, candidate_id=candidate_id):
                 extracted = _extract_with_optional_timer(
@@ -136,6 +150,7 @@ class RepairRuntimeTransitionEvaluator:
                 accepted_complete=self.accepts_complete(extracted, assessed),
                 accepted_partial=assessed.decision_hint == DECISION_ACCEPT_PARTIAL,
                 task_snapshot=task.knowledge().to_dict(),
+                inspection_feedback=inspection_feedback,
             )
         finally:
             if restore:
@@ -272,35 +287,6 @@ def _extract_with_optional_timer(
     if "phase_prefix" in parameters:
         kwargs["phase_prefix"] = phase_prefix
     return extract(task, out_dir, **kwargs)
-
-
-def _refresh_analysis_with_optional_timer(
-    analysis_stage: Any,
-    task: ArchiveTask,
-    *,
-    phase_timer: Callable[..., Any] | None,
-    phase_prefix: str,
-) -> None:
-    refresh = getattr(analysis_stage, "refresh_task_analysis", None)
-    if callable(refresh):
-        try:
-            parameters = inspect.signature(refresh).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        kwargs: dict[str, Any] = {}
-        if "phase_timer" in parameters:
-            kwargs["phase_timer"] = phase_timer
-        if "phase_prefix" in parameters:
-            kwargs["phase_prefix"] = phase_prefix
-        refresh(task, **kwargs)
-        return
-    analyze_to_tasks = getattr(analysis_stage, "analyze_task_to_tasks", None)
-    if callable(analyze_to_tasks):
-        analyze_to_tasks(task)
-        return
-    analyze_task = getattr(analysis_stage, "analyze_task", None)
-    if callable(analyze_task):
-        analyze_task(task)
 
 
 def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: ExtractionResult, *, phase_timer: Callable[..., Any] | None, phase_prefix: str) -> VerificationResult:

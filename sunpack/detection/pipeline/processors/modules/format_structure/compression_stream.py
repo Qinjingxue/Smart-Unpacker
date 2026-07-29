@@ -1,19 +1,17 @@
 from typing import Any
 
-from sunpack_native import inspect_compression_stream_structure as _native_inspect_compression_stream_structure
-
+from sunpack.analysis import ArchiveAnalyzer
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
-from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
-def inspect_compression_stream_structure(path: str, identity: tuple[str, int, int] | None = None) -> dict[str, Any]:
-    return cached_value(
-        "format_compression_stream_structure",
-        (identity or file_identity(path),),
-        lambda: dict(_native_inspect_compression_stream_structure(path)),
-    )
+def inspect_compression_stream_structure(
+    path: str,
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
+    """Compatibility facade; compression analysis is owned by Analysis."""
+    del identity
+    return ArchiveAnalyzer().probe_compression_stream(path).to_raw_dict()
 
 
 @register_processor(
@@ -29,4 +27,4 @@ def inspect_compression_stream_structure(path: str, identity: tuple[str, int, in
 )
 def process_compression_stream_structure(context: FactProcessorContext) -> dict[str, Any]:
     path = context.fact_bag.get("file.path") or ""
-    return inspect_compression_stream_structure(path, file_identity_for_context(context, path))
+    return ArchiveAnalyzer(context.config).probe_compression_stream(path).to_raw_dict()

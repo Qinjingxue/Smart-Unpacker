@@ -190,6 +190,12 @@ class MultiVolumeBinaryView:
     def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
         return _probe_seven_zip_view(self, int(start_offset), int(max_next_header_check_bytes))
 
+    def probe_tar(self, *, start_offset: int = 0, max_entries_to_walk: int = 64) -> dict | None:
+        return _probe_tar_view(self, int(start_offset), int(max_entries_to_walk))
+
+    def probe_compression_stream(self, *, format: str) -> dict | None:
+        return _probe_compression_stream_view(self, str(format))
+
     def fuzzy_binary_profile(
         self,
         *,
@@ -811,41 +817,143 @@ def _probe_base(fmt: str, start_offset: int) -> dict:
 
 
 def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
-    result = _probe_base("tar", start_offset)
+    result = {
+        **_probe_base("tar", start_offset),
+        "file_size": int(view.size),
+        "stored_checksum": 0,
+        "computed_checksum": 0,
+        "member_size": 0,
+        "ustar_magic": False,
+        "zero_block": False,
+        "fuzzy_name_nonempty": False,
+        "fuzzy_numeric_fields_valid": False,
+        "fuzzy_typeflag_valid": False,
+        "fuzzy_payload_in_range": False,
+        "entries_checked": 0,
+        "entry_walk_ok": False,
+        "end_zero_blocks": False,
+        "segment_end": None,
+        "boundary_confidence": "none",
+        "integrity_confidence": "unknown",
+        "damage_flags": [],
+    }
     cursor = start_offset
     entries = 0
-    for _ in range(max_entries):
+    zero_blocks = 0
+    while entries < max_entries and cursor + 512 <= int(view.size):
         block = view.read_at(cursor, 512)
         if len(block) < 512:
-            result["error"] = "tar_header_out_of_range"
+            result["error"] = "short_tar_header"
             break
         if block == b"\x00" * 512:
-            next_block = view.read_at(cursor + 512, 512)
+            if entries == 0:
+                result.update({"zero_block": True, "error": "leading_zero_block"})
+                return result
+            zero_blocks += 1
+            cursor += 512
+            if zero_blocks >= 2:
+                result.update({
+                    "plausible": True,
+                    "entries_checked": entries,
+                    "entry_walk_ok": True,
+                    "end_zero_blocks": True,
+                    "segment_end": cursor,
+                    "boundary_confidence": "high",
+                    "evidence": ["tar:header_checksum", "tar:block_walk", "tar:end_zero_blocks"],
+                })
+                return result
+            continue
+
+        result["magic_matched"] = True
+        zero_blocks = 0
+        stored_checksum = _tar_octal_optional(block[148:156])
+        member_size = _tar_octal_optional(block[124:136])
+        computed_checksum = _tar_checksum(block)
+        ustar_magic = block[257:263] in {b"ustar\x00", b"ustar "}
+        if entries == 0:
+            numeric_fields_valid = (
+                stored_checksum is not None
+                and member_size is not None
+                and all(_tar_octal_optional(block[start:end]) is not None for start, end in (
+                    (100, 108), (108, 116), (116, 124), (136, 148)
+                ))
+            )
+            typeflag_valid = block[156] in b"\x0001234567xgLKS"
+            payload_in_range = bool(
+                member_size is not None
+                and cursor + 512 + member_size + _tar_padding(member_size) <= int(view.size)
+            )
             result.update({
-                "magic_matched": entries > 0,
-                "plausible": entries > 0,
-                "strong_accept": entries > 0 and next_block == b"\x00" * 512,
-                "end_zero_blocks": next_block == b"\x00" * 512,
-                "entries_checked": entries,
-                "segment_end": cursor + (1024 if next_block == b"\x00" * 512 else 512),
-                "evidence": ["tar:header", "tar:end_zero_blocks"] if entries > 0 else [],
-                "error": "",
+                "stored_checksum": stored_checksum or 0,
+                "computed_checksum": computed_checksum,
+                "member_size": member_size or 0,
+                "ustar_magic": ustar_magic,
+                "format": "ustar" if ustar_magic else "tar",
+                "fuzzy_name_nonempty": any(block[0:100]),
+                "fuzzy_numeric_fields_valid": numeric_fields_valid,
+                "fuzzy_typeflag_valid": typeflag_valid,
+                "fuzzy_payload_in_range": payload_in_range,
             })
+        if stored_checksum is None:
+            error = "invalid_checksum_field"
+        elif member_size is None:
+            error = "invalid_size_field"
+        elif stored_checksum != computed_checksum:
+            error = "checksum_mismatch"
+        else:
+            error = ""
+        if error:
+            flag = {
+                ord("x"): "pax_header_bad",
+                ord("g"): "pax_header_bad",
+                ord("L"): "gnu_longname_bad",
+                ord("K"): "gnu_longname_bad",
+                ord("S"): "sparse_header_bad",
+            }.get(block[156], "tar_checksum_bad" if error == "checksum_mismatch" else "tar_metadata_bad")
+            result.update({"entries_checked": entries, "error": error, "damage_flags": [flag]})
+            if entries > 0:
+                result.update({
+                    "plausible": True,
+                    "entry_walk_ok": True,
+                    "segment_end": cursor,
+                    "boundary_confidence": "medium",
+                    "evidence": ["tar:header_checksum", "tar:block_walk_prefix"],
+                })
             return result
-        if block[257:262] != b"ustar":
-            result["error"] = "tar_ustar_not_found" if entries == 0 else "tar_next_header_missing"
-            break
+
+        next_cursor = cursor + 512 + member_size + _tar_padding(member_size)
+        if next_cursor > int(view.size):
+            result.update({
+                "entries_checked": entries,
+                "error": "member_payload_out_of_range",
+                "damage_flags": ["probably_truncated"],
+            })
+            if entries > 0:
+                result.update({
+                    "plausible": True,
+                    "entry_walk_ok": True,
+                    "segment_end": cursor,
+                    "boundary_confidence": "medium",
+                })
+            return result
         entries += 1
-        size = _tar_octal(block[124:136])
-        data_blocks = (size + 511) // 512
-        cursor += 512 + data_blocks * 512
-    result.update({
-        "magic_matched": entries > 0,
-        "plausible": entries > 0,
-        "entries_checked": entries,
-        "segment_end": cursor if entries else 0,
-        "evidence": ["tar:header"] if entries else [],
-    })
+        cursor = next_cursor
+        result["evidence"] = [
+            "tar:header_checksum",
+            "tar:ustar_magic" if ustar_magic else "tar:v7_header",
+        ]
+
+    if entries > 0:
+        result.update({
+            "plausible": True,
+            "entries_checked": entries,
+            "entry_walk_ok": True,
+            "segment_end": cursor,
+            "boundary_confidence": "medium",
+            "error": "tar_end_zero_blocks_not_found",
+            "damage_flags": ["missing_end_block"],
+            "evidence": ["tar:header_checksum", "tar:block_walk_prefix"],
+        })
     return result
 
 
@@ -869,12 +977,20 @@ def _probe_compression_stream_view(view, fmt: str) -> dict:
     }
 
 
-def _tar_octal(data: bytes) -> int:
+def _tar_octal_optional(data: bytes) -> int | None:
     text = data.split(b"\x00", 1)[0].strip() or b"0"
     try:
         return int(text, 8)
     except ValueError:
-        return 0
+        return None
+
+
+def _tar_checksum(header: bytes) -> int:
+    return sum(header[:148]) + 32 * 8 + sum(header[156:])
+
+
+def _tar_padding(size: int) -> int:
+    return (-size) % 512
 
 
 def _entropy(data: bytes) -> float:

@@ -10,8 +10,10 @@ from sunpack.cli.cli_types import CliCommandResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.loader import load_config
-from sunpack.analysis.stage import ArchiveAnalysisStage
-from sunpack.coordinator.inspector import InspectOrchestrator
+from sunpack.analysis import ArchiveAnalyzer
+from sunpack.analysis.request import AnalysisRequest
+from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
+from sunpack.coordinator.detection_inspector import DetectionInspectOrchestrator
 from sunpack.support.json_format import to_json_text
 from sunpack.detection.options import DetectionOptions
 
@@ -42,7 +44,7 @@ def handle(args, ctx):
     config = load_config()
     effective_config = build_effective_config(config)
     detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
-    results = InspectOrchestrator(config, detection_options).inspect(target_paths)
+    results = DetectionInspectOrchestrator(config, detection_options).inspect(target_paths)
     all_items = [inspect_result_to_item(res) for res in results]
     if args.analyze:
         analyses = _analysis_by_path(results, config)
@@ -131,14 +133,45 @@ def handle(args, ctx):
 
 
 def _analysis_by_path(results, config: dict) -> dict[str, dict]:
-    stage = ArchiveAnalysisStage(config)
+    analyzer = ArchiveAnalyzer(config)
     output = {}
     for result in results:
         if not _should_analyze_result(result):
             continue
         task = _task_from_inspect_result(result)
-        report = stage.analyze_task(task)
-        output[result.path] = _analysis_summary(task, report)
+        try:
+            state = task.archive_state()
+            source = (
+                PatchedAnalysisSource(state, report_path=task.main_path)
+                if state.patches
+                else analysis_source_for_descriptor(
+                    state.to_archive_input_descriptor(),
+                    report_path=task.main_path,
+                )
+            )
+            prepass = task.fact_bag.get("analysis.signature_prepass")
+            report = analyzer.analyze(
+                source,
+                AnalysisRequest(
+                    initial_prepass=(
+                        dict(prepass)
+                        if isinstance(prepass, dict) and prepass.get("full_scan_complete")
+                        else None
+                    )
+                ),
+            )
+            output[result.path] = _analysis_summary(task, report)
+        except Exception as exc:
+            output[result.path] = {
+                "status": "error",
+                "error": str(exc),
+                "has_extractable": False,
+                "selected_format": "",
+                "selected_confidence": 0.0,
+                "primary_segment": None,
+                "damage_flags": [],
+                "candidates": [],
+            }
     return output
 
 
@@ -162,8 +195,8 @@ def _clone_fact_bag(source) -> FactBag:
 def _analysis_summary(task: ArchiveTask, report) -> dict:
     if report is None:
         return {
-            "status": task.fact_bag.get("analysis.status") or "error",
-            "error": task.fact_bag.get("analysis.error") or "",
+            "status": "error",
+            "error": task.fact_bag.get("inspection.error") or "",
             "has_extractable": False,
             "selected_format": "",
             "selected_confidence": 0.0,
@@ -185,7 +218,7 @@ def _analysis_summary(task: ArchiveTask, report) -> dict:
         for flag in segment_item.damage_flags
     ])
     return {
-        "status": task.fact_bag.get("analysis.status") or ("extractable" if report.has_extractable else "not_extractable"),
+        "status": "extractable" if report.has_extractable else "not_extractable",
         "has_extractable": bool(report.has_extractable),
         "selected_format": getattr(primary, "format", "") if primary else "",
         "selected_confidence": float(getattr(primary, "confidence", 0.0) or 0.0) if primary else 0.0,

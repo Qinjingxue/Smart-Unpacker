@@ -119,9 +119,9 @@ def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, An
 
 
 def _analysis_facts_from_task(task: ArchiveTask) -> dict[str, Any]:
-    prepass = knowledge_view.analysis_prepass(task)
+    prepass = knowledge_view.inspection_prepass(task)
     selected = knowledge_view.selected_format(task)
-    segment = knowledge_view.get(task, "analysis.selected_segment.segment", {})
+    segment = knowledge_view.get(task, "source.selected_segment.segment", {})
     output = dict(prepass)
     if selected:
         output.setdefault("selected_format", selected)

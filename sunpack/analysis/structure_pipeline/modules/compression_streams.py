@@ -2,6 +2,7 @@ from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
+from sunpack.analysis.probes.compression_stream import CompressionStreamProbeOptions, probe_compression_stream_view
 
 GZIP_MAGIC = b"\x1f\x8b\x08"
 BZIP2_MAGIC = b"BZh"
@@ -45,29 +46,58 @@ class _CompressionModule:
                 details={"source": "embedded_scan", "candidates": embedded,
                          "boundary_confidence": "high" if complete else "low"},
             )
-        result = view.probe_compression_stream(format=self.fmt)
+        observation = probe_compression_stream_view(
+            view,
+            CompressionStreamProbeOptions(format=self.fmt),
+        )
+        result = observation.to_raw_dict()
         if not result.get("magic_matched"):
             return ArchiveFormatEvidence(format=self.fmt, confidence=0.0, status="not_found", details=result)
-        if result.get("plausible"):
-            confidence = float(result.get("confidence") or 0.88)
+        damage_flags = _stream_damage_flags(result)
+        validation_complete = bool(result.get("validation_complete"))
+        trailing = int(result.get("archive.trailing_data") or 0)
+        if result.get("plausible") and validation_complete and not damage_flags and trailing == 0:
+            confidence = 0.97
             return ArchiveFormatEvidence(
                 format=self.fmt,
                 confidence=confidence,
                 status="extractable",
-                segments=[ArchiveSegment(start_offset=0, end_offset=view.size, confidence=confidence, evidence=list(result.get("evidence") or []))],
+                segments=[ArchiveSegment(start_offset=0, end_offset=result.get("segment_end") or view.size, confidence=confidence, evidence=list(result.get("evidence") or []))],
                 details=result,
             )
+        if result.get("plausible"):
+            if not validation_complete:
+                damage_flags = sorted(set(damage_flags + ["validation_incomplete"]))
+            confidence = 0.78 if not damage_flags else 0.68
+            return ArchiveFormatEvidence(
+                format=self.fmt,
+                confidence=confidence,
+                status="damaged",
+                segments=[ArchiveSegment(
+                    start_offset=0,
+                    end_offset=result.get("segment_end"),
+                    confidence=confidence,
+                    damage_flags=damage_flags,
+                    evidence=list(result.get("evidence") or []),
+                )],
+                details={**result, "route_evidence_flags": damage_flags},
+            )
+        damage_flags = damage_flags or ["stream_unverified"]
         return ArchiveFormatEvidence(
             format=self.fmt,
             confidence=0.35,
             status="weak",
-            segments=[ArchiveSegment(start_offset=0, end_offset=None, confidence=0.35, damage_flags=_stream_damage_flags(result), evidence=list(result.get("evidence") or []))],
-            details={**result, "route_evidence_flags": _stream_damage_flags(result)},
+            segments=[ArchiveSegment(start_offset=0, end_offset=None, confidence=0.35, damage_flags=damage_flags, evidence=list(result.get("evidence") or []))],
+            details={**result, "route_evidence_flags": damage_flags},
         )
 
 
 def _stream_damage_flags(result: dict) -> list[str]:
-    return sorted(set(result.get("damage_flags") or [str(result.get("error") or "stream_unverified")]))
+    flags = list(result.get("damage_flags") or [])
+    error = str(result.get("error") or "")
+    if error:
+        flags.append(error)
+    return sorted(set(flags))
 
 
 class GzipAnalysisModule(_CompressionModule):

@@ -3,6 +3,7 @@ from sunpack.analysis.structure_pipeline.registry import register_analysis_modul
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
+from sunpack.analysis.probes.tar import TarProbeOptions, probe_tar_view
 
 
 class TarAnalysisModule:
@@ -14,7 +15,10 @@ class TarAnalysisModule:
         candidates.extend(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
         evidences = []
         for start in sorted(set(candidates)):
-            result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries)
+            result = probe_tar_view(
+                view,
+                TarProbeOptions(start_offset=start, max_entries_to_walk=max_entries),
+            ).to_raw_dict()
             if result and result.get("plausible"):
                 confidence = 0.94 if result.get("end_zero_blocks") else 0.86
                 details = dict(result)

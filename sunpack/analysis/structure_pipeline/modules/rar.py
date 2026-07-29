@@ -4,6 +4,7 @@ from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
+from sunpack.analysis.probes.rar import RarProbeOptions, probe_rar_view
 
 
 class RarAnalysisModule:
@@ -15,8 +16,20 @@ class RarAnalysisModule:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
         candidates = []
         for start in sorted({int(hit["offset"]) for hit in hits}):
-            native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
-            candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
+            observation = probe_rar_view(
+                view,
+                RarProbeOptions(
+                    start_offset=start,
+                    max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096),
+                ),
+            )
+            candidates.append(self._from_native(
+                observation.to_raw_dict(),
+                start,
+                next_archive_boundary(prepass, start, view.size),
+                prepass,
+                view.size,
+            ))
         return combine_format_candidates("rar", candidates, preserve_multiple=prepass.get("source") == "embedded_scan")
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
@@ -81,7 +94,7 @@ class RarAnalysisModule:
     def _classify_damage(self, native: dict) -> str:
         error = str(native.get("error") or "")
         blocks_checked = int(native.get("blocks_checked") or 0)
-        if error in {"rar4_block_header_out_of_range", "rar5_block_header_out_of_range"} and blocks_checked > 0:
+        if "probably_truncated" in (native.get("damage_flags") or []) and blocks_checked > 0:
             return "probably_truncated"
         if error in {"rar5_main_header_missing", "rar4_main_header_missing"}:
             return "valid_encrypted_but_unwalkable"

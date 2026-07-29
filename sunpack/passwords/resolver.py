@@ -219,7 +219,12 @@ class PasswordResolver:
         knowledge_input = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input")
         if not isinstance(knowledge_input, dict):
             return None
-        selected_format = str(fact_bag.get("analysis.selected_format") or "").strip().lower().lstrip(".")
+        selected_format = str(
+            ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("inspection.summary.format", "")
+            or ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input.format_hint", "")
+            or fact_bag.get("archive.format_hint")
+            or ""
+        ).strip().lower().lstrip(".")
         if selected_format in {"zip", "rar", "7z"}:
             return {**knowledge_input, "format_hint": selected_format}
         return knowledge_input

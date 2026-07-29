@@ -87,8 +87,13 @@ def handle(args, ctx):
         quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
         verbose=bool(getattr(reporter, "verbose", False)),
     )
-    detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
-    with pipeline_engine(run_config, detection_options=detection_options) as engine:
+    deep_detect = bool(getattr(args, "deep_detect", False))
+    engine_context = (
+        pipeline_engine(run_config, detection_options=DetectionOptions(deep_scan=True))
+        if deep_detect
+        else pipeline_engine(run_config)
+    )
+    with engine_context as engine:
         while True:
             password_summary = build_password_summary(
                 passwords,
@@ -152,7 +157,7 @@ def handle(args, ctx):
             "verbose": args.verbose,
             "config_overrides": config_overrides,
             "direct_file": bool(getattr(args, "direct_file", False)),
-            "deep_detect": bool(args.deep_detect),
+            "deep_detect": deep_detect,
         },
         summary={
             "success_count": summary.success_count,

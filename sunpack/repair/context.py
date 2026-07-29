@@ -48,7 +48,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     diagnostics = knowledge_view.extraction_diagnostics(knowledge)
     result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     native_diagnostics = result_payload.get("diagnostics") if isinstance(result_payload.get("diagnostics"), dict) else {}
-    fuzzy_profile = knowledge_view.analysis_fuzzy_profile(knowledge)
+    fuzzy_profile = knowledge_view.inspection_fuzzy_profile(knowledge)
     failure_stage = _first_text([
         failure.get("failure_stage"),
         result_payload.get("failure_stage"),
@@ -66,7 +66,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     route_evidence_flags = list(route_context.get("route_evidence_flags") or [])
     repair_history_flags = list(history_summary.get("repair_history_flags") or [])
     residual_damage_flags = list(route_context.get("residual_damage_flags") or history_summary.get("residual_damage_flags") or [])
-    context_format = _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "")
+    context_format = _normalize_format(diagnosis.format or knowledge_view.inspection_summary(knowledge).get("format") or "")
     damage_flags = _dedupe([
         *list(route_context.get("damage_flags") or []),
         *[str(flag) for flag in getattr(job, "damage_flags", []) or [] if str(flag)],
@@ -81,10 +81,10 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     elif context_format in {"7z", "seven_zip"}:
         damage_flags = _filter_seven_zip_conflicting_runtime_flags(damage_flags, {"archive_knowledge": knowledge.to_dict()})
     knowledge_payload = knowledge.to_dict()
-    if _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "") == "zip":
+    if _normalize_format(diagnosis.format or knowledge_view.inspection_summary(knowledge).get("format") or "") == "zip":
         damage_flags = _filter_zip_conflicting_runtime_flags(damage_flags, {
             "archive_knowledge": knowledge_payload,
-            "analysis_evidence": {"details": knowledge_view.zip_runtime_facts(knowledge)},
+            "inspection_evidence": {"details": knowledge_view.zip_runtime_facts(knowledge)},
             "repair_history": history_summary,
             "damage_flags": damage_flags,
         })
@@ -98,12 +98,12 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     )
     damage_flags = _dedupe([*damage_flags, *normalized_failure_classes])
     source = knowledge_view.source_input(knowledge)
-    analysis_summary = knowledge_view.analysis_summary(knowledge)
-    prepass = knowledge_view.analysis_prepass(knowledge)
+    inspection_summary = knowledge_view.inspection_summary(knowledge)
+    prepass = knowledge_view.inspection_prepass(knowledge)
     return RepairContext(
         source_input=dict(source),
-        format=_normalize_format(diagnosis.format or analysis_summary.get("format") or source.get("format_hint") or source.get("format") or ""),
-        confidence=float(diagnosis.confidence or analysis_summary.get("confidence") or 0.0),
+        format=_normalize_format(diagnosis.format or inspection_summary.get("format") or source.get("format_hint") or source.get("format") or ""),
+        confidence=float(diagnosis.confidence or inspection_summary.get("confidence") or 0.0),
         categories=tuple(str(item) for item in diagnosis.categories),
         damage_flags=tuple(damage_flags),
         fuzzy_hints=tuple(str(item) for item in fuzzy_profile.get("hints") or []),

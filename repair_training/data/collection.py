@@ -33,8 +33,8 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.analysis.stage import ArchiveAnalysisStage
-from sunpack.analysis.knowledge import write_zip_structure_facts
+from sunpack.inspect import ArchiveInspector
+from sunpack.support.archive_format_projection import write_zip_structure_facts
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import (
     inspect_zip_directory_consistency,
 )
@@ -194,7 +194,7 @@ def observe_damage_runtime(
     workspace.mkdir(parents=True, exist_ok=True)
     state = job.archive_state or ArchiveState.from_archive_input(job.archive_input())
     task = _task_for_job(job, state)
-    ArchiveAnalysisStage(config).refresh_task_analysis(task)
+    ArchiveInspector(config).refresh_task(task)
     _preserve_source_split_metadata(task, job)
     if str(job.format or "").lower() == "zip":
         _ensure_zip_structure_facts(task)

@@ -1,16 +1,22 @@
 from pathlib import Path
 
 from sunpack.analysis.result import ArchiveAnalysisReport
-from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.analysis import ArchiveAnalyzer
+from sunpack.analysis.engine import AnalysisEngine
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair.loop import RepairLoopLimits, RepairLoopState
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult
+from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
+from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.repair.candidate import RepairCandidate
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.inspect import ArchiveInspector, InspectionFeedback
 
 
-def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):
+def test_inspector_reanalyzes_repaired_archive_input_file(tmp_path):
     source = tmp_path / "original.zip"
     repaired = tmp_path / "repaired.zip"
     source.write_bytes(b"broken")
@@ -22,11 +28,11 @@ def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):
         "open_mode": "file",
         "format_hint": "zip",
     })
-    scheduler = _RecordingAnalysisScheduler()
+    engine = _RecordingAnalysisEngine()
 
-    scheduler.analyze_task(task)
+    ArchiveInspector(analyzer=ArchiveAnalyzer(engine=engine)).analyze_task(task)
 
-    assert scheduler.paths == [str(repaired)]
+    assert engine.paths == [str(repaired)]
 
 
 def test_policy_stop_records_final_extraction_gate(tmp_path):
@@ -80,11 +86,11 @@ class _FakeOutputScanPolicy:
         return list(outputs)
 
 
-class _RecordingAnalysisScheduler(ArchiveAnalysisScheduler):
+class _RecordingAnalysisEngine(AnalysisEngine):
     def __init__(self):
         self.paths = []
 
-    def analyze_path(self, path):
+    def analyze_path(self, path, **_kwargs):
         self.paths.append(str(path))
         return ArchiveAnalysisReport(path=str(path), size=0, evidences=[], selected=[])
 
@@ -170,12 +176,91 @@ class _FakeAnalysisStage:
 
     def analyze_task(self, task):
         self.calls += 1
-        task.fact_bag.set("analysis.selected_format", "zip")
+        task.fact_bag.set("inspection.selected_format", "zip")
         return ArchiveAnalysisReport(path=task.main_path, size=0, evidences=[], selected=[])
 
     def analyze_task_to_tasks(self, task):
         self.analyze_task(task)
         return [task]
+
+
+class _FakeInspector:
+    def __init__(self):
+        self.calls = 0
+
+    def inspect_task(self, task, use_cache=True):
+        self.calls += 1
+        return type("Feedback", (), {
+            "to_score_payload": lambda self: {
+                "status": "damaged",
+                "format": "zip",
+                "confidence": 0.8,
+            },
+        })()
+
+    def refresh_task(self, task):
+        self.calls += 1
+        task.fact_bag.set("inspection.status", "damaged")
+        return InspectionFeedback(status="damaged", format="zip", confidence=0.8)
+
+
+class _FakeRepairStage:
+    def _descriptor_from_repaired_input(self, task, repaired_input):
+        return ArchiveInputDescriptor.from_any(
+            repaired_input,
+            archive_path=task.main_path,
+            part_paths=task.all_parts,
+        )
+
+
+def test_runtime_transition_can_shadow_inspect_candidate(tmp_path):
+    source = tmp_path / "broken.zip"
+    repaired = tmp_path / "good.zip"
+    source.write_bytes(b"broken")
+    repaired.write_bytes(b"fixed")
+    task = _task(source)
+    inspector = _FakeInspector()
+    evaluator = RepairRuntimeTransitionEvaluator(
+        extractor=_ArchiveInputExtractor(),
+        verifier=_FakeVerifier(),
+        repair_stage=_FakeRepairStage(),
+        inspector=inspector,
+    )
+    candidate = RepairCandidate(
+        module_name="test_repair",
+        format="zip",
+        repaired_input={"kind": "file", "path": str(repaired), "format_hint": "zip"},
+        confidence=0.7,
+    )
+
+    transition = evaluator.evaluate(
+        task,
+        candidate,
+        temp_dir=tmp_path / "candidate-output",
+        inspect_candidate=True,
+    )
+
+    assert inspector.calls == 1
+    assert transition.inspection_feedback == {
+        "status": "damaged",
+        "format": "zip",
+        "confidence": 0.8,
+    }
+
+
+def test_repair_entry_refreshes_inspection_feedback(tmp_path):
+    source = tmp_path / "broken.zip"
+    source.write_bytes(b"broken")
+    task = _task(source)
+    inspector = _FakeInspector()
+    runner = ExtractionBatchRunner.__new__(ExtractionBatchRunner)
+    runner.inspector = inspector
+
+    runner._inspect_before_repair(task)
+
+    assert inspector.calls == 1
+    assert task.fact_bag.get("inspection.status") == "damaged"
+    assert task.knowledge().get("repair.candidate_log")[-1]["phase"] == "inspection_before_repair"
 
 
 def _verification(decision, completeness):

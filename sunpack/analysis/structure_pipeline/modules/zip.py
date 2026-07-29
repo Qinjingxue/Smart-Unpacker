@@ -3,6 +3,7 @@ from sunpack.analysis.structure_pipeline.registry import register_analysis_modul
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
+from sunpack.analysis.probes.zip import ZipEocdProbeOptions, probe_zip_eocd_view
 
 
 class ZipAnalysisModule:
@@ -23,7 +24,13 @@ class ZipAnalysisModule:
         max_entries = int(config.get("max_cd_entries_to_walk", 64) or 64)
         eocd_hits = [int(hit["offset"]) for hit in hits if hit.get("name") == "zip_eocd"]
         for eocd_offset in sorted(eocd_hits, reverse=True):
-            native = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
+            native = probe_zip_eocd_view(
+                view,
+                ZipEocdProbeOptions(
+                    max_cd_entries_to_walk=max_entries,
+                    eocd_offset=eocd_offset,
+                ),
+            ).to_raw_dict()
             if not native or not (native.get("magic_matched") or native.get("plausible")):
                 continue
             native = dict(native)

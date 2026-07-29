@@ -22,8 +22,8 @@ def write_repair_job_context(
     task: ArchiveTask,
     *,
     source_input: dict[str, Any],
-    analysis_prepass: dict[str, Any],
-    analysis_evidence: Any,
+    inspection_prepass: dict[str, Any],
+    inspection_evidence: Any,
     extraction_failure: dict[str, Any],
     extraction_diagnostics: dict[str, Any],
     repair_history: dict[str, Any],
@@ -34,15 +34,15 @@ def write_repair_job_context(
 ) -> dict[str, Any]:
     with _phase(phase_timer, f"{phase_prefix}_ensure_knowledge"):
         knowledge = ensure_knowledge(task)
-    with _phase(phase_timer, f"{phase_prefix}_analysis_evidence_payload"):
-        evidence_payload = _analysis_evidence_payload(analysis_evidence)
+    with _phase(phase_timer, f"{phase_prefix}_inspection_evidence_payload"):
+        evidence_payload = _inspection_evidence_payload(inspection_evidence)
     with _phase(phase_timer, f"{phase_prefix}_write_source_input"):
         write_payload(knowledge, "source.input", dict(source_input or {}), source_layer="repair", source_module="job_context")
-    with _phase(phase_timer, f"{phase_prefix}_write_analysis_prepass"):
-        write_payload(knowledge, "analysis.prepass", dict(analysis_prepass or {}), source_layer="repair", source_module="job_context")
-    with _phase(phase_timer, f"{phase_prefix}_write_analysis_evidence"):
+    with _phase(phase_timer, f"{phase_prefix}_write_inspection_prepass"):
+        write_payload(knowledge, "inspection.prepass", dict(inspection_prepass or {}), source_layer="repair", source_module="job_context")
+    with _phase(phase_timer, f"{phase_prefix}_write_inspection_evidence"):
         if evidence_payload:
-            write_payload(knowledge, "analysis.evidence", evidence_payload, source_layer="repair", source_module="job_context")
+            write_payload(knowledge, "inspection.evidence", evidence_payload, source_layer="repair", source_module="job_context")
     with _phase(phase_timer, f"{phase_prefix}_write_extraction_failure"):
         write_payload(knowledge, "extraction.failure", dict(extraction_failure or {}), source_layer="repair", source_module="job_context")
     with _phase(phase_timer, f"{phase_prefix}_write_extraction_diagnostics"):
@@ -55,7 +55,7 @@ def write_repair_job_context(
         if route_payload.get("format"):
             write_payload(
                 knowledge,
-                "analysis.summary",
+                "inspection.summary",
                 {"format": str(route_payload.get("format") or ""), "confidence": getattr(verification, "confidence", None)},
                 source_layer="repair",
                 source_module="job_context",
@@ -68,8 +68,8 @@ def write_repair_job_context(
             normalized = normalize_runtime_route_evidence({
                 **dict(route_payload or {}),
                 "source_input": source_input,
-                "analysis_prepass": analysis_prepass,
-                "analysis_evidence": evidence_payload,
+                "inspection_prepass": inspection_prepass,
+                "inspection_evidence": evidence_payload,
                 "extraction_failure": extraction_failure,
                 "extraction_diagnostics": extraction_diagnostics,
                 "repair_history": repair_history,
@@ -237,7 +237,7 @@ def write_repair_archive_status(task: ArchiveTask, *, password: str | None = Non
         commit_task_knowledge(task, knowledge)
 
 
-def _analysis_evidence_payload(evidence: Any) -> dict[str, Any]:
+def _inspection_evidence_payload(evidence: Any) -> dict[str, Any]:
     if evidence is None:
         return {}
     details = getattr(evidence, "details", None)

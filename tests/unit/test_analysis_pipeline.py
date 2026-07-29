@@ -4,13 +4,14 @@ import zipfile
 import bz2
 import gzip
 import lzma
+import zstandard
 from binascii import crc32
 from io import BytesIO
 
 import pytest
 
 from sunpack.analysis.result import ArchiveFormatEvidence
-from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.analysis.engine import AnalysisEngine
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import get_analysis_module_registry
 from sunpack.analysis.view import SharedBinaryView
@@ -97,7 +98,7 @@ def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     path = tmp_path / "mixed.bin"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     by_format = {item.format: item for item in report.evidences}
 
     assert by_format["zip"].status == "extractable"
@@ -120,7 +121,7 @@ def test_analysis_defaults_to_shared_full_scan_when_head_and_tail_are_unresolved
     path = tmp_path / "middle_payload.mp4"
     path.write_bytes(prefix + zip_data + suffix)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
 
     zip_evidence = next(item for item in report.selected if item.format == "zip")
     assert report.prepass["source"] == "embedded_scan"
@@ -133,7 +134,7 @@ def test_analysis_respects_shared_embedded_scan_switch(tmp_path):
     path = tmp_path / "middle_payload.mp4"
     path.write_bytes(prefix + _zip_bytes(tmp_path) + prefix)
 
-    report = ArchiveAnalysisScheduler({"embedded_scan": {"enabled": False}}).analyze_path(str(path))
+    report = AnalysisEngine({"embedded_scan": {"enabled": False}}).analyze_path(str(path))
 
     assert report.selected == []
     assert report.prepass.get("source") != "embedded_scan"
@@ -143,14 +144,14 @@ def test_analysis_reuses_complete_detection_prepass_without_shared_rescan(tmp_pa
     path = tmp_path / "payload.bin"
     payload = b"p" * (2 * 1024 * 1024) + _zip_bytes(tmp_path) + b"s" * (2 * 1024 * 1024)
     path.write_bytes(payload)
-    scheduler = ArchiveAnalysisScheduler()
+    scheduler = AnalysisEngine()
     first = scheduler.analyze_path(str(path))
     assert first.prepass["source"] == "embedded_scan"
 
     def unexpected_scan(*args, **kwargs):
         raise AssertionError("complete detection prepass must bypass the shared scanner")
 
-    monkeypatch.setattr("sunpack.analysis.scheduler.scan_embedded_archives", unexpected_scan)
+    monkeypatch.setattr("sunpack.analysis.engine.scan_embedded_archives", unexpected_scan)
     reused = scheduler.analyze_path(str(path), initial_prepass=first.prepass)
     assert reused.prepass == first.prepass
 
@@ -180,7 +181,7 @@ def test_analysis_reuses_detection_hit_map_and_preserves_same_format_segments(tm
         "full_scan_bytes": len(payload),
         "source": "embedded_scan",
     }
-    report = ArchiveAnalysisScheduler().analyze_path(str(path), initial_prepass=prepass)
+    report = AnalysisEngine().analyze_path(str(path), initial_prepass=prepass)
     zip_evidence = next(item for item in report.evidences if item.format == "zip")
     assert [segment.start_offset for segment in zip_evidence.segments] == [
         len(prefix), len(prefix) + len(first) + len(gap),
@@ -193,7 +194,7 @@ def test_analysis_scheduler_runs_fuzzy_binary_profile_before_structure(tmp_path)
     path = tmp_path / "profiled.bin"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler({
+    report = AnalysisEngine({
         "analysis": {
             "fuzzy": {
                 "modules": [
@@ -235,7 +236,7 @@ def test_zip_embedded_local_header_without_eocd_keeps_embedded_start(tmp_path):
     path = tmp_path / "zip_sfx_split_head.exe"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     zip_evidence = {item.format: item for item in report.evidences}["zip"]
 
     assert zip_evidence.status == "not_found"
@@ -247,7 +248,7 @@ def test_zip_crc_mismatch_marks_content_integrity(tmp_path):
     data[14] ^= 0xFF
     path = _write_bytes(tmp_path / "crc_bad.zip", bytes(data))
 
-    zip_evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["zip"]
+    zip_evidence = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["zip"]
 
     assert zip_evidence.status == "extractable"
     assert "content_integrity_bad_or_unknown" in zip_evidence.segments[0].damage_flags
@@ -260,7 +261,7 @@ def test_zip_bad_central_directory_recovers_from_local_header(tmp_path):
     data[cd_offset:cd_offset + 2] = b"XX"
     path = _write_bytes(tmp_path / "cd_bad.zip", bytes(data))
 
-    zip_evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["zip"]
+    zip_evidence = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["zip"]
 
     assert zip_evidence.status == "damaged"
     assert zip_evidence.confidence == 0.70
@@ -276,7 +277,7 @@ def test_analysis_scheduler_prefers_structural_boundary_over_next_signature(tmp_
     path = tmp_path / "mixed.bin"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     by_format = {item.format: item for item in report.evidences}
 
     assert by_format["rar"].segments[0].end_offset == len(b"shell") + len(rar_data)
@@ -295,7 +296,7 @@ def test_analysis_scheduler_walks_rar_blocks_to_endarc(tmp_path, version, build_
     path = tmp_path / f"rar{version}.bin"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     rar = {item.format: item for item in report.evidences}["rar"]
 
     assert rar.status == "extractable"
@@ -312,7 +313,7 @@ def test_rar_missing_end_block_is_probably_truncated(tmp_path):
     rar_data = _rar5_bytes()[:-len(_rar5_block(5))]
     path = _write_bytes(tmp_path / "truncated.rar", rar_data)
 
-    rar = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["rar"]
+    rar = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["rar"]
 
     assert rar.status == "damaged"
     assert rar.confidence == 0.82
@@ -325,7 +326,7 @@ def test_rar_missing_main_header_marks_encrypted_unwalkable(tmp_path):
     rar_data = b"Rar!\x1a\x07\x01\x00" + _rar5_block(4)
     path = _write_bytes(tmp_path / "header_encrypted_like.rar", rar_data)
 
-    rar = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["rar"]
+    rar = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["rar"]
 
     assert rar.status == "damaged"
     assert rar.confidence == 0.72
@@ -340,7 +341,7 @@ def test_analysis_scheduler_uses_7z_start_header_for_segment_end(tmp_path):
     path = tmp_path / "seven.bin"
     path.write_bytes(payload)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     seven = {item.format: item for item in report.evidences}["7z"]
 
     assert seven.status == "extractable"
@@ -356,7 +357,7 @@ def test_7z_start_header_damage_leaves_only_start_trusted(tmp_path):
     seven_data[8] ^= 0xFF
     path = _write_bytes(tmp_path / "start_crc_bad.7z", bytes(seven_data))
 
-    seven = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["7z"]
+    seven = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["7z"]
 
     assert seven.status == "weak"
     assert seven.segments[0].start_offset == 0
@@ -371,7 +372,7 @@ def test_7z_next_header_crc_damage_keeps_boundary_but_lowers_integrity(tmp_path)
     seven_data[32 + next_offset] ^= 0xFF
     path = _write_bytes(tmp_path / "next_crc_bad.7z", bytes(seven_data))
 
-    seven = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["7z"]
+    seven = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["7z"]
 
     assert seven.status == "damaged"
     assert seven.segments[0].end_offset == len(seven_data)
@@ -396,7 +397,7 @@ def test_analysis_scheduler_reads_archives_across_split_volumes(
     first.write_bytes(data[:split_at])
     second.write_bytes(data[split_at:])
 
-    report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
+    report = AnalysisEngine().analyze_paths([str(first), str(second)])
     evidence = {item.format: item for item in report.evidences}[expected_format]
 
     assert report.fuzzy["binary_profile"]["sampled"] is True
@@ -411,7 +412,7 @@ def test_analysis_scheduler_detects_tar(tmp_path):
     tar_data = _tar_bytes()
     path = _write_bytes(tmp_path / "payload.tar", tar_data)
 
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    report = AnalysisEngine().analyze_path(str(path))
     tar = {item.format: item for item in report.evidences}["tar"]
 
     assert tar.status == "extractable"
@@ -426,15 +427,28 @@ def test_analysis_scheduler_detects_compression_streams(tmp_path):
         "gzip": (tmp_path / "payload.gz", gzip.compress(b"plain payload")),
         "bzip2": (tmp_path / "payload.bz2", bz2.compress(b"plain payload")),
         "xz": (tmp_path / "payload.xz", lzma.compress(b"plain payload", format=lzma.FORMAT_XZ)),
-        "zstd": (tmp_path / "payload.zst", b"\x28\xb5\x2f\xfd\x20\x00"),
+        "zstd": (tmp_path / "payload.zst", zstandard.ZstdCompressor().compress(b"plain payload")),
     }
 
     for fmt, (path, data) in samples.items():
         path.write_bytes(data)
-        evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}[fmt]
+        evidence = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}[fmt]
         assert evidence.status == "extractable"
         assert evidence.confidence >= 0.88
         assert evidence.segments[0].start_offset == 0
+
+
+def test_analysis_does_not_call_a_zstd_header_fragment_extractable(tmp_path):
+    path = tmp_path / "fragment.zst"
+    path.write_bytes(b"\x28\xb5\x2f\xfd\x20\x00")
+
+    evidence = {
+        item.format: item
+        for item in AnalysisEngine().analyze_path(str(path)).evidences
+    }["zstd"]
+
+    assert evidence.status != "extractable"
+    assert evidence.details["validation_complete"] is False
 
 
 def test_analysis_scheduler_detects_compressed_tar_variants(tmp_path):
@@ -447,7 +461,7 @@ def test_analysis_scheduler_detects_compressed_tar_variants(tmp_path):
 
     for fmt, (path, data) in samples.items():
         path.write_bytes(data)
-        evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}[fmt]
+        evidence = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}[fmt]
         assert evidence.status == "extractable"
         assert evidence.confidence >= 0.93
         assert evidence.details["inner_tar_verified"] is True
@@ -457,7 +471,7 @@ def test_tar_zst_requires_real_zstd_inner_tar(tmp_path):
     path = tmp_path / "payload.tar.zst"
     path.write_bytes(b"\x28\xb5\x2f\xfd\x20\x00")
 
-    evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["tar.zst"]
+    evidence = {item.format: item for item in AnalysisEngine().analyze_path(str(path)).evidences}["tar.zst"]
 
     assert evidence.status == "not_found"
     assert evidence.details["tar_probe_error"]
@@ -467,7 +481,7 @@ def test_analysis_module_config_can_disable_formats(tmp_path):
     path = tmp_path / "payload.bin"
     path.write_bytes(_zip_bytes(tmp_path) + b"Rar!\x1a\x07\x00")
 
-    report = ArchiveAnalysisScheduler({
+    report = AnalysisEngine({
         "analysis": {
             "modules": [
                 {"name": "zip", "enabled": True},
@@ -525,7 +539,7 @@ def test_analysis_scheduler_runs_modules_in_parallel(tmp_path):
     path.write_bytes(b"slow_a slow_b")
 
     start = time.perf_counter()
-    ArchiveAnalysisScheduler({
+    AnalysisEngine({
         "analysis": {
             "parallel": True,
             "max_workers": 2,

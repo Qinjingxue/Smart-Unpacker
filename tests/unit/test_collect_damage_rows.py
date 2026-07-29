@@ -12,7 +12,7 @@ from repair_training.formats.zip.observability import apply_zip_observability
 from repair_training.formats.zip.plugin import damage_feature_spec
 from repair_training.data.taxonomy import normalize_damage_record
 from sunpack.analysis import ArchiveAnalysisReport
-from sunpack.analysis.knowledge import write_analysis_report
+from sunpack.support.archive_format_projection import write_inspection_report
 from sunpack.analysis.result import ArchiveFormatEvidence
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -431,7 +431,7 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
         selected=[ArchiveFormatEvidence(format="zip", confidence=1.0, status="damaged", details={})],
     )
 
-    write_analysis_report(task, report)
+    write_inspection_report(task, report)
     knowledge = task.knowledge().to_dict()
     structure = knowledge["format"]["zip"]["structure"]
 

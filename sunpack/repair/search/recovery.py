@@ -388,7 +388,7 @@ def task_for_recovery_state(job: RepairJob, state: ArchiveState) -> ArchiveTask:
     parts = source.part_paths() or [main_path]
     bag = FactBag()
     fmt = state.format_hint or job.format or source.format_hint
-    bag.set("analysis.selected_format", fmt)
+    bag.set("archive.format_hint", fmt)
     bag.set("archive.input", source.to_dict())
     if isinstance(job.knowledge, dict) and job.knowledge:
         bag.set("archive.knowledge", dict(job.knowledge))
@@ -418,7 +418,7 @@ def task_for_materialized_recovery_state(job: RepairJob, state: ArchiveState, pa
     }
     knowledge = _knowledge_for_materialized_state(job, source)
     bag = FactBag()
-    bag.set("analysis.selected_format", fmt)
+    bag.set("archive.format_hint", fmt)
     bag.set("archive.input", dict(source))
     if job.password:
         bag.set("archive.password", job.password)

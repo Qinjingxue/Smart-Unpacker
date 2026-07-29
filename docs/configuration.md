@@ -223,16 +223,25 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 | --- | --- | --- |
 | `write_progress_manifest` | `bool` | 是否把内部 progress manifest 写成输出目录中的 `.sunpack/extraction_manifest.json`；默认只保留在内存里供 verification/repair 使用。 |
 
-## analysis
+## input_planning / inspect / analysis
 
-`analysis` 是 detection 和 extraction 之间的结构分析层，也会在 repair beam 候选评估中复用。它输出格式证据、边界、损坏标志、分卷视图和可供 worker 使用的虚拟输入。
+三组配置分别对应业务输入规划、repair 检查缓存和通用分析能力。正常主流程由 Detection/input planner 调用 Analysis 形成 worker 输入；只有 repair loop 进入 Inspect。
+
+`input_planning` 字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `enabled` | `bool` | 是否启用 analysis。 |
-| `task_parallel` | `bool` | 批量任务是否并行 analysis。 |
-| `task_max_workers` | `int` | 批量 analysis worker 上限。 |
-| `cache_size` | `int` | batch 级 analysis 结果缓存数量。 |
+| `enabled` | `bool` | 是否启用归档输入规划。 |
+| `task_parallel` | `bool` | 批量任务是否并行规划。 |
+| `task_max_workers` | `int` | 批量 input planning worker 上限。 |
+| `cache_size` | `int` | request 级中立 Analysis report 缓存数量。 |
+
+`inspect.cache_size` 控制 repair 状态报告缓存数量。cache identity 包含 source identity、分卷、patch digest 和 inspection request，避免不同修复状态互相污染。
+
+`analysis` 只配置单次通用能力调用：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
 | `parallel` | `bool` | 单个输入内是否并行跑格式模块。 |
 | `max_workers` | `int` | 单输入格式模块并发上限。 |
 | `max_concurrent_reads` | `int` | 单视图并发读取上限。 |
@@ -252,12 +261,12 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 }
 ```
 
-`embedded_scan.enabled` 默认为 `true`。Analysis 先执行低成本头尾 prepass；只有没有选出可解压结构时，才调用共享 Rust 全流 scanner。Detection 已经完成扫描时，Analysis 直接复用任务中的完整 prepass，不重复读取文件。完整深扫没有 Python fallback、扫描窗口或最大命中数配置。
+`embedded_scan.enabled` 默认为 `true`。Analysis 先执行低成本头尾 prepass；只有没有选出可解压结构时，才调用其内部 Rust 全流 scanner。Detection 已经完成扫描时，调用层把完整 prepass 放入 `AnalysisRequest`，避免重复读取文件。完整深扫没有 Python fallback、扫描窗口或最大命中数配置。
 
 重要行为：
 
-- analysis 的中等置信度不再直接触发 repair。流程会先尝试 extraction，再由 verification 判断是否需要 repair。
-- batch cache key 包含 patch digest、路径、大小、mtime 和分卷 mtimes，可避免 repair loop 和 beam 候选重复分析同一输入。
+- Analysis 的中等置信度不直接触发 repair。流程先尝试 extraction，再由 verification 判断是否需要 repair。
+- Input planning cache 以归档 source fingerprint 分组；Inspect cache 额外区分 patch digest 和 request fingerprint。
 - 结构读取和大文件 I/O 走 Rust binary view，不保留 Python 大文件解析 fallback。
 
 常见 module 参数：
@@ -417,7 +426,7 @@ print(sorted(get_repair_module_registry().all()))
 | --- | --- |
 | `deep_scan_single_candidate_ratio` | 单个未解决逻辑候选达到未解决候选总字节数的最低占比；默认 `0.3`。达到阈值的候选均执行可靠完整扫描。 |
 
-单候选占比决定“哪些逻辑候选获准执行整个 embedded payload precheck 模块”，不限制单个候选的读取范围。未获准的候选不会解析 PE、识别安装器或扫描嵌入归档。分卷只作为一个逻辑候选参与总大小计算，成员卷不会重复计数。获准后先识别 executable carrier；命中已知安装器会立即拒绝且不启动完整嵌入扫描。Detection 和 Analysis 共用 `sunpack.embedded` 的 Rust scanner、文件身份缓存和结果契约。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位；结构校验得到的候选和命中图会传给 Analysis，避免再次执行全流扫描。
+单候选占比决定“哪些逻辑候选获准执行整个 embedded payload precheck 模块”，不限制单个候选的读取范围。未获准的候选不会解析 PE、识别安装器或扫描嵌入归档。分卷只作为一个逻辑候选参与总大小计算，成员卷不会重复计数。获准后先识别 executable carrier；命中已知安装器会立即拒绝且不启动完整嵌入扫描。Detection 复用 `sunpack.analysis.embedded` 的 Rust scanner、文件身份缓存和结果契约。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位；结构校验得到的候选和命中图会传给 Analysis，避免再次执行全流扫描。
 
 ## detection.rule_pipeline
 

@@ -9,7 +9,7 @@ DEEP_SCAN_RULE = "deep_full_stream_scan"
 
 
 def evaluate_deep_bag(fact_bag: FactBag) -> RuleDecision:
-    from sunpack.embedded import scan_embedded_archives
+    from sunpack.analysis import scan_embedded_archives
 
     path = str(fact_bag.get("file.path") or fact_bag.get("candidate.entry_path") or "")
     if not path:

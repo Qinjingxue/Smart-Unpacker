@@ -5,7 +5,7 @@ from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.detection.options import DetectionOptions
 
 @dataclass
-class InspectResult:
+class DetectionInspectResult:
     path: str
     should_extract: bool
     score: int
@@ -20,11 +20,11 @@ class InspectResult:
     deciding_rule: str
     score_breakdown: list
 
-class InspectOrchestrator:
+class DetectionInspectOrchestrator:
     def __init__(self, config: Dict[str, Any], detection_options: DetectionOptions | None = None):
         self.detector = ArchiveTaskProvider(config, detection_options=detection_options)
 
-    def inspect(self, paths: List[str]) -> List[InspectResult]:
+    def inspect(self, paths: List[str]) -> List[DetectionInspectResult]:
         results = []
 
         for detection in self.detector.detect_targets(paths):
@@ -36,7 +36,7 @@ class InspectOrchestrator:
 
             decision = detection.decision
 
-            results.append(InspectResult(
+            results.append(DetectionInspectResult(
                 path=file_path_str,
                 should_extract=decision.should_extract,
                 score=decision.total_score,

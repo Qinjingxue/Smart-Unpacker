@@ -32,7 +32,7 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
     config = normalize_config({
         "recursive_extract": "1",
         "cli": {"quiet": True},
-        "analysis": {"enabled": False},
+        "input_planning": {"enabled": False},
         "detection": {"enabled": False},
         "repair": {"enabled": False},
         "verification": {"enabled": False, "methods": []},

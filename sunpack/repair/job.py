@@ -10,8 +10,8 @@ class RepairJob:
     source_input: dict[str, Any]
     format: str = ""
     confidence: float = 0.0
-    analysis_evidence: Any = None
-    analysis_prepass: dict[str, Any] = field(default_factory=dict)
+    inspection_evidence: Any = None
+    inspection_prepass: dict[str, Any] = field(default_factory=dict)
     fuzzy_profile: dict[str, Any] = field(default_factory=dict)
     extraction_failure: dict[str, Any] | None = None
     extraction_diagnostics: dict[str, Any] = field(default_factory=dict)

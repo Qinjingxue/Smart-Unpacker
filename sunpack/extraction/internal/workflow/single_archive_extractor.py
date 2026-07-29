@@ -68,7 +68,7 @@ class SingleArchiveExtractor:
             with _phase(phase_timer, f"{phase_prefix}_read_extractable_segments"):
                 segments = [
                     dict(item)
-                    for item in knowledge_view.analysis_extractable_segments(task)
+                    for item in knowledge_view.source_extractable_segments(task)
                     if isinstance(item, dict) and isinstance(item.get("archive_input"), dict)
                 ]
             if segments:

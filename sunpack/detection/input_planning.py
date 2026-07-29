@@ -6,13 +6,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from typing import Any, Callable
 
-from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
-from sunpack.analysis.knowledge import (
-    write_analysis_error,
-    write_analysis_refresh,
-    write_analysis_report,
-    write_extractable_segments,
-    write_selected_segment,
+from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalyzer
+from sunpack.analysis.request import AnalysisRequest
+from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
+from sunpack.support.archive_input_projection import (
+    write_source_extractable_segments,
+    write_source_selected_segment,
+)
+from sunpack.support.archive_knowledge_writer import (
+    commit_task_knowledge,
+    ensure_knowledge,
+    write_payload,
 )
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.archive_input import (
@@ -26,8 +30,8 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
-class ArchiveAnalysisStage:
-    """Own analysis-layer task batching, caching, and report projection."""
+class ArchiveInputPlanningStage:
+    """Turn neutral Analysis reports into main-flow archive inputs."""
     def __init__(
         self,
         config: dict[str, Any] | None = None,
@@ -40,29 +44,29 @@ class ArchiveAnalysisStage:
         self.executor_pool = executor_pool
         self.module_executor_pool = module_executor_pool
         self.workload_executor = workload_executor
-        analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
-        self.enabled = bool(analysis_config.get("enabled", True))
-        self.scheduler = (
-            ArchiveAnalysisScheduler(self.config, executor_pool=module_executor_pool)
+        planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}
+        self.enabled = bool(planning_config.get("enabled", True))
+        self._report_cache: dict[tuple, ArchiveAnalysisReport] = {}
+        self._report_cache_lock = threading.Lock()
+        self.analyzer = (
+            ArchiveAnalyzer(self.config, executor_pool=module_executor_pool)
             if self.enabled
             else None
         )
-        self._report_cache: dict[tuple, ArchiveAnalysisReport] = {}
-        self._report_cache_lock = threading.Lock()
 
-    def analyze_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
-        if not self.enabled or self.scheduler is None:
+    def plan_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
+        if not self.enabled or self.analyzer is None:
             return tasks
-        groups = self._analysis_task_groups(tasks)
+        groups = self._planning_task_groups(tasks)
         max_workers = self._task_max_workers(len(groups))
         if max_workers > 1:
             grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
             if self.workload_executor is not None:
                 completed_groups = self.workload_executor(
                     groups,
-                    self._analyze_task_group,
+                    self._plan_task_group,
                     max_workers=max_workers,
-                    workload_label="analysis-task",
+                    workload_label="input-planning-task",
                 )
                 for group_result in completed_groups:
                     for index, task_results in group_result:
@@ -79,7 +83,7 @@ class ArchiveAnalysisStage:
             )
             with executor_context as executor:
                 futures = {
-                    executor.submit(self._analyze_task_group, group): group
+                    executor.submit(self._plan_task_group, group): group
                     for group in groups
                 }
                 for future in as_completed(futures):
@@ -92,24 +96,24 @@ class ArchiveAnalysisStage:
             ]
         expanded_tasks: list[ArchiveTask] = []
         for group in groups:
-            for _index, task_results in self._analyze_task_group(group):
+            for _index, task_results in self._plan_task_group(group):
                 expanded_tasks.extend(task_results)
         return expanded_tasks
 
     def _task_max_workers(self, task_count: int) -> int:
         if task_count <= 1:
             return 1
-        analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
-        if not bool(analysis_config.get("task_parallel", True)):
+        planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}
+        if not bool(planning_config.get("task_parallel", True)):
             return 1
-        configured = analysis_config.get("task_max_workers")
+        configured = planning_config.get("task_max_workers")
         if configured is None:
             configured = min(4, os.cpu_count() or 1)
         return max(1, min(int(configured or 1), task_count))
 
     def _remember_report(self, cache_key: tuple, report: ArchiveAnalysisReport) -> None:
-        analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
-        limit = max(0, int(analysis_config.get("cache_size", 512) or 512))
+        planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}
+        limit = max(0, int(planning_config.get("cache_size", 512) or 512))
         if limit <= 0:
             return
         with self._report_cache_lock:
@@ -119,14 +123,14 @@ class ArchiveAnalysisStage:
 
     def remember_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
         """Seed the shared cache with a coordinator-produced analysis report."""
-        self._remember_report(self._analysis_cache_key(task), report)
+        self._remember_report(self._report_cache_key(task), report)
 
     def clear_report_cache(self) -> None:
         """Release archive-specific reports after a completed request group."""
         with self._report_cache_lock:
             self._report_cache.clear()
 
-    def _analysis_cache_key(self, task: ArchiveTask) -> tuple:
+    def _report_cache_key(self, task: ArchiveTask) -> tuple:
         return ("source", json.dumps(knowledge_view.source_fingerprint(task), ensure_ascii=False, sort_keys=True, default=str))
 
     @staticmethod
@@ -138,13 +142,13 @@ class ArchiveAnalysisStage:
         except OSError:
             return (normalized, -1, -1)
 
-    def _analysis_task_groups(self, tasks: list[ArchiveTask]) -> list[list[tuple[int, ArchiveTask]]]:
+    def _planning_task_groups(self, tasks: list[ArchiveTask]) -> list[list[tuple[int, ArchiveTask]]]:
         grouped: dict[tuple, list[tuple[int, ArchiveTask]]] = {}
         order: list[tuple] = []
         for index, task in enumerate(tasks):
             try:
                 task.ensure_archive_state()
-                cache_key = self._analysis_cache_key(task)
+                cache_key = self._report_cache_key(task)
             except Exception:
                 cache_key = ("task", id(task))
             if cache_key not in grouped:
@@ -153,21 +157,19 @@ class ArchiveAnalysisStage:
             grouped[cache_key].append((index, task))
         return [grouped[key] for key in order]
 
-    def _analyze_task_group(self, group: list[tuple[int, ArchiveTask]]) -> list[tuple[int, list[ArchiveTask]]]:
+    def _plan_task_group(self, group: list[tuple[int, ArchiveTask]]) -> list[tuple[int, list[ArchiveTask]]]:
         if not group:
             return []
         if len(group) == 1:
             index, task = group[0]
-            _, task_results = self._analyze_task_to_tasks(task)
+            _, task_results = self._plan_task_to_tasks(task)
             return [(index, task_results)]
         first_index, first_task = group[0]
-        report, first_results = self._analyze_task_to_tasks(first_task)
+        report, first_results = self._plan_task_to_tasks(first_task)
         results = [(first_index, first_results)]
         if report is None:
             for index, task in group[1:]:
-                task.fact_bag.set("analysis.status", knowledge_view.analysis_status(first_task) or "error")
-                if knowledge_view.analysis_error(first_task):
-                    task.fact_bag.set("analysis.error", knowledge_view.analysis_error(first_task))
+                task.fact_bag.set("input_planning.status", "error")
                 results.append((index, [task]))
             return results
         for index, task in group[1:]:
@@ -175,63 +177,70 @@ class ArchiveAnalysisStage:
             results.append((index, self._tasks_from_report(task, task_report)))
         return results
 
-    def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
-        report, _ = self._analyze_task_to_tasks(task)
+    def plan_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
+        report, _ = self._plan_task_to_tasks(task)
         return report
 
-    def analyze_task_to_tasks(self, task: ArchiveTask) -> list[ArchiveTask]:
-        _, tasks = self._analyze_task_to_tasks(task)
+    def plan_task_to_tasks(self, task: ArchiveTask) -> list[ArchiveTask]:
+        _, tasks = self._plan_task_to_tasks(task)
         return tasks
 
-    def refresh_task_analysis(self, task: ArchiveTask, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis_refresh") -> ArchiveAnalysisReport | None:
-        if not self.enabled or self.scheduler is None:
-            return None
-        with _phase(phase_timer, f"{phase_prefix}_ensure_archive_state"):
-            task.ensure_archive_state()
-        try:
-            report = self._get_or_analyze_report(task, phase_timer=phase_timer, phase_prefix=phase_prefix)
-        except Exception as exc:
-            task.fact_bag.set("analysis.status", "error")
-            task.fact_bag.set("analysis.error", str(exc))
-            write_analysis_error(task, str(exc))
-            return None
-        with _phase(phase_timer, f"{phase_prefix}_tasks_from_report"):
-            self._tasks_from_report(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
-        return report
-
-    def _analyze_task_to_tasks(self, task: ArchiveTask) -> tuple[ArchiveAnalysisReport | None, list[ArchiveTask]]:
-        if self.scheduler is None:
+    def _plan_task_to_tasks(self, task: ArchiveTask) -> tuple[ArchiveAnalysisReport | None, list[ArchiveTask]]:
+        if self.analyzer is None:
             return None, [task]
         task.ensure_archive_state()
         try:
-            report = self._get_or_analyze_report(task)
+            report = self._get_or_create_report(task)
         except Exception as exc:
-            task.fact_bag.set("analysis.status", "error")
-            task.fact_bag.set("analysis.error", str(exc))
-            write_analysis_error(task, str(exc))
+            task.fact_bag.set("input_planning.status", "error")
+            task.fact_bag.set("input_planning.error", str(exc))
+            _write_plan_error(task, str(exc))
             return None, [task]
 
         return report, self._tasks_from_report(task, report)
 
-    def _get_or_analyze_report(self, task: ArchiveTask, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> ArchiveAnalysisReport:
+    def _get_or_create_report(self, task: ArchiveTask, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "input_planning") -> ArchiveAnalysisReport:
         with _phase(phase_timer, f"{phase_prefix}_cache_key"):
-            cache_key = self._analysis_cache_key(task)
+            cache_key = self._report_cache_key(task)
         with _phase(phase_timer, f"{phase_prefix}_cache_lookup"):
             with self._report_cache_lock:
                 report = self._report_cache.get(cache_key)
         if report is None:
-            with _phase(phase_timer, f"{phase_prefix}_scheduler_analyze"):
-                report = self.scheduler.analyze_task(task)
+            with _phase(phase_timer, f"{phase_prefix}_analyze_source"):
+                report = self._analyze_task(task)
             with _phase(phase_timer, f"{phase_prefix}_remember_report"):
                 self._remember_report(cache_key, report)
             return report
         return replace(report, cache_hits=report.cache_hits + 1)
 
-    def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> list[ArchiveTask]:
+    def _analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport:
+        state = task.archive_state()
+        if state.patches:
+            source = PatchedAnalysisSource(
+                state,
+                report_path=state.source.entry_path or task.main_path,
+            )
+        else:
+            source = analysis_source_for_descriptor(
+                state.to_archive_input_descriptor(),
+                report_path=task.main_path,
+            )
+        prepass = task.fact_bag.get("analysis.signature_prepass")
+        initial_prepass = (
+            dict(prepass)
+            if isinstance(prepass, dict) and prepass.get("full_scan_complete")
+            else None
+        )
+        return self.analyzer.analyze(
+            source,
+            AnalysisRequest(initial_prepass=initial_prepass),
+        )
+
+    def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "input_planning") -> list[ArchiveTask]:
         with _phase(phase_timer, f"{phase_prefix}_record_report"):
             self._record_report(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix, record_state=False, write_knowledge=False)
         with _phase(phase_timer, f"{phase_prefix}_set_report_path"):
-            task.fact_bag.set("analysis.report_path", report.path)
+            task.fact_bag.set("input_planning.report_path", report.path)
         with _phase(phase_timer, f"{phase_prefix}_extractable_segments"):
             candidates = self._extractable_segments(report)
         with _phase(phase_timer, f"{phase_prefix}_write_segments_build_payload"):
@@ -247,18 +256,18 @@ class ArchiveAnalysisStage:
                 with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
                     self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
             with _phase(phase_timer, f"{phase_prefix}_batched_write"):
-                write_analysis_refresh(task, report, extractable_segments=segment_payloads, selected_segment=selected_segment)
+                _write_plan_knowledge(task, report, segment_payloads, selected_segment)
             with _phase(phase_timer, f"{phase_prefix}_state_update"):
-                self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
+                self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
             return [task]
         evidence, segment, index = candidates[0]
         selected_segment = (evidence, segment, index)
         with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
             self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
         with _phase(phase_timer, f"{phase_prefix}_batched_write"):
-            write_analysis_refresh(task, report, extractable_segments=segment_payloads, selected_segment=selected_segment)
+            _write_plan_knowledge(task, report, segment_payloads, selected_segment)
         with _phase(phase_timer, f"{phase_prefix}_state_update"):
-            self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
+            self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
         return [task]
 
     def _apply_selected_segment(
@@ -271,12 +280,12 @@ class ArchiveAnalysisStage:
         write_knowledge: bool = True,
     ) -> None:
         segment_payload = self._segment_payload(task, evidence, segment)
-        task.fact_bag.set("analysis.status", evidence.status)
-        task.fact_bag.set("analysis.selected_format", evidence.format)
-        task.fact_bag.set("analysis.segment_index", index)
-        task.fact_bag.set("analysis.segment", segment_payload)
+        task.fact_bag.set("input_planning.status", evidence.status)
+        task.fact_bag.set("archive.format_hint", evidence.format)
+        task.fact_bag.set("source.segment_index", index)
+        task.fact_bag.set("source.segment", segment_payload)
         if write_knowledge:
-            write_selected_segment(task, evidence, segment, index=index)
+            write_source_selected_segment(task, evidence, segment, index=index)
 
     def _record_report(
         self,
@@ -284,20 +293,18 @@ class ArchiveAnalysisStage:
         report: ArchiveAnalysisReport,
         *,
         phase_timer: Callable[..., Any] | None = None,
-        phase_prefix: str = "analysis",
+        phase_prefix: str = "input_planning",
         record_state: bool = True,
         write_knowledge: bool = True,
     ) -> None:
         selected = _best_selected(report)
         with _phase(phase_timer, f"{phase_prefix}_record_report_fact_bag_basic"):
-            task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
-            task.fact_bag.set("analysis.read_bytes", report.read_bytes)
-            task.fact_bag.set("analysis.cache_hits", report.cache_hits)
-            task.fact_bag.set("analysis.prepass", report.prepass)
-            task.fact_bag.set("analysis.fuzzy", report.fuzzy)
+            task.fact_bag.set("input_planning.status", "extractable" if report.has_extractable else "not_extractable")
+            task.fact_bag.set("input_planning.read_bytes", report.read_bytes)
+            task.fact_bag.set("input_planning.cache_hits", report.cache_hits)
             if selected is not None:
-                task.fact_bag.set("analysis.selected_format", selected.format)
-                task.fact_bag.set("analysis.confidence", float(selected.confidence or 0.0))
+                task.fact_bag.set("archive.format_hint", selected.format)
+                task.fact_bag.set("input_planning.confidence", float(selected.confidence or 0.0))
         with _phase(phase_timer, f"{phase_prefix}_record_report_evidence_payload"):
             evidences = [
                 {
@@ -311,15 +318,15 @@ class ArchiveAnalysisStage:
                 for evidence in report.evidences
             ]
         with _phase(phase_timer, f"{phase_prefix}_record_report_fact_bag_evidences"):
-            task.fact_bag.set("analysis.evidences", evidences)
+            task.fact_bag.set("input_planning.evidences", evidences)
         if write_knowledge:
             with _phase(phase_timer, f"{phase_prefix}_record_report_write_knowledge"):
-                write_analysis_report(task, report)
+                _write_plan_knowledge(task, report, [], None)
         if record_state:
             with _phase(phase_timer, f"{phase_prefix}_record_report_state_analysis"):
-                self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
+                self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
 
-    def _record_state_analysis(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> None:
+    def _record_planning_state(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "input_planning") -> None:
         with _phase(phase_timer, f"{phase_prefix}_record_state_get_archive_state"):
             state = task.archive_state()
         with _phase(phase_timer, f"{phase_prefix}_record_state_build_payload"):
@@ -394,12 +401,12 @@ class ArchiveAnalysisStage:
         candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]],
         *,
         phase_timer: Callable[..., Any] | None = None,
-        phase_prefix: str = "analysis",
+        phase_prefix: str = "input_planning",
     ) -> None:
         with _phase(phase_timer, f"{phase_prefix}_write_segments_build_payload"):
             payloads = self._extractable_segment_payloads(task, candidates)
         with _phase(phase_timer, f"{phase_prefix}_write_segments_commit"):
-            write_extractable_segments(task, payloads)
+            write_source_extractable_segments(task, payloads)
 
     def _extractable_segment_payloads(
         self,
@@ -595,7 +602,7 @@ class ArchiveAnalysisStage:
 
     def _segment_logical_name(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, index: int) -> str:
         base = str(task.logical_name or os.path.splitext(os.path.basename(task.main_path))[0] or "archive")
-        if knowledge_view.get(task, "analysis.selected_segment.index", 0):
+        if knowledge_view.get(task, "source.selected_segment.index", 0):
             return base
         if index <= 0:
             return base
@@ -657,3 +664,44 @@ def _segment_is_shadowed_by_composite(
     if int(segment.end_offset) > int(composite_segment.end_offset):
         return False
     return True
+
+
+def _write_plan_knowledge(
+    task: ArchiveTask,
+    report: ArchiveAnalysisReport,
+    segments: list[dict[str, Any]],
+    selected_segment: tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None,
+) -> None:
+    selected = _best_selected(report)
+    knowledge = ensure_knowledge(task)
+    write_payload(
+        knowledge,
+        "input_planning",
+        {
+            "status": "extractable" if report.has_extractable else "not_extractable",
+            "report_path": report.path,
+            "read_bytes": report.read_bytes,
+            "cache_hits": report.cache_hits,
+            "selected_format": getattr(selected, "format", "") if selected is not None else "",
+            "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
+        },
+        source_layer="detection",
+        source_module="archive_input_planner",
+    )
+    commit_task_knowledge(task, knowledge)
+    write_source_extractable_segments(task, segments)
+    if selected_segment is not None:
+        evidence, segment, index = selected_segment
+        write_source_selected_segment(task, evidence, segment, index=index)
+
+
+def _write_plan_error(task: ArchiveTask, error: str) -> None:
+    knowledge = ensure_knowledge(task)
+    write_payload(
+        knowledge,
+        "input_planning",
+        {"status": "error", "error": str(error or "")},
+        source_layer="detection",
+        source_module="archive_input_planner",
+    )
+    commit_task_knowledge(task, knowledge)

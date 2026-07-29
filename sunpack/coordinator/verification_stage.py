@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
+from sunpack.support.archive_format_projection import write_zip_runtime_evidence_facts
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.verification import VerificationResult

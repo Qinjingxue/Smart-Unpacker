@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from sunpack.analysis.knowledge import _format_structure_payload
+from sunpack.support.archive_format_projection import _format_structure_payload
 from sunpack.repair.model.diagnosis.atomic_format_graph import DEFINITIONS
 from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample_for_format
 

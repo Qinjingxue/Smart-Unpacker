@@ -6,7 +6,7 @@ from sunpack.contracts.rules import RuleEffect
 from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement
 from sunpack.detection.pipeline.rules.registry import register_rule
-from sunpack.embedded import embedded_result_from_dict
+from sunpack.analysis import embedded_result_from_dict
 
 
 DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO = 0.3

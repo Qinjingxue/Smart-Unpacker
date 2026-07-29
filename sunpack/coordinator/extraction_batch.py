@@ -9,7 +9,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.inspect import ArchiveInspector
 from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
 from sunpack.postprocess.recovery_outputs import (
     cleanup_beam_evaluations,
@@ -127,7 +127,7 @@ class ExtractionBatchRunner:
         runtime_scheduler: ConcurrencyScheduler,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
-        analysis_stage: ArchiveAnalysisStage | None = None,
+        inspector: ArchiveInspector | None = None,
         progress_reporter: Any | None = None,
         executor_pool=None,
     ):
@@ -141,10 +141,7 @@ class ExtractionBatchRunner:
         self.i18n = I18nContext(cli_config.get("language"))
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
-        self.analysis_stage = analysis_stage or ArchiveAnalysisStage(
-            self.config,
-            workload_executor=self._execute_analysis_workload,
-        )
+        self.inspector = inspector or ArchiveInspector(self.config)
         self.progress_reporter = progress_reporter
         self.executor_pool = executor_pool
         self.progress_round_index = 1
@@ -184,7 +181,6 @@ class ExtractionBatchRunner:
             return []
 
         self.prepare_tasks(tasks)
-        tasks = self.analysis_stage.analyze_tasks(tasks)
         self.directory_password_contexts.annotate(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
@@ -415,21 +411,6 @@ class ExtractionBatchRunner:
         )
         return executor.execute_all(tasks, worker, workload_label=workload_label)
 
-    def _execute_analysis_workload(
-        self,
-        tasks,
-        worker,
-        *,
-        max_workers: int,
-        workload_label: str,
-    ):
-        executor = TaskExecutor(
-            self.runtime_scheduler,
-            max_workers=max_workers,
-            executor_pool=self.executor_pool,
-        )
-        return executor.execute_all(tasks, worker, workload_label=workload_label)
-
     def _stage_max_workers(
         self,
         *,
@@ -505,6 +486,7 @@ class ExtractionBatchRunner:
                     if state.can_attempt(trigger="verification", failure=result):
                         task.fact_bag.set(REPAIR_ENTERED_FACT, True)
                         self._report_task_status(task, "repairing")
+                        self._inspect_before_repair(task)
                         handled = self._repair_after_verification_decision_with_beam(
                             task,
                             result,
@@ -519,7 +501,7 @@ class ExtractionBatchRunner:
                             cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                             return handled
                         if handled:
-                            self._refresh_analysis_after_repair(task)
+                            self._refresh_inspection_after_repair(task)
                             continue
                 selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
                 if selected is not None:
@@ -548,6 +530,7 @@ class ExtractionBatchRunner:
                 if state.can_attempt(trigger="verification"):
                     task.fact_bag.set(REPAIR_ENTERED_FACT, True)
                     self._report_task_status(task, "repairing")
+                    self._inspect_before_repair(task)
                     if self._repair_policy_disables_beam(task, result, verification):
                         handled = self._repair_after_verification_with_scheduler(
                             task,
@@ -556,7 +539,7 @@ class ExtractionBatchRunner:
                             state,
                         )
                         if handled:
-                            self._refresh_analysis_after_repair(task)
+                            self._refresh_inspection_after_repair(task)
                             continue
                     elif self._beam_enabled():
                         shelve_outcome_if_needed(incumbent_outcome, out_dir)
@@ -580,7 +563,7 @@ class ExtractionBatchRunner:
                                 cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                                 return handled
                             if handled:
-                                self._refresh_analysis_after_repair(task)
+                                self._refresh_inspection_after_repair(task)
                                 continue
             selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=verification.decision_hint != DECISION_REPAIR)
             if selected is not None:
@@ -622,22 +605,26 @@ class ExtractionBatchRunner:
             return False
         return bool(result.partial_outputs or verification.partial_files or verification.complete_files or verification.unverified_files)
 
-    def _refresh_analysis_after_repair(self, task: ArchiveTask) -> None:
+    def _refresh_inspection_after_repair(self, task: ArchiveTask) -> None:
         try:
-            refresh = getattr(self.analysis_stage, "refresh_task_analysis", None)
-            if callable(refresh):
-                refresh(task)
-                return
-            analyze_to_tasks = getattr(self.analysis_stage, "analyze_task_to_tasks", None)
-            if callable(analyze_to_tasks):
-                analyze_to_tasks(task)
-                return
-            analyze_task = getattr(self.analysis_stage, "analyze_task", None)
-            if callable(analyze_task):
-                analyze_task(task)
+            self.inspector.refresh_task(task)
         except Exception as exc:
             _append_repair_candidate_log(task, {
-                "phase": "analysis_refresh_failed",
+                "phase": "inspection_refresh_failed",
+                "error": str(exc),
+            })
+
+    def _inspect_before_repair(self, task: ArchiveTask) -> None:
+        """Populate repair evidence immediately before the first repair decision."""
+        try:
+            feedback = self.inspector.refresh_task(task)
+            _append_repair_candidate_log(task, {
+                "phase": "inspection_before_repair",
+                "feedback": feedback.to_score_payload(),
+            })
+        except Exception as exc:
+            _append_repair_candidate_log(task, {
+                "phase": "inspection_before_repair_failed",
                 "error": str(exc),
             })
 
@@ -1277,7 +1264,7 @@ class ExtractionBatchRunner:
             extractor=self.extractor,
             verifier=self.verifier,
             repair_stage=self.repair_stage,
-            analysis_stage=self.analysis_stage,
+            inspector=self.inspector,
             runtime_scheduler=runtime_scheduler,
             light_verify=self._verify_beam_candidate_light,
             needs_full_verification=lambda candidate, light: self._beam_candidate_needs_full_verification(
@@ -1286,7 +1273,19 @@ class ExtractionBatchRunner:
             ),
             source_digest=_source_input_digest,
         )
-        transition = evaluator.evaluate(task, item.candidate, temp_dir=temp_dir)
+        transition = evaluator.evaluate(
+            task,
+            item.candidate,
+            temp_dir=temp_dir,
+            inspect_candidate=True,
+        )
+        if transition.inspection_feedback:
+            _append_repair_candidate_log(task, {
+                "phase": "candidate_inspection_shadow",
+                "module": item.candidate.module_name,
+                "source_digest": transition.source_digest,
+                "feedback": dict(transition.inspection_feedback),
+            })
         evaluated[transition.source_digest] = (
             item.candidate,
             transition.result,

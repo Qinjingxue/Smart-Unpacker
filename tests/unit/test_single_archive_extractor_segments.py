@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from sunpack.analysis.knowledge import write_extractable_segments
+from sunpack.support.archive_input_projection import write_source_extractable_segments
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
@@ -107,7 +107,7 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
     carrier = tmp_path / "carrier.bin"
     carrier.write_bytes(b"prefix-zip-rar-tail")
     task = _task(carrier)
-    write_extractable_segments(task, [
+    write_source_extractable_segments(task, [
         {
             "segment_id": "embedded_01_zip",
             "format": "zip",
@@ -172,7 +172,7 @@ def test_single_embedded_segment_exposes_logical_input_for_verification(tmp_path
         "logical_name": "payload",
         "parts": [{"path": str(carrier), "role": "main", "start": 5, "end": 8}],
     }
-    write_extractable_segments(task, [{
+    write_source_extractable_segments(task, [{
         "segment_id": "embedded_01_zip",
         "format": "zip",
         "logical_name": "payload",

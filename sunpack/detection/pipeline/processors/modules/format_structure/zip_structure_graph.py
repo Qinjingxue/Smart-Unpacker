@@ -1,14 +1,12 @@
 from typing import Any
 
-from sunpack_native import inspect_zip_structure_graph as _native_inspect_zip_structure_graph
-
+from sunpack.analysis import ArchiveAnalyzer, ZipDeepProbeOptions
+from sunpack.analysis.probes.zip import DEFAULT_MAX_DEEP_ENTRIES, probe_zip_structure_graph_path
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
-from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
-DEFAULT_MAX_ENTRIES = 128
+DEFAULT_MAX_ENTRIES = DEFAULT_MAX_DEEP_ENTRIES
 
 
 def inspect_zip_structure_graph(
@@ -16,12 +14,11 @@ def inspect_zip_structure_graph(
     max_entries: int = DEFAULT_MAX_ENTRIES,
     identity: tuple[str, int, int] | None = None,
 ) -> dict[str, Any]:
-    key = (identity or file_identity(path), int(max_entries))
-    return cached_value(
-        "format_zip_structure_graph",
-        key,
-        lambda: dict(_native_inspect_zip_structure_graph(path, max_entries)),
-    )
+    return probe_zip_structure_graph_path(
+        path,
+        ZipDeepProbeOptions(max_entries=max_entries),
+        identity=identity,
+    ).to_raw_dict()
 
 
 @register_processor(
@@ -37,8 +34,7 @@ def inspect_zip_structure_graph(
 )
 def process_zip_structure_graph(context: FactProcessorContext) -> dict[str, Any]:
     path = context.fact_bag.get("file.path") or ""
-    return inspect_zip_structure_graph(
+    return ArchiveAnalyzer(context.config).probe_zip_structure_graph(
         path,
-        int(context.fact_config.get("max_entries", DEFAULT_MAX_ENTRIES)),
-        file_identity_for_context(context, path),
-    )
+        ZipDeepProbeOptions(max_entries=int(context.fact_config.get("max_entries", DEFAULT_MAX_ENTRIES))),
+    ).to_raw_dict()

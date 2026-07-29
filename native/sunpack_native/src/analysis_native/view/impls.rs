@@ -131,6 +131,15 @@ impl AnalysisBinaryView {
             let header_type = fixed[2];
             let header_flags = u16_le(&fixed, 3);
             let header_size = u16_le(&fixed, 5) as u64;
+            if index == 0 {
+                result.set_item("first_header_offset", cursor)?;
+                result.set_item("first_header_type", header_type)?;
+                result.set_item("first_header_size", header_size)?;
+            } else if index == 1 {
+                result.set_item("second_block_checked", true)?;
+                result.set_item("second_block_type", header_type)?;
+                result.set_item("second_block_size", header_size)?;
+            }
             if !matches!(header_type, 0x72..=0x7B) {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar4_block_unknown_type")?;
@@ -142,7 +151,14 @@ impl AnalysisBinaryView {
                 return Ok(());
             }
             let full_header = self.read_at_bytes(cursor, header_size as usize)?;
-            if (crc32(&full_header[2..]) & 0xFFFF) != header_crc as u32 {
+            let crc_ok = (crc32(&full_header[2..]) & 0xFFFF) == header_crc as u32;
+            if index == 0 {
+                result.set_item("header_crc_checked", true)?;
+                result.set_item("header_crc_ok", crc_ok)?;
+            } else if index == 1 {
+                result.set_item("second_block_ok", crc_ok)?;
+            }
+            if !crc_ok {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar4_block_crc_mismatch")?;
                 result.set_item("damaged_header_type", header_type)?;
@@ -178,6 +194,8 @@ impl AnalysisBinaryView {
             }
             if index == 0 {
                 evidence.append("rar4:main_header")?;
+            } else if index == 1 {
+                result.set_item("block_walk_ok", true)?;
             }
             if header_type == 0x7B {
                 evidence.append("rar4:end_block")?;
@@ -245,13 +263,29 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_header_flags_vint_missing")?;
                 return Ok(());
             };
+            if index == 0 {
+                result.set_item("first_header_offset", cursor)?;
+                result.set_item("first_header_type", header_type)?;
+                result.set_item("first_header_size", header_size)?;
+            } else if index == 1 {
+                result.set_item("second_block_checked", true)?;
+                result.set_item("second_block_type", header_type)?;
+                result.set_item("second_block_size", header_size)?;
+            }
             if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_block_unknown_non_skippable_type")?;
                 return Ok(());
             }
             let stored_crc = u32_le(&full, 0);
-            if crc32(&full[4..]) != stored_crc {
+            let crc_ok = crc32(&full[4..]) == stored_crc;
+            if index == 0 {
+                result.set_item("header_crc_checked", true)?;
+                result.set_item("header_crc_ok", crc_ok)?;
+            } else if index == 1 {
+                result.set_item("second_block_ok", crc_ok)?;
+            }
+            if !crc_ok {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_block_crc_mismatch")?;
                 result.set_item("damaged_header_type", header_type)?;
@@ -302,6 +336,7 @@ impl AnalysisBinaryView {
                 result.set_item("strong_accept", true)?;
                 result.set_item("header_encrypted", true)?;
                 result.set_item("password_required", true)?;
+                result.set_item("block_walk_ok", true)?;
                 result.set_item("blocks_checked", 1usize)?;
                 result.set_item("segment_end", 0u64)?;
                 result.set_item("evidence", evidence)?;
@@ -314,6 +349,8 @@ impl AnalysisBinaryView {
             }
             if index == 0 {
                 evidence.append("rar5:main_header")?;
+            } else if index == 1 {
+                result.set_item("block_walk_ok", true)?;
             }
             if header_type == 5 {
                 evidence.append("rar5:end_block")?;
@@ -346,6 +383,16 @@ impl AnalysisBinaryView {
         result.set_item("magic_matched", false)?;
         result.set_item("plausible", false)?;
         result.set_item("error", "")?;
+        result.set_item("file_size", self.reader.len())?;
+        result.set_item("stored_checksum", 0u64)?;
+        result.set_item("computed_checksum", 0u64)?;
+        result.set_item("member_size", 0u64)?;
+        result.set_item("ustar_magic", false)?;
+        result.set_item("zero_block", false)?;
+        result.set_item("fuzzy_name_nonempty", false)?;
+        result.set_item("fuzzy_numeric_fields_valid", false)?;
+        result.set_item("fuzzy_typeflag_valid", false)?;
+        result.set_item("fuzzy_payload_in_range", false)?;
         result.set_item("entries_checked", 0usize)?;
         result.set_item("entry_walk_ok", false)?;
         result.set_item("end_zero_blocks", false)?;
@@ -366,6 +413,11 @@ impl AnalysisBinaryView {
                 break;
             }
             if header.iter().all(|byte| *byte == 0) {
+                if checked == 0 {
+                    result.set_item("zero_block", true)?;
+                    result.set_item("error", "leading_zero_block")?;
+                    return Ok(result);
+                }
                 zero_blocks += 1;
                 cursor += TAR_BLOCK_SIZE as u64;
                 if zero_blocks >= 2 {
@@ -395,6 +447,50 @@ impl AnalysisBinaryView {
             // archive bytes as a fallback.
             result.set_item("magic_matched", true)?;
             zero_blocks = 0;
+            if checked == 0 {
+                let stored_checksum = parse_octal(&header[148..156]);
+                let member_size = parse_octal(&header[124..136]);
+                let computed_checksum = tar_checksum(&header);
+                let ustar_magic = matches!(&header[257..263], b"ustar\x00" | b"ustar ");
+                let numeric_fields_valid = stored_checksum.is_some()
+                    && member_size.is_some()
+                    && parse_octal(&header[100..108]).is_some()
+                    && parse_octal(&header[108..116]).is_some()
+                    && parse_octal(&header[116..124]).is_some()
+                    && parse_octal(&header[136..148]).is_some();
+                let typeflag_valid = matches!(
+                    header[156],
+                    0 | b'0'
+                        | b'1'
+                        | b'2'
+                        | b'3'
+                        | b'4'
+                        | b'5'
+                        | b'6'
+                        | b'7'
+                        | b'x'
+                        | b'g'
+                        | b'L'
+                        | b'K'
+                        | b'S'
+                );
+                let payload_in_range = member_size.is_some_and(|member_size| {
+                    cursor + TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size)
+                        <= size
+                });
+                result.set_item("stored_checksum", stored_checksum.unwrap_or(0))?;
+                result.set_item("computed_checksum", computed_checksum)?;
+                result.set_item("member_size", member_size.unwrap_or(0))?;
+                result.set_item("ustar_magic", ustar_magic)?;
+                result.set_item("format", if ustar_magic { "ustar" } else { "tar" })?;
+                result.set_item(
+                    "fuzzy_name_nonempty",
+                    header[0..100].iter().any(|byte| *byte != 0),
+                )?;
+                result.set_item("fuzzy_numeric_fields_valid", numeric_fields_valid)?;
+                result.set_item("fuzzy_typeflag_valid", typeflag_valid)?;
+                result.set_item("fuzzy_payload_in_range", payload_in_range)?;
+            }
             let (ok, error, member_size, ustar) = tar_header_plausible(&header);
             if !ok {
                 result.set_item("entries_checked", checked)?;
@@ -403,7 +499,7 @@ impl AnalysisBinaryView {
                     b'x' | b'g' => "pax_header_bad",
                     b'L' | b'K' => "gnu_longname_bad",
                     b'S' => "sparse_header_bad",
-                    _ if error == "tar_header_checksum_mismatch" => "tar_checksum_bad",
+                    _ if error == "checksum_mismatch" => "tar_checksum_bad",
                     _ => "tar_metadata_bad",
                 };
                 result.set_item("damage_flags", PyList::new(py, [flag])?)?;
@@ -419,8 +515,21 @@ impl AnalysisBinaryView {
                 }
                 return Ok(result);
             }
+            let next_cursor = cursor + TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size);
+            if next_cursor > size {
+                result.set_item("entries_checked", checked)?;
+                result.set_item("error", "member_payload_out_of_range")?;
+                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
+                if checked > 0 {
+                    result.set_item("plausible", true)?;
+                    result.set_item("entry_walk_ok", true)?;
+                    result.set_item("segment_end", cursor)?;
+                    result.set_item("boundary_confidence", "medium")?;
+                }
+                return Ok(result);
+            }
             checked += 1;
-            cursor += TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size);
+            cursor = next_cursor;
             result.set_item(
                 "evidence",
                 PyList::new(

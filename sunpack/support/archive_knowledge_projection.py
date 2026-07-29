@@ -45,44 +45,50 @@ def source_derivation(task: Any) -> dict[str, Any]:
     return _dict(get(task, "source.derivation", {}))
 
 
-def analysis_summary(task: Any) -> dict[str, Any]:
-    return _dict(get(task, "analysis.summary", {}))
+def source_selected_segment(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "source.selected_segment", {}))
 
 
-def analysis_prepass(task: Any) -> dict[str, Any]:
-    return _dict(get(task, "analysis.prepass", {}))
+def source_extractable_segments(task: Any) -> list[dict[str, Any]]:
+    value = get(task, "source.extractable_segments", [])
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
-def analysis_fuzzy_profile(task: Any) -> dict[str, Any]:
-    fuzzy = _dict(get(task, "analysis.fuzzy", {}))
+def inspection_summary(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "inspection.summary", {}))
+
+
+def inspection_prepass(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "inspection.prepass", {}))
+
+
+def inspection_fuzzy_profile(task: Any) -> dict[str, Any]:
+    fuzzy = _dict(get(task, "inspection.fuzzy", {}))
     profile = fuzzy.get("binary_profile") if isinstance(fuzzy.get("binary_profile"), dict) else fuzzy
     return _dict(profile)
 
 
-def analysis_evidences(task: Any) -> list[dict[str, Any]]:
-    value = get(task, "analysis.evidences", [])
+def inspection_evidences(task: Any) -> list[dict[str, Any]]:
+    value = get(task, "inspection.evidences", [])
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def inspection_status(task: Any) -> str:
+    return str(get(task, "inspection.status", "") or get(task, "inspection.summary.status", "") or "")
+
+
+def inspection_error(task: Any) -> str:
+    return str(get(task, "inspection.error", "") or get(task, "inspection.summary.error", "") or "")
 
 
 def selected_format(task: Any) -> str:
-    return str(get(task, "analysis.selected_format", "") or get(task, "analysis.summary.format", "") or "")
-
-
-def analysis_selected_segment(task: Any) -> dict[str, Any]:
-    return _dict(get(task, "analysis.selected_segment", {}))
-
-
-def analysis_extractable_segments(task: Any) -> list[dict[str, Any]]:
-    value = get(task, "analysis.extractable_segments", [])
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def analysis_status(task: Any) -> str:
-    return str(get(task, "analysis.status", "") or get(task, "analysis.summary.status", "") or "")
-
-
-def analysis_error(task: Any) -> str:
-    return str(get(task, "analysis.error", "") or get(task, "analysis.summary.error", "") or "")
+    return str(
+        get(task, "inspection.selected_format", "")
+        or get(task, "inspection.summary.format", "")
+        or get(task, "source.input.format_hint", "")
+        or get(task, "archive.format_hint", "")
+        or ""
+    )
 
 
 def zip_structure_features(task: Any) -> dict[str, Any]:

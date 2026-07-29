@@ -296,7 +296,7 @@ def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]
             zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
             if isinstance(zip_payload, dict) and isinstance(zip_payload.get("structure"), dict):
                 output.append(dict(zip_payload["structure"]))
-            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     visit(nested)
@@ -330,7 +330,7 @@ def _seven_zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str
                 seven_payload = format_payload.get("7z") or format_payload.get("seven_zip")
             if isinstance(seven_payload, dict) and isinstance(seven_payload.get("structure"), dict):
                 output.append(dict(seven_payload["structure"]))
-            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     visit(nested)
@@ -365,7 +365,7 @@ def _merged_source_derivation(payload: dict[str, Any]) -> dict[str, Any]:
             for key, item in source_payload["derivation"].items():
                 if key not in merged or merged.get(key) in (None, "", False, 0, []):
                     merged[key] = item
-        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
             nested = value.get(key)
             if isinstance(nested, dict):
                 visit(nested)
@@ -401,7 +401,7 @@ def _profile_names(payload: dict[str, Any]) -> list[str]:
                 item = value.get(key)
                 if isinstance(item, str) and item:
                     names.append(item)
-            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -419,7 +419,7 @@ def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
             zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
             if isinstance(zip_payload, dict):
                 tags.extend(_list_values(zip_payload, "container_tags"))
-            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -440,7 +440,7 @@ def _seven_zip_container_tags(payload: dict[str, Any]) -> list[str]:
                 seven_payload = format_payload.get("7z") or format_payload.get("seven_zip")
             if isinstance(seven_payload, dict):
                 tags.extend(_list_values(seven_payload, "container_tags"))
-            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "inspection_prepass", "inspection_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -457,14 +457,14 @@ def _zip_analysis_detail_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
         details = value.get("details")
         if isinstance(details, dict):
             output.append(dict(details))
-        analysis_evidence = value.get("analysis_evidence")
-        if isinstance(analysis_evidence, dict):
-            if any(key in analysis_evidence for key in ("central_directory_present", "central_directory_walk_ok", "error", "fuzzy", "routes")):
-                output.append(dict(analysis_evidence))
-            nested_details = analysis_evidence.get("details")
+        inspection_evidence = value.get("inspection_evidence")
+        if isinstance(inspection_evidence, dict):
+            if any(key in inspection_evidence for key in ("central_directory_present", "central_directory_walk_ok", "error", "fuzzy", "routes")):
+                output.append(dict(inspection_evidence))
+            nested_details = inspection_evidence.get("details")
             if isinstance(nested_details, dict):
                 output.append(dict(nested_details))
-        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "analysis_prepass", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "inspection_prepass", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
             nested = value.get(key)
             if isinstance(nested, dict):
                 visit(nested)

@@ -311,7 +311,7 @@ OBSERVATION_PREFIXES = (
     ("extraction.result", "extraction_result"),
     ("verification.summary", "verification_summary"),
     ("verification.coverage_breakdown", "verification_coverage"),
-    ("analysis.summary", "analysis_summary"),
+    ("inspection.summary", "inspection_summary"),
 )
 
 

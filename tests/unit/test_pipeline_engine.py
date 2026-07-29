@@ -130,7 +130,7 @@ def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated
 def test_engine_only_closes_resident_extractor_when_engine_closes(tmp_path, monkeypatch):
     engine = PipelineEngine(_config(batch_window_seconds=0))
     executor_pool = engine._runtime.executor_pool
-    analysis_pool = engine._runtime.analysis_executor_pool
+    planning_pool = engine._runtime.input_planning_executor_pool
     close_calls = []
     monkeypatch.setattr(engine.extractor, "close", lambda: close_calls.append(True))
     engine.start()
@@ -140,13 +140,13 @@ def test_engine_only_closes_resident_extractor_when_engine_closes(tmp_path, monk
     assert close_calls == []
     assert engine.batch_runner.executor_pool is executor_pool
     assert executor_pool._shutdown is False
-    assert analysis_pool._shutdown is False
+    assert planning_pool._shutdown is False
     assert engine.resource_scheduler.is_running is True
 
     engine.close()
     assert close_calls == [True]
     assert executor_pool._shutdown is True
-    assert analysis_pool._shutdown is True
+    assert planning_pool._shutdown is True
     assert engine.resource_scheduler.is_running is False
     with pytest.raises(RuntimeError, match="started"):
         engine.submit([str(tmp_path)])
@@ -258,7 +258,7 @@ def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch)
 
     def complete_batch(submissions, **_kwargs):
         engine.batch_runner.directory_password_contexts._contexts[str(tmp_path)] = ["secret"]
-        engine._runtime.analysis_stage._report_cache[("source", "archive")] = object()
+        engine._runtime.input_planning_stage._report_cache[("source", "archive")] = object()
         for submission in submissions:
             submission.future.set_result(None)
 
@@ -268,6 +268,6 @@ def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch)
 
     assert engine.batch_runner.directory_password_contexts._contexts == {}
     assert engine.batch_runner.progress_reporter is None
-    assert engine._runtime.analysis_stage._report_cache == {}
+    assert engine._runtime.input_planning_stage._report_cache == {}
     assert archive_session_clear_calls == [True]
     engine.close()

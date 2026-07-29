@@ -1,28 +1,10 @@
 from typing import Any
 
-from sunpack_native import inspect_rar_structure as _native_inspect_rar_structure
-
-from sunpack.detection.pipeline.format_defaults import DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES
+from sunpack.analysis import ArchiveAnalyzer, MultiVolumeAnalysisSource, RarProbeOptions
+from sunpack.analysis.probes.rar import DEFAULT_DETECTION_BLOCKS_TO_WALK
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
-from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.detection.pipeline.processors.modules.format_structure.multi_volume import detection_binary_view, inspect_rar_view
-from sunpack.support.global_cache_manager import cached_value, file_identity
-
-
-def inspect_rar_structure(
-    path: str,
-    magic_bytes: bytes | None = None,
-    max_first_header_check_bytes: int = DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES,
-    identity: tuple[str, int, int] | None = None,
-) -> dict[str, Any]:
-    effective_magic = magic_bytes or b""
-    key = (identity or file_identity(path), effective_magic, int(max_first_header_check_bytes))
-    return cached_value(
-        "format_rar_structure",
-        key,
-        lambda: dict(_native_inspect_rar_structure(path, effective_magic, max_first_header_check_bytes)),
-    )
+from sunpack.detection.pipeline.processors.modules.format_structure.multi_volume import detection_analysis_volumes
 
 
 @register_processor(
@@ -37,7 +19,11 @@ def inspect_rar_structure(
     },
 )
 def process_rar_structure(context: FactProcessorContext) -> dict[str, Any]:
-    return inspect_rar_view(
-        detection_binary_view(context),
-        int(context.fact_config.get("max_first_header_check_bytes", DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES)),
+    observation = ArchiveAnalyzer(context.config).probe_rar(
+        MultiVolumeAnalysisSource(tuple(detection_analysis_volumes(context))),
+        RarProbeOptions(
+            max_blocks_to_walk=DEFAULT_DETECTION_BLOCKS_TO_WALK,
+            accept_validated_prefix=True,
+        ),
     )
+    return observation.to_raw_dict()

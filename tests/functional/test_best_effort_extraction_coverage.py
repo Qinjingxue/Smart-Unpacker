@@ -18,7 +18,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
 from tests.helpers.pipeline_engine import execute_pipeline
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
 from sunpack.contracts.extraction import ExtractionResult
@@ -763,7 +763,7 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
     task.set_archive_state(patched_state)
     out_dir = tmp_path / "out"
 
-    analysis = ArchiveAnalysisStage({"analysis": {"enabled": True}}).analyze_task(task)
+    analysis = ArchiveInputPlanningStage({"input_planning": {"enabled": True}}).plan_task(task)
     _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
     verification = _verify_worker_output(
         sfx,
@@ -774,7 +774,7 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
     )
 
     assert analysis is not None
-    assert task.fact_bag.get("analysis.selected_format") == "zip"
+    assert task.fact_bag.get("archive.format_hint") == "zip"
     assert task.archive_state().effective_patch_digest() == expected_digest
     assert [patch.id for patch in task.archive_state().patches] == ["crop-sfx-prefix", "rebuild-central-directory"]
     assert worker_result["status"] == "failed"
@@ -1375,7 +1375,7 @@ def _task(archive: Path, *, fact_bag: FactBag | None = None, detected_ext: str =
         resource_analysis = fact_bag.get("resource.analysis")
         if isinstance(resource_analysis, dict):
             _write_task_knowledge(task, "resource.analysis", resource_analysis)
-            _write_task_knowledge(task, "analysis.prepass", resource_analysis)
+            _write_task_knowledge(task, "inspection.prepass", resource_analysis)
         expected_names = fact_bag.get("verification.expected_names")
         if expected_names:
             _write_task_knowledge(task, "verification.expected_names", list(expected_names))

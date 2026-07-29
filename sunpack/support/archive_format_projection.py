@@ -4,20 +4,20 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from sunpack.analysis import ArchiveAnalysisReport
-from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from sunpack.analysis.result import ArchiveAnalysisReport
+from sunpack.analysis.result import ArchiveFormatEvidence
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
-from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload, write_value
+from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload
 from sunpack.support.collections import dedupe_strings as _dedupe
 
 
-def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
+def write_inspection_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
     knowledge = ensure_knowledge(task)
     selected = _best_selected(report)
     write_prepared_payload(
         knowledge,
-        "analysis",
+        "inspection",
         prepare_knowledge_value({
             "status": "extractable" if report.has_extractable else "not_extractable",
             "report_path": report.path,
@@ -29,37 +29,34 @@ def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> N
             "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
             "evidences": [_evidence_payload(item) for item in report.evidences],
         }),
-        source_layer="analysis",
-        source_module="analysis_stage",
+        source_layer="inspection",
+        source_module="inspection_projector",
     )
     if selected is not None:
         write_payload(
             knowledge,
-            "analysis.summary",
+            "inspection.summary",
             {
                 "format": getattr(selected, "format", "") or "",
                 "confidence": float(getattr(selected, "confidence", 0.0) or 0.0),
                 "status": getattr(selected, "status", "") or "",
             },
-            source_layer="analysis",
-            source_module="analysis_stage",
+            source_layer="inspection",
+            source_module="inspection_projector",
         )
         _write_format_evidence(knowledge, selected, task=task)
     commit_task_knowledge(task, knowledge)
 
 
-def write_analysis_refresh(
+def write_inspection_refresh(
     task: ArchiveTask,
     report: ArchiveAnalysisReport,
-    *,
-    extractable_segments: list[dict[str, Any]] | None = None,
-    selected_segment: tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None = None,
 ) -> None:
     knowledge = ensure_knowledge(task)
     selected = _best_selected(report)
     write_prepared_payload(
         knowledge,
-        "analysis",
+        "inspection",
         prepare_knowledge_value({
             "status": "extractable" if report.has_extractable else "not_extractable",
             "report_path": report.path,
@@ -71,104 +68,33 @@ def write_analysis_refresh(
             "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
             "evidences": [_evidence_payload(item) for item in report.evidences],
         }),
-        source_layer="analysis",
-        source_module="analysis_stage",
+        source_layer="inspection",
+        source_module="inspection_projector",
     )
     if selected is not None:
         write_payload(
             knowledge,
-            "analysis.summary",
+            "inspection.summary",
             {
                 "format": getattr(selected, "format", "") or "",
                 "confidence": float(getattr(selected, "confidence", 0.0) or 0.0),
                 "status": getattr(selected, "status", "") or "",
             },
-            source_layer="analysis",
-            source_module="analysis_stage",
+            source_layer="inspection",
+            source_module="inspection_projector",
         )
         _write_format_evidence(knowledge, selected, task=task)
-    segments = list(extractable_segments or [])
-    write_value(
-        knowledge,
-        "analysis.extractable_segments",
-        segments,
-        source_layer="analysis",
-        source_module="analysis_stage",
-    )
-    write_value(
-        knowledge,
-        "analysis.extractable_segment_count",
-        int(len(segments)),
-        source_layer="analysis",
-        source_module="analysis_stage",
-    )
-    if selected_segment is not None:
-        evidence, segment, index = selected_segment
-        write_payload(
-            knowledge,
-            "analysis.selected_segment",
-            {
-                "index": int(index),
-                "format": evidence.format,
-                "confidence": float(evidence.confidence or 0.0),
-                "status": evidence.status,
-                "segment": asdict(segment),
-            },
-            source_layer="analysis",
-            source_module="analysis_stage",
-            confidence=float(evidence.confidence or 0.0),
-        )
-        _write_format_evidence(knowledge, evidence, task=task)
     commit_task_knowledge(task, knowledge)
 
 
-def write_selected_segment(task: ArchiveTask, evidence: ArchiveFormatEvidence, segment: ArchiveSegment, *, index: int) -> None:
+def write_inspection_error(task: ArchiveTask, error: str) -> None:
     knowledge = ensure_knowledge(task)
     write_payload(
         knowledge,
-        "analysis.selected_segment",
-        {
-            "index": int(index),
-            "format": evidence.format,
-            "confidence": float(evidence.confidence or 0.0),
-            "status": evidence.status,
-            "segment": asdict(segment),
-        },
-        source_layer="analysis",
-        source_module="analysis_stage",
-        confidence=float(evidence.confidence or 0.0),
-    )
-    _write_format_evidence(knowledge, evidence, task=task)
-    commit_task_knowledge(task, knowledge)
-
-
-def write_extractable_segments(task: ArchiveTask, segments: list[dict[str, Any]]) -> None:
-    knowledge = ensure_knowledge(task)
-    write_value(
-        knowledge,
-        "analysis.extractable_segments",
-        list(segments or []),
-        source_layer="analysis",
-        source_module="analysis_stage",
-    )
-    write_value(
-        knowledge,
-        "analysis.extractable_segment_count",
-        int(len(segments or [])),
-        source_layer="analysis",
-        source_module="analysis_stage",
-    )
-    commit_task_knowledge(task, knowledge)
-
-
-def write_analysis_error(task: ArchiveTask, error: str) -> None:
-    knowledge = ensure_knowledge(task)
-    write_payload(
-        knowledge,
-        "analysis",
+        "inspection",
         {"status": "error", "error": str(error or "")},
-        source_layer="analysis",
-        source_module="analysis_stage",
+        source_layer="inspection",
+        source_module="inspection_projector",
     )
     commit_task_knowledge(task, knowledge)
 
@@ -182,7 +108,7 @@ def write_zip_structure_facts(task: ArchiveTask) -> dict[str, Any]:
         knowledge,
         "format.zip",
         {"structure": structure},
-        source_layer="analysis",
+        source_layer="inspection",
         source_module="zip_structure_facts",
     )
     commit_task_knowledge(task, knowledge)
@@ -222,8 +148,8 @@ def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence, *, t
             "structure": _format_structure_payload(evidence.format, details, task=task),
             "container_tags": _format_container_tags(evidence.format, details),
         },
-        source_layer="analysis",
-        source_module="analysis_stage",
+        source_layer="inspection",
+        source_module="inspection_projector",
         confidence=float(evidence.confidence or 0.0),
     )
     if evidence.format in {"7z", "seven_zip"}:
@@ -233,23 +159,23 @@ def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence, *, t
                 knowledge,
                 "format.7z.route_evidence",
                 route_flags,
-                source_layer="analysis",
-                source_module="analysis_stage",
+                source_layer="inspection",
+                source_module="inspection_projector",
                 confidence=float(evidence.confidence or 0.0),
             )
             write_payload(
                 knowledge,
                 "format.7z",
                 {"route_evidence_flags": route_flags},
-                source_layer="analysis",
-                source_module="analysis_stage",
+                source_layer="inspection",
+                source_module="inspection_projector",
             )
         return
     if evidence.format != "zip":
         return
     route_payload = normalize_runtime_route_evidence({
         "format": evidence.format,
-        "analysis_evidence": {"details": details},
+        "inspection_evidence": {"details": details},
         "source_derivation": {
             "zip_structure_features": _format_structure_payload(evidence.format, details, task=task),
             "zip_container_tags": details.get("zip_container_tags") or [],
@@ -261,16 +187,16 @@ def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence, *, t
             knowledge,
             f"format.{evidence.format}.route_evidence",
             route_flags,
-            source_layer="analysis",
-            source_module="analysis_stage",
+            source_layer="inspection",
+            source_module="inspection_projector",
             confidence=float(evidence.confidence or 0.0),
         )
         write_payload(
             knowledge,
             f"format.{evidence.format}",
             {"route_evidence_flags": route_flags},
-            source_layer="analysis",
-            source_module="analysis_stage",
+            source_layer="inspection",
+            source_module="inspection_projector",
         )
 
 

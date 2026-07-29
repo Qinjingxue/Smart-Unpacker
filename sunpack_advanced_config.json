@@ -130,11 +130,16 @@
   "embedded_scan": {
     "enabled": true
   },
-  "analysis": {
+  "input_planning": {
     "enabled": true,
     "task_parallel": true,
     "task_max_workers": 4,
-    "cache_size": 512,
+    "cache_size": 512
+  },
+  "inspect": {
+    "cache_size": 512
+  },
+  "analysis": {
     "parallel": true,
     "max_workers": 3,
     "max_concurrent_reads": 1,

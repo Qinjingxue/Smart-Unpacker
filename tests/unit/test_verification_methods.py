@@ -340,7 +340,7 @@ def _task(tmp_path, analysis=None, oracle=None):
     knowledge = task.knowledge()
     if analysis is not None:
         knowledge.set("resource.analysis", analysis, source_layer="test", source_module="fixture")
-        knowledge.set("analysis.prepass", analysis, source_layer="test", source_module="fixture")
+        knowledge.set("inspection.prepass", analysis, source_layer="test", source_module="fixture")
         if analysis.get("expected_names"):
             knowledge.set("verification.expected_names", analysis["expected_names"], source_layer="test", source_module="fixture")
     if oracle is not None:

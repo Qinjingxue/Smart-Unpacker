@@ -1,7 +1,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from sunpack.embedded import scan_embedded_archives
+from sunpack.analysis import scan_embedded_archives
 from sunpack.support.global_cache_manager import clear_cache_namespace
 
 
@@ -29,7 +29,7 @@ def test_shared_embedded_scanner_is_single_flight_per_file_identity(monkeypatch)
             }
 
     clear_cache_namespace("embedded_archive_scan_v1")
-    monkeypatch.setattr("sunpack.embedded.scanner.get_archive_session", lambda path: Session())
+    monkeypatch.setattr("sunpack.analysis.embedded.scanner.get_archive_session", lambda path: Session())
     identity = ("same-file", 1024, 1)
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(

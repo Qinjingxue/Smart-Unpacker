@@ -3,7 +3,7 @@ from typing import Any
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.embedded import EmbeddedScanResult, scan_embedded_archives
+from sunpack.analysis import EmbeddedScanResult, scan_embedded_archives
 
 
 def _empty_result(*, complete: bool = False) -> dict[str, Any]:

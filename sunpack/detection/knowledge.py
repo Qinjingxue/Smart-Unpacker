@@ -25,8 +25,8 @@ def write_detection_task(task: ArchiveTask) -> None:
     if payload["detected_ext"]:
         write_payload(
             knowledge,
-            "analysis.summary",
-            {"format": payload["detected_ext"]},
+            "archive",
+            {"format_hint": payload["detected_ext"]},
             source_layer="detection",
             source_module="task_provider",
         )

@@ -26,7 +26,7 @@ def write_filesystem_task(task: ArchiveTask) -> None:
         {
             "kind": "file",
             "path": main_path,
-            "format_hint": str(task.fact_bag.get("analysis.selected_format") or task.detected_ext or task.fact_bag.get("file.detected_ext") or ""),
+            "format_hint": str(task.fact_bag.get("archive.format_hint") or task.detected_ext or task.fact_bag.get("file.detected_ext") or ""),
             "parts": list(task.all_parts or []),
         },
         source_layer="filesystem",

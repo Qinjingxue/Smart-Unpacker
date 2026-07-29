@@ -210,6 +210,16 @@ impl AnalysisBinaryView {
         result.set_item("version", 0u8)?;
         result.set_item("blocks_checked", 0usize)?;
         result.set_item("end_block_found", false)?;
+        result.set_item("first_header_offset", 0u64)?;
+        result.set_item("first_header_size", 0u64)?;
+        result.set_item("first_header_type", 0u64)?;
+        result.set_item("header_crc_checked", false)?;
+        result.set_item("header_crc_ok", false)?;
+        result.set_item("second_block_checked", false)?;
+        result.set_item("second_block_ok", false)?;
+        result.set_item("second_block_type", 0u64)?;
+        result.set_item("second_block_size", 0u64)?;
+        result.set_item("block_walk_ok", false)?;
         result.set_item("evidence", PyList::empty(py))?;
 
         let header = self.read_at_bytes(start_offset, RAR5.len())?;

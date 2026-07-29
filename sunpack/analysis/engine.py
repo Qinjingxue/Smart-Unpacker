@@ -7,14 +7,13 @@ from sunpack.analysis.fuzzy_pipeline.registry import discover_fuzzy_analysis_mod
 from sunpack.analysis.structure_pipeline.prepass import run_signature_prepass
 from sunpack.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
-from sunpack.analysis.view import MultiVolumeBinaryView, PatchedBinaryView, SharedBinaryView
-from sunpack.contracts.archive_input import ArchiveInputDescriptor
-from sunpack.contracts.tasks import ArchiveTask
-from sunpack.embedded import scan_embedded_archives
+from sunpack.analysis.request import AnalysisCapability, DEFAULT_ANALYSIS_CAPABILITIES
+from sunpack.analysis.view import MultiVolumeBinaryView, SharedBinaryView
+from sunpack.analysis.embedded import scan_embedded_archives
 from sunpack.support.module_config import enabled_module_configs
 
 
-class ArchiveAnalysisScheduler:
+class AnalysisEngine:
     def __init__(self, config: dict[str, Any] | None = None, *, executor_pool=None):
         root_config = config or {}
         self.config = analysis_config(root_config)
@@ -24,68 +23,44 @@ class ArchiveAnalysisScheduler:
         discover_fuzzy_analysis_modules()
         discover_analysis_modules()
 
-    def analyze_path(self, path: str, *, initial_prepass: dict | None = None) -> ArchiveAnalysisReport:
-        return self.analyze_view(self._build_single_view(path), report_path=path, initial_prepass=initial_prepass)
+    def analyze_path(
+        self,
+        path: str,
+        *,
+        report_path: str | None = None,
+        initial_prepass: dict | None = None,
+        capabilities: frozenset[AnalysisCapability] | None = None,
+    ) -> ArchiveAnalysisReport:
+        return self.analyze_view(
+            self._build_single_view(path),
+            report_path=report_path or path,
+            initial_prepass=initial_prepass,
+            capabilities=capabilities,
+        )
 
-    def analyze_paths(self, paths, *, report_path: str | None = None) -> ArchiveAnalysisReport:
+    def analyze_paths(
+        self,
+        paths,
+        *,
+        report_path: str | None = None,
+        initial_prepass: dict | None = None,
+        capabilities: frozenset[AnalysisCapability] | None = None,
+    ) -> ArchiveAnalysisReport:
         volumes = list(paths or [])
         if len(volumes) == 1 and not isinstance(volumes[0], dict):
-            return self.analyze_path(str(volumes[0]))
+            return self.analyze_path(
+                str(volumes[0]),
+                report_path=report_path,
+                initial_prepass=initial_prepass,
+                capabilities=capabilities,
+            )
         view = self._build_multi_volume_view(volumes)
-        return self.analyze_view(view, report_path=report_path or str(view.path))
-
-    def analyze_relation_group(self, group) -> ArchiveAnalysisReport:
-        volumes = getattr(group, "split_volumes", None)
-        if volumes:
-            paths = [
-                {
-                    "path": volume.path,
-                    "number": volume.number,
-                    "style": volume.style,
-                }
-                for volume in volumes
-            ]
-            return self.analyze_paths(paths, report_path=getattr(group, "head_path", None))
-        return self.analyze_paths(getattr(group, "all_paths", None) or [group.head_path], report_path=getattr(group, "head_path", None))
-
-    def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport:
-        state = task.archive_state()
-        if state.patches:
-            return self.analyze_view(PatchedBinaryView(state), report_path=state.source.entry_path or task.main_path)
-        report = self._analyze_descriptor(state.to_archive_input_descriptor(), task)
-        if report is not None:
-            return report
-        raise ValueError(f"unsupported archive input mode: {state.source.open_mode}")
-
-    def _analyze_descriptor(self, descriptor: ArchiveInputDescriptor, task) -> ArchiveAnalysisReport | None:
-        if descriptor.open_mode == "file" and descriptor.entry_path:
-            initial_prepass = _task_detection_prepass(task)
-            if initial_prepass is not None:
-                return self.analyze_path(descriptor.entry_path, initial_prepass=initial_prepass)
-            return self.analyze_path(descriptor.entry_path)
-        if descriptor.open_mode in {"native_volumes", "sfx_with_volumes"} and descriptor.parts:
-            paths = [
-                {"path": part.path, "number": part.volume_number or index + 1, "style": descriptor.volume_style}
-                for index, part in enumerate(descriptor.parts)
-                if part.path
-            ]
-            if paths:
-                return self.analyze_paths(paths, report_path=descriptor.entry_path or getattr(task, "main_path", None))
-        if descriptor.open_mode == "concat_ranges" and descriptor.ranges:
-            simple_paths = [
-                item.path
-                for item in descriptor.ranges
-                if item.path and int(item.start) == 0 and item.end is None
-            ]
-            if simple_paths and len(simple_paths) == len(descriptor.ranges):
-                return self.analyze_paths(simple_paths, report_path=descriptor.entry_path or getattr(task, "main_path", None))
-        if descriptor.open_mode == "file_range" and descriptor.parts:
-            part = descriptor.parts[0]
-            item_range = part.range
-            if part.path and item_range is not None and int(item_range.start) == 0 and item_range.end is None:
-                return self.analyze_path(part.path)
-        return None
-
+        return self.analyze_view(
+            view,
+            report_path=report_path or str(view.path),
+            initial_prepass=initial_prepass,
+            capabilities=capabilities,
+        )
 
     def analyze_view(
         self,
@@ -93,17 +68,28 @@ class ArchiveAnalysisScheduler:
         *,
         report_path: str | None = None,
         initial_prepass: dict | None = None,
+        capabilities: frozenset[AnalysisCapability] | None = None,
     ) -> ArchiveAnalysisReport:
+        requested = DEFAULT_ANALYSIS_CAPABILITIES if capabilities is None else capabilities
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}
         prepass = dict(initial_prepass or {})
-        if not prepass and prepass_config.get("enabled", True):
+        needs_prepass = bool(requested & {
+            AnalysisCapability.SIGNATURE_PREPASS,
+            AnalysisCapability.FORMAT_STRUCTURE,
+        })
+        if not prepass and needs_prepass and prepass_config.get("enabled", True):
             prepass = run_signature_prepass(view, prepass_config)
-        fuzzy = self._run_fuzzy_pipeline(view, prepass)
+        fuzzy = self._run_fuzzy_pipeline(view, prepass) if AnalysisCapability.FUZZY_PROFILE in requested else {}
         structure_context = {**prepass, "fuzzy": fuzzy}
-        modules = self._selected_structure_modules(structure_context)
-        evidences = self._run_structure_modules(view, structure_context, modules)
+        modules = self._selected_structure_modules(structure_context) if AnalysisCapability.FORMAT_STRUCTURE in requested else []
+        evidences = self._run_structure_modules(view, structure_context, modules) if modules else []
         selected = self._selected_evidences(evidences)
-        if not selected and self._embedded_scan_enabled() and isinstance(view, SharedBinaryView):
+        if (
+            not selected
+            and AnalysisCapability.EMBEDDED_SCAN in requested
+            and self._embedded_scan_enabled()
+            and isinstance(view, SharedBinaryView)
+        ):
             embedded = scan_embedded_archives(
                 view.path,
                 expected_size=int(view.size),
@@ -235,13 +221,3 @@ class ArchiveAnalysisScheduler:
             for evidence in evidences
             if evidence.status == "extractable" and evidence.confidence >= extractable and evidence.segments
         ]
-
-
-def _task_detection_prepass(task) -> dict | None:
-    fact_bag = getattr(task, "fact_bag", None)
-    if fact_bag is None:
-        return None
-    value = fact_bag.get("analysis.signature_prepass")
-    if not isinstance(value, dict) or not value.get("full_scan_complete"):
-        return None
-    return dict(value)

@@ -15,8 +15,8 @@ from repair_training.policy.sanitize import (
     sanitize_training_graph,
 )
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
-from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.support.archive_format_projection import write_zip_runtime_evidence_facts
+from sunpack.inspect import ArchiveInspector
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.job import RepairJob
@@ -103,7 +103,7 @@ class _RuntimeTeacherContext:
         self.full_config, self.repair_config = _teacher_configs(config, self.workspace_root)
         self.scheduler = RepairScheduler({"repair": self.repair_config})
         self.model_runtime = RepairModelRuntime(self.repair_config)
-        self.analysis_stage = ArchiveAnalysisStage(self.full_config)
+        self.inspector = ArchiveInspector(self.full_config)
         self.recovery_executor = TrainingRecoveryExecutor(self.full_config)
         self.evaluator = RecoveryEvaluator(self.full_config, full_evaluator=self.recovery_executor)
         self.recovery_mode = recovery_mode
@@ -182,7 +182,7 @@ class _RuntimeTeacherContext:
             from sunpack.repair.search.recovery import task_for_materialized_recovery_state
 
             task = task_for_materialized_recovery_state(job, state, materialized)
-            self.analysis_stage.refresh_task_analysis(task)
+            self.inspector.refresh_task(task)
             try:
                 write_zip_runtime_evidence_facts(task)
             except Exception:

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.detection.input_planning import ArchiveInputPlanningStage
+from sunpack.inspect import ArchiveInspector
 from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse, PipelineTarget
 from sunpack.contracts.results import OutcomeKind, RunSummary
 from sunpack.contracts.run_context import RunContext
@@ -118,6 +119,10 @@ class PipelineEngine:
     @property
     def output_scan_policy(self) -> NestedOutputScanPolicy:
         return self._runtime.output_scan_policy
+
+    @property
+    def input_planning_stage(self) -> ArchiveInputPlanningStage:
+        return self._runtime.input_planning_stage
 
     @property
     def recent_passwords(self) -> list[str]:
@@ -301,8 +306,9 @@ class _PipelineRuntime:
         self.language = self.i18n.language
         self.quiet = bool(cli_config.get("quiet", False))
         self.verbose = bool(cli_config.get("verbose", False))
+        planning_config = config.get("input_planning") if isinstance(config.get("input_planning"), dict) else {}
         analysis_config = config.get("analysis") if isinstance(config.get("analysis"), dict) else {}
-        analysis_workers = max(1, int(analysis_config.get("task_max_workers", 4) or 4))
+        planning_workers = max(1, int(planning_config.get("task_max_workers", 4) or 4))
         module_workers = max(1, int(analysis_config.get("max_workers", 3) or 3))
         max_workers = resolve_max_workers()
         performance = advanced_config_value(("performance",))
@@ -320,20 +326,21 @@ class _PipelineRuntime:
             current_limit=initial_limit,
             max_workers=max_workers,
         )
-        self.analysis_executor_pool = ThreadPoolExecutor(
-            max_workers=analysis_workers,
-            thread_name_prefix="sunpack-analysis-task",
+        self.input_planning_executor_pool = ThreadPoolExecutor(
+            max_workers=planning_workers,
+            thread_name_prefix="sunpack-input-planning-task",
         )
-        self.analysis_module_pool = ThreadPoolExecutor(
+        self.analysis_capability_pool = ThreadPoolExecutor(
             max_workers=module_workers,
-            thread_name_prefix="sunpack-analysis-module",
+            thread_name_prefix="sunpack-analysis-capability",
         )
-        self.analysis_stage = ArchiveAnalysisStage(
+        self.input_planning_stage = ArchiveInputPlanningStage(
             config,
-            executor_pool=self.analysis_executor_pool,
-            module_executor_pool=self.analysis_module_pool,
-            workload_executor=self._execute_analysis_workload,
+            executor_pool=self.input_planning_executor_pool,
+            module_executor_pool=self.analysis_capability_pool,
+            workload_executor=self._execute_input_planning_workload,
         )
+        self.inspector = ArchiveInspector(config, executor_pool=self.analysis_capability_pool)
         self.executor_pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="sunpack-task",
@@ -363,7 +370,7 @@ class _PipelineRuntime:
             self.resource_scheduler,
             self.rename_scheduler,
             config,
-            analysis_stage=self.analysis_stage,
+            inspector=self.inspector,
             progress_reporter=initial_reporter,
             executor_pool=self.executor_pool,
         )
@@ -371,7 +378,7 @@ class _PipelineRuntime:
     def start(self) -> None:
         self.resource_scheduler.start()
 
-    def _execute_analysis_workload(
+    def _execute_input_planning_workload(
         self,
         tasks,
         worker,
@@ -382,7 +389,7 @@ class _PipelineRuntime:
         executor = TaskExecutor(
             self.resource_scheduler,
             max_workers=max_workers,
-            executor_pool=self.analysis_executor_pool,
+            executor_pool=self.input_planning_executor_pool,
         )
         return executor.execute_all(tasks, worker, workload_label=workload_label)
 
@@ -426,6 +433,7 @@ class _PipelineRuntime:
                 round_index=round_index,
             )
             tasks = authorization.allowed_tasks
+            tasks = self.input_planning_stage.plan_tasks(tasks)
             context.policy_skips.extend(authorization.skipped)
             ownership.remember_tasks(tasks)
             self.batch_runner.set_progress_round(round_index, direct=direct and round_index == 1)
@@ -510,8 +518,8 @@ class _PipelineRuntime:
         self.resource_scheduler.stop()
         self.extractor.close()
         self.executor_pool.shutdown(wait=True, cancel_futures=False)
-        self.analysis_executor_pool.shutdown(wait=True, cancel_futures=False)
-        self.analysis_module_pool.shutdown(wait=True, cancel_futures=False)
+        self.input_planning_executor_pool.shutdown(wait=True, cancel_futures=False)
+        self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
 
     def release_request_state(self) -> None:
         """Drop references that are valid only for one compatible request group."""
@@ -522,7 +530,7 @@ class _PipelineRuntime:
         self.batch_runner.directory_password_contexts.clear()
         self.extractor.ensure_space = lambda _required_gb: True
         self.extractor.set_progress_callback(None)
-        self.analysis_stage.clear_report_cache()
+        self.input_planning_stage.clear_report_cache()
         clear_archive_sessions()
 
     def _new_reporter(self) -> RunReporter:

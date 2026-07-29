@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sunpack.analysis.knowledge import write_analysis_report, write_zip_runtime_evidence_facts
+from sunpack.support.archive_format_projection import write_inspection_report, write_zip_runtime_evidence_facts
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -29,7 +29,7 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     write_filesystem_task(task)
     write_relation_task(task)
     write_detection_task(task)
-    write_analysis_report(task, _analysis_report(str(archive)))
+    write_inspection_report(task, _analysis_report(str(archive)))
     write_extraction_result(task, ExtractionResult(success=False, archive=str(archive), out_dir=str(tmp_path / "out"), all_parts=[str(archive)], error="bad", diagnostics={"result": {"status": "failed", "failure_stage": "extract", "failure_kind": "data_error"}}, password_used="secret"))
     write_verification_result(task, VerificationResult(completeness=0.5, assessment_status="partial", decision_hint="repair", failed_files=1, archive_coverage=ArchiveCoverageSummary(completeness=0.5, expected_files=2, matched_files=1)))
     write_repair_result(task, RepairResult(status="repaired", module_name="zip_fix_cd_offset", actions=["fix_cd_offset"], repaired_input={"kind": "file", "path": str(archive)}, diagnosis={"patch_facts": ["fixed_field=cd_offset"]}))
@@ -39,7 +39,7 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     assert payload["filesystem"]["path"] == str(archive)
     assert payload["relations"]["archive_input"]["parts"][0]["path"] == str(archive)
     assert payload["detection"]["detected_ext"] == "zip"
-    assert payload["analysis"]["selected_format"] == "zip"
+    assert payload["inspection"]["selected_format"] == "zip"
     assert "has_data_descriptor" not in payload["format"]["zip"].get("structure", {})
     assert payload["extraction"]["failure"]["failure_kind"] == "data_error"
     assert payload["archive"]["password"] == "secret"
@@ -55,7 +55,7 @@ def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
     archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
     sidecar.write_bytes(b"sidecar")
     task = direct_file_task(str(archive), all_parts=[str(archive), str(sidecar)])
-    write_analysis_report(task, _analysis_report(str(archive)))
+    write_inspection_report(task, _analysis_report(str(archive)))
     knowledge = task.knowledge()
     knowledge.set("format.zip.structure.eocd", {"error": "bad_central_directory_signature", "physical_central_directory_offset": 10, "declared_central_directory_size": 40, "eocd_offset": 60}, source_layer="test")
     knowledge.set("format.zip.structure.directory_consistency", {"file_size": 22, "cd_entries_checked": 2, "central_local_crc_mismatch_count": 1, "central_local_compressed_size_mismatch_count": 1}, source_layer="test")
@@ -125,7 +125,7 @@ def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_p
     bag.set("candidate.entry_path", str(archive))
     bag.set("file.detected_ext", "zip")
     task = ArchiveTask.from_fact_bag(bag, score=10)
-    write_analysis_report(task, _analysis_report(str(archive)))
+    write_inspection_report(task, _analysis_report(str(archive)))
     knowledge = task.knowledge()
     knowledge.set(
         "format.zip.structure.eocd",
@@ -204,7 +204,7 @@ def test_zip_runtime_evidence_attributes_partial_payload_to_missing_range(tmp_pa
     bag.set("candidate.entry_path", str(archive))
     bag.set("file.detected_ext", "zip")
     task = ArchiveTask.from_fact_bag(bag, score=10)
-    write_analysis_report(task, _analysis_report(str(archive)))
+    write_inspection_report(task, _analysis_report(str(archive)))
     knowledge = task.knowledge()
     knowledge.set(
         "source.input",

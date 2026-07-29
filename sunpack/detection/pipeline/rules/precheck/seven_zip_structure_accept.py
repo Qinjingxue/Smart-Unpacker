@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleEffect
-from sunpack.detection.pipeline.processors.modules.format_structure.seven_zip import DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES
+from sunpack.analysis.probes.seven_zip import DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES
 from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.registry import register_rule
 

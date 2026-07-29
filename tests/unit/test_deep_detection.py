@@ -1,6 +1,6 @@
 import gzip
 
-from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.analysis.engine import AnalysisEngine
 from sunpack.contracts.detection import FactBag
 from sunpack.detection.options import DetectionOptions
 from sunpack.detection.scheduler import DetectionScheduler
@@ -33,7 +33,7 @@ def test_deep_detection_bypasses_rules_and_preserves_all_stream_segments(tmp_pat
         second_offset,
     ]
 
-    report = ArchiveAnalysisScheduler().analyze_path(
+    report = AnalysisEngine().analyze_path(
         str(path),
         initial_prepass=bag.get("analysis.signature_prepass"),
     )

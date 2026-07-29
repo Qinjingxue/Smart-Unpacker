@@ -226,21 +226,21 @@ class ArchiveRepairStage:
             failure["previous_actions"] = previous_actions
         if previous_modules:
             failure["previous_modules"] = previous_modules
-        with _phase(phase_timer, f"{phase_prefix}_analysis_prepass"):
-            analysis_prepass = self._analysis_prepass(task)
+        with _phase(phase_timer, f"{phase_prefix}_inspection_prepass"):
+            inspection_prepass = self._inspection_prepass(task)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
-            "step": "analysis_prepass",
-            "prepass_keys": sorted(str(key) for key in analysis_prepass.keys())[:40],
+            "step": "inspection_prepass",
+            "prepass_keys": sorted(str(key) for key in inspection_prepass.keys())[:40],
         })
-        with _phase(phase_timer, f"{phase_prefix}_analysis_evidence"):
-            analysis_evidence = self._analysis_evidence_from_facts(task)
+        with _phase(phase_timer, f"{phase_prefix}_inspection_evidence"):
+            inspection_evidence = self._inspection_evidence_from_facts(task)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
-            "step": "analysis_evidence",
-            "has_evidence": analysis_evidence is not None,
+            "step": "inspection_evidence",
+            "has_evidence": inspection_evidence is not None,
         })
         with _phase(phase_timer, f"{phase_prefix}_repair_history_payload"):
             repair_history = self._repair_history_payload(task, previous_actions, previous_modules)
@@ -255,8 +255,8 @@ class ArchiveRepairStage:
                 task,
                 source_input=source_input,
                 format_hint=selected_format,
-                analysis_prepass=analysis_prepass,
-                analysis_evidence=analysis_evidence,
+                inspection_prepass=inspection_prepass,
+                inspection_evidence=inspection_evidence,
                 extraction_failure=failure,
                 extraction_diagnostics=dict(result.diagnostics or {}),
                 repair_history=repair_history,
@@ -285,8 +285,8 @@ class ArchiveRepairStage:
             route_payload = normalize_runtime_route_evidence({
                 **route_payload,
                 "source_input": source_input,
-                "analysis_prepass": analysis_prepass,
-                "analysis_evidence": dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {},
+                "inspection_prepass": inspection_prepass,
+                "inspection_evidence": dict(getattr(inspection_evidence, "details", {}) or {}) if inspection_evidence is not None else {},
                 "extraction_failure": failure,
                 "extraction_diagnostics": dict(result.diagnostics or {}),
                 "repair_history": repair_history,
@@ -309,8 +309,8 @@ class ArchiveRepairStage:
             knowledge = self._knowledge_payload(
                 task,
                 source_input=source_input,
-                analysis_prepass=analysis_prepass,
-                analysis_evidence=analysis_evidence,
+                inspection_prepass=inspection_prepass,
+                inspection_evidence=inspection_evidence,
                 extraction_failure=failure,
                 extraction_diagnostics=dict(result.diagnostics or {}),
                 repair_history=repair_history,
@@ -332,11 +332,11 @@ class ArchiveRepairStage:
         })
         with _phase(phase_timer, f"{phase_prefix}_construct_job"):
             with _phase(phase_timer, f"{phase_prefix}_construct_job_format"):
-                job_format = self._normalize_format(str(route_payload.get("format") or getattr(analysis_evidence, "format", "") or selected_format))
+                job_format = self._normalize_format(str(route_payload.get("format") or getattr(inspection_evidence, "format", "") or selected_format))
             with _phase(phase_timer, f"{phase_prefix}_construct_job_confidence"):
-                confidence = float(getattr(analysis_evidence, "confidence", 0.0) or 0.0)
+                confidence = float(getattr(inspection_evidence, "confidence", 0.0) or 0.0)
             with _phase(phase_timer, f"{phase_prefix}_construct_job_fuzzy"):
-                fuzzy = analysis_prepass.get("fuzzy") if isinstance(analysis_prepass.get("fuzzy"), dict) else {}
+                fuzzy = inspection_prepass.get("fuzzy") if isinstance(inspection_prepass.get("fuzzy"), dict) else {}
                 fuzzy_profile = dict(fuzzy.get("binary_profile") or fuzzy) if isinstance(fuzzy, dict) else {}
             with _phase(phase_timer, f"{phase_prefix}_construct_job_extraction_diagnostics"):
                 extraction_diagnostics = dict(result.diagnostics or {})
@@ -361,8 +361,8 @@ class ArchiveRepairStage:
                     source_input=source_input,
                     format=job_format,
                     confidence=confidence,
-                    analysis_evidence=analysis_evidence,
-                    analysis_prepass=analysis_prepass,
+                    inspection_evidence=inspection_evidence,
+                    inspection_prepass=inspection_prepass,
                     fuzzy_profile=fuzzy_profile,
                     extraction_failure=failure,
                     extraction_diagnostics=extraction_diagnostics,
@@ -428,21 +428,21 @@ class ArchiveRepairStage:
         *,
         source_input: dict[str, Any],
         format_hint: str = "",
-        analysis_prepass: dict[str, Any],
-        analysis_evidence: RepairAnalysisEvidence | None,
+        inspection_prepass: dict[str, Any],
+        inspection_evidence: RepairAnalysisEvidence | None,
         extraction_failure: dict[str, Any],
         extraction_diagnostics: dict[str, Any],
         repair_history: dict[str, Any],
     ) -> dict[str, Any]:
-        details = dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {}
-        fmt = self._normalize_format(str(format_hint or getattr(analysis_evidence, "format", "") or ""))
+        details = dict(getattr(inspection_evidence, "details", {}) or {}) if inspection_evidence is not None else {}
+        fmt = self._normalize_format(str(format_hint or getattr(inspection_evidence, "format", "") or ""))
         if not fmt or fmt == "unknown":
             fmt = self._format_from_task(task)
         payload = {
             "format": fmt,
             "source_input": self._source_input_with_split_parts(task, source_input, format_hint=fmt),
-            "analysis_prepass": dict(analysis_prepass or {}),
-            "analysis_evidence": details,
+            "inspection_prepass": dict(inspection_prepass or {}),
+            "inspection_evidence": details,
             "extraction_failure": dict(extraction_failure or {}),
             "extraction_diagnostics": dict(extraction_diagnostics or {}),
             "repair_history": dict(repair_history or {}),
@@ -490,8 +490,8 @@ class ArchiveRepairStage:
         task: ArchiveTask,
         *,
         source_input: dict[str, Any],
-        analysis_prepass: dict[str, Any],
-        analysis_evidence: RepairAnalysisEvidence | None,
+        inspection_prepass: dict[str, Any],
+        inspection_evidence: RepairAnalysisEvidence | None,
         extraction_failure: dict[str, Any],
         extraction_diagnostics: dict[str, Any],
         repair_history: dict[str, Any],
@@ -503,8 +503,8 @@ class ArchiveRepairStage:
         return write_repair_job_context(
             task,
             source_input=source_input,
-            analysis_prepass=analysis_prepass,
-            analysis_evidence=analysis_evidence,
+            inspection_prepass=inspection_prepass,
+            inspection_evidence=inspection_evidence,
             extraction_failure=extraction_failure,
             extraction_diagnostics=extraction_diagnostics,
             repair_history=repair_history,
@@ -732,9 +732,9 @@ class ArchiveRepairStage:
                 flags.append("probably_truncated")
         return _dedupe(flags)
 
-    def _analysis_evidences_from_facts(self, task: ArchiveTask) -> list[RepairAnalysisEvidence]:
+    def _inspection_evidences_from_facts(self, task: ArchiveTask) -> list[RepairAnalysisEvidence]:
         evidences = []
-        for item in knowledge_view.analysis_evidences(task):
+        for item in knowledge_view.inspection_evidences(task):
             if not isinstance(item, dict):
                 continue
             segments = [
@@ -759,8 +759,8 @@ class ArchiveRepairStage:
             ))
         return evidences
 
-    def _analysis_evidence_from_facts(self, task: ArchiveTask) -> RepairAnalysisEvidence | None:
-        evidences = self._analysis_evidences_from_facts(task)
+    def _inspection_evidence_from_facts(self, task: ArchiveTask) -> RepairAnalysisEvidence | None:
+        evidences = self._inspection_evidences_from_facts(task)
         if not evidences:
             return None
         selected_format = knowledge_view.selected_format(task)
@@ -780,14 +780,14 @@ class ArchiveRepairStage:
         return _dedupe(flags)
 
     def _analysis_confidence(self, task: ArchiveTask) -> float:
-        evidence = self._analysis_evidence_from_facts(task)
+        evidence = self._inspection_evidence_from_facts(task)
         return float(evidence.confidence) if evidence is not None else 0.0
 
-    def _analysis_prepass(self, task: ArchiveTask) -> dict[str, Any]:
-        return knowledge_view.analysis_prepass(task)
+    def _inspection_prepass(self, task: ArchiveTask) -> dict[str, Any]:
+        return knowledge_view.inspection_prepass(task)
 
-    def _analysis_fuzzy_profile(self, task: ArchiveTask) -> dict[str, Any]:
-        return knowledge_view.analysis_fuzzy_profile(task)
+    def _inspection_fuzzy_profile(self, task: ArchiveTask) -> dict[str, Any]:
+        return knowledge_view.inspection_fuzzy_profile(task)
 
     def _format_from_task(self, task: ArchiveTask) -> str:
         selected = knowledge_view.selected_format(task)

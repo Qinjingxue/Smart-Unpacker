@@ -96,10 +96,10 @@ class RepairDiagnosis:
 def diagnose_repair_job(job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
     knowledge = knowledge if isinstance(knowledge, ArchiveKnowledge) else ArchiveKnowledge.from_any(job.knowledge)
     evidences = _collect_evidence(job, knowledge=knowledge)
-    analysis_summary = knowledge_view.analysis_summary(knowledge)
+    inspection_summary = knowledge_view.inspection_summary(knowledge)
     source = knowledge_view.source_input(knowledge)
     fmt = _first_text([
-        str(analysis_summary.get("format") or ""),
+        str(inspection_summary.get("format") or ""),
         str(source.get("format_hint") or source.get("format") or ""),
         str(job.format or ""),
         *(item.format for item in evidences),
@@ -107,7 +107,7 @@ def diagnose_repair_job(job: RepairJob, *, knowledge: ArchiveKnowledge | None = 
     flags = {flag for item in evidences for flag in item.damage_flags}
     failure = knowledge_view.extraction_failure(knowledge)
     categories = _categories_for(fmt, flags, failure)
-    confidence = float(analysis_summary.get("confidence", 0.0) or 0.0)
+    confidence = float(inspection_summary.get("confidence", 0.0) or 0.0)
     severity = _severity(flags, failure, confidence, password=job.password)
     repairable, unsafe_actions, notes = _repairability(job, flags)
     return RepairDiagnosis(
@@ -127,9 +127,9 @@ def diagnose_repair_job(job: RepairJob, *, knowledge: ArchiveKnowledge | None = 
 def _collect_evidence(job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> list[DamageEvidence]:
     evidences: list[DamageEvidence] = []
     knowledge = knowledge if isinstance(knowledge, ArchiveKnowledge) else ArchiveKnowledge.from_any(job.knowledge)
-    analysis_evidences = knowledge_view.analysis_evidences(knowledge)
-    if analysis_evidences:
-        evidences.extend(_analysis_evidence(item, knowledge) for item in analysis_evidences)
+    inspection_evidences = knowledge_view.inspection_evidences(knowledge)
+    if inspection_evidences:
+        evidences.extend(_analysis_evidence(item, knowledge) for item in inspection_evidences)
     if knowledge_view.extraction_failure(knowledge):
         evidences.append(_extraction_evidence(job, knowledge))
     route_context = knowledge_view.repair_route_context(knowledge)
@@ -138,11 +138,11 @@ def _collect_evidence(job: RepairJob, *, knowledge: ArchiveKnowledge | None = No
         *[str(flag) for flag in job.damage_flags if str(flag)],
     ])
     if route_flags and not evidences:
-        analysis_summary = knowledge_view.analysis_summary(knowledge)
+        inspection_summary = knowledge_view.inspection_summary(knowledge)
         evidences.append(DamageEvidence(
             source="knowledge",
-            format=str(analysis_summary.get("format") or ""),
-            confidence=float(analysis_summary.get("confidence", 0.0) or 0.0),
+            format=str(inspection_summary.get("format") or ""),
+            confidence=float(inspection_summary.get("confidence", 0.0) or 0.0),
             damage_flags=list(route_flags),
         ))
     return evidences
@@ -163,8 +163,8 @@ def _analysis_evidence(evidence: dict[str, Any], knowledge: ArchiveKnowledge) ->
     details = evidence.get("details") if isinstance(evidence.get("details"), dict) else {}
     return DamageEvidence(
         source="analysis",
-        format=str(evidence.get("format") or knowledge_view.analysis_summary(knowledge).get("format") or ""),
-        confidence=float(evidence.get("confidence", knowledge_view.analysis_summary(knowledge).get("confidence", 0.0)) or 0.0),
+        format=str(evidence.get("format") or knowledge_view.inspection_summary(knowledge).get("format") or ""),
+        confidence=float(evidence.get("confidence", knowledge_view.inspection_summary(knowledge).get("confidence", 0.0)) or 0.0),
         start_trusted=start_trusted,
         end_trusted=end_trusted,
         damage_flags=_dedupe(flags),
@@ -175,7 +175,7 @@ def _analysis_evidence(evidence: dict[str, Any], knowledge: ArchiveKnowledge) ->
 def _extraction_evidence(job: RepairJob, knowledge: ArchiveKnowledge) -> DamageEvidence:
     failure = knowledge_view.extraction_failure(knowledge)
     route_context = knowledge_view.repair_route_context(knowledge)
-    analysis_summary = knowledge_view.analysis_summary(knowledge)
+    inspection_summary = knowledge_view.inspection_summary(knowledge)
     flags = list(route_context.get("damage_flags") or [])
     if failure.get("checksum_error"):
         flags.append("checksum_error")
@@ -208,8 +208,8 @@ def _extraction_evidence(job: RepairJob, knowledge: ArchiveKnowledge) -> DamageE
         flags.append("process_failure")
     return DamageEvidence(
         source="extraction",
-        format=str(failure.get("archive_type") or failure.get("format") or analysis_summary.get("format") or ""),
-        confidence=float(analysis_summary.get("confidence", 0.0) or 0.0),
+        format=str(failure.get("archive_type") or failure.get("format") or inspection_summary.get("format") or ""),
+        confidence=float(inspection_summary.get("confidence", 0.0) or 0.0),
         damage_flags=_dedupe(flags),
         worker_status=str(failure.get("native_status") or failure.get("status") or ""),
         operation_result=failure.get("operation_result"),

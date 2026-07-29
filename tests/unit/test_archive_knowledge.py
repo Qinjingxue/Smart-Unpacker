@@ -32,7 +32,7 @@ def test_archive_task_state_job_knowledge_flow(tmp_path):
     archive_path.write_bytes(b"PK\x05\x06" + b"\0" * 18)
     bag = FactBag()
     bag.set("candidate.entry_path", str(archive_path))
-    bag.set("analysis.selected_format", "zip")
+    bag.set("inspection.selected_format", "zip")
     task = ArchiveTask(fact_bag=bag, score=1, main_path=str(archive_path)).ensure_archive_state()
 
     knowledge = task.knowledge()

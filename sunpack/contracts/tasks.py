@@ -286,7 +286,7 @@ class ArchiveTask:
         source = self.archive_state().to_archive_input_descriptor()
         selected_format = knowledge_view.selected_format(self)
         confidence = 0.0
-        selected_segment = knowledge_view.analysis_selected_segment(self)
+        selected_segment = knowledge_view.source_selected_segment(self)
         evidence = selected_segment.get("segment") if isinstance(selected_segment.get("segment"), dict) else selected_segment
         if isinstance(evidence, dict):
             confidence = float(evidence.get("confidence", selected_segment.get("confidence", 0.0)) or 0.0)
@@ -313,7 +313,7 @@ class ArchiveTask:
                 selected=selected_format,
                 hint=source.format_hint,
                 confidence=confidence,
-                status=knowledge_view.analysis_status(self),
+                status=knowledge_view.inspection_status(self),
             ),
             relation=relation,
             integrity=ArchiveIntegrityState(damage_flags=_dedupe([str(item) for item in damage_flags])),
@@ -327,9 +327,9 @@ class ArchiveTask:
     def _format_hint(self) -> str:
         knowledge = self.knowledge()
         return str(
-            knowledge.get("analysis.selected_format", "")
-            or knowledge.get("analysis.summary.format", "")
+            knowledge.get("inspection.summary.format", "")
             or knowledge.get("archive.format_hint", "")
+            or knowledge.get("source.input.format_hint", "")
             or self.detected_ext
             or self.fact_bag.get("file.detected_ext")
             or ""

@@ -44,9 +44,9 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
     route_context = knowledge_view.repair_route_context(knowledge)
     history = knowledge_view.repair_history_summary(knowledge)
     authentication = knowledge_view.archive_authentication(knowledge)
-    analysis_summary = _dict_at(knowledge, "analysis.summary") or _dict_at(knowledge, "analysis")
-    prepass = _dict_at(knowledge, "analysis.prepass")
-    fuzzy = _dict_at(knowledge, "analysis.fuzzy")
+    analysis_summary = _dict_at(knowledge, "inspection.summary") or _dict_at(knowledge, "inspection")
+    prepass = _dict_at(knowledge, "inspection.prepass")
+    fuzzy = _dict_at(knowledge, "inspection.fuzzy")
     failure = _dict_at(knowledge, "extraction.failure")
     diagnostics = _dict_at(knowledge, "extraction.diagnostics")
     entry_outcomes = _dict_at(knowledge, "extraction.entry_outcomes")
@@ -234,7 +234,7 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
     route_context = knowledge_view.repair_route_context(knowledge)
     zip_facts = knowledge_view.zip_runtime_facts(knowledge)
     source = _dict_at(knowledge, "source.input")
-    analysis_summary = _dict_at(knowledge, "analysis.summary") or _dict_at(knowledge, "analysis")
+    analysis_summary = _dict_at(knowledge, "inspection.summary") or _dict_at(knowledge, "inspection")
     probe: dict[str, Any] = {
         "format": str(analysis_summary.get("format") or analysis_summary.get("selected_format") or job.format or ""),
         "confidence": _float(analysis_summary.get("confidence"), default=float(job.confidence or 0.0)),
@@ -301,7 +301,7 @@ def _candidate_branchable(payload: dict[str, Any]) -> bool:
 
 
 def _missing_runtime_paths(knowledge: ArchiveKnowledge) -> list[str]:
-    required = ("source.input", "analysis.summary", "extraction.failure", "verification.summary")
+    required = ("source.input", "inspection.summary", "extraction.failure", "verification.summary")
     missing = [path for path in required if knowledge.get(path) in (None, "", [], {})]
     sentinel = object()
     if knowledge.get("repair.history", sentinel) is sentinel:

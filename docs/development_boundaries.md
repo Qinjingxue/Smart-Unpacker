@@ -25,7 +25,7 @@ coordinator
   -> filesystem
   -> relations
   -> detection
-  -> analysis
+  -> inspect
   -> extraction
   -> verification
   -> repair
@@ -35,11 +35,16 @@ coordinator
 
 detection
   -> contracts
+  -> analysis public capabilities
   -> support/native helpers
 
 analysis
-  -> native binary view/probes
-  -> contracts/result objects
+  -> native binary view/probes and embedded scanner
+  -> neutral contracts/result objects
+
+inspect
+  -> analysis public capabilities
+  -> contracts.ArchiveTask / ArchiveState
 
 extraction
   -> contracts
@@ -96,7 +101,9 @@ contracts
 | 检测 | `detection.DetectionScheduler` | 对 Coordinator 提供的候选 facts 做规则判断。 |
 | 候选编排 | `coordinator.task_provider.ArchiveTaskProvider` | 串联 filesystem、relations、detection 和结构救援。 |
 | 递归策略 | `coordinator.output_scan_policy.NestedOutputScanPolicy` | 判断输出目录是否进入下一轮扫描。 |
-| 结构分析 | `analysis.ArchiveAnalysisScheduler` | 对已确认候选做结构分析和边界标注。 |
+| 通用归档分析 | `analysis.ArchiveAnalyzer` | 提供无业务调度的格式、结构、边界、fuzzy 和 embedded 分析能力。 |
+| 修复检查反馈 | `inspect.ArchiveInspector` | 在 repair loop 中分析当前/patch 后状态并投影 inspection feedback。 |
+| 输入规划 | `detection.input_planning.ArchiveInputPlanningStage` | 把中立分析报告转换为主流程归档输入和 embedded 子任务。 |
 | 密码 | `sunpack.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档输出目录、密码解析、worker 解压。 |
 | 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
@@ -143,7 +150,7 @@ contracts
 
 `detection` 只回答“候选是否应进入解压任务”。它分三层：
 
-目录扫描、关系分组和 Analysis 结构救援均由 Coordinator 驱动；Detection 只接收 `FactBag`，必要时通过 `refine_with_structure` 消费中立结构证据。
+目录扫描和关系分组由 Coordinator 驱动。Detection 可通过 Analysis 公共能力获得中立结构证据，并独自拥有候选授权、规则、评分以及归档输入规划。
 
 - `facts`：采集初等事实，例如路径、大小、magic bytes、scene marker。
 - `processors`：从初等 facts 推导高等 facts，例如结构事实、embedded payload、scene context、7z probe/test。
@@ -153,11 +160,11 @@ contracts
 
 ### analysis
 
-`analysis` 是压缩包结构分析层。输入应是 detection 已筛出的候选或 relation 分卷组；输出格式证据、片段边界、置信度和损坏标记。分析层使用 Rust `AnalysisBinaryView`、signature prepass 和格式 probe；头尾未选出可解压结构时调用中立的 `sunpack.embedded` 完整扫描能力。Detection 已写入完整 prepass 时必须复用，不得重复扫描；不保留 Python 文件读取/结构解析 fallback。
+`analysis` 是无业务策略的通用归档分析能力层。公共入口 `ArchiveAnalyzer` 接收 file、multi-volume、range 或 patched source 和 `AnalysisRequest`，输出格式证据、片段边界、置信度与损坏标记。它内部可以执行 signature prepass、fuzzy、格式 probe 和 embedded fallback，但不得依赖 `ArchiveTask`、Detection、Inspect、Repair 或 Coordinator，也不得写业务 knowledge。
 
-### embedded
+### inspect
 
-`embedded` 是 Detection 和 Analysis 共享的完整嵌入归档扫描能力层。它独占 native `scan_embedded_archives` 调用、返回值归一化、文件身份缓存以及 `EmbeddedScanResult -> prepass` 转换；不拥有候选授权、Detection decision 或 Analysis selected 策略。
+`inspect` 只服务 repair loop。它把当前 `ArchiveTask`/`ArchiveState`（包括 patch stack）转换为 Analysis source，管理 repair 状态缓存，并把中立报告投影为 `inspection.*`、格式 evidence 和 `InspectionFeedback`。正常主流程不进入 Inspect；首次 repair diagnosis/job 构造前以及修复状态变化后必须刷新 Inspect。embedded scanner 已合并进 Analysis，不再存在独立领域层。
 
 ### passwords
 
@@ -165,7 +172,7 @@ contracts
 
 ### extraction
 
-`extraction` 是单归档解压执行层。它消费已经由 Coordinator 完整解析的 `ArchiveTask`、分卷描述、analysis 标注输入和 password resolution，调用 `sunpack_sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不查询 Relations、不负责扫描候选、不做批量并发、不做成功后清理。
+`extraction` 是单归档解压执行层。它消费由 Detection/input planner 完整解析的 `ArchiveTask`、`source.*` 输入和 password resolution，调用 `sunpack_sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不查询 Relations、不负责扫描候选、不做批量并发、不做成功后清理。
 
 ### repair
 
@@ -195,9 +202,9 @@ contracts
 
 ### coordinator
 
-`coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection→analysis→extraction→verification→postprocess 主流程，以及 analysis→extraction→verification→repair→analysis 循环。它还负责递归轮次、批量调度、资源 token、结构救援、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
+`coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection/input planning→extraction→verification→postprocess 主流程，以及 verification→inspect→repair→inspect 的反馈循环。它还负责递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
 
-流程领域包禁止互相导入，也禁止反向导入 `coordinator`。`detection` 和 `analysis` 只允许依赖中立的 `embedded` 公共入口；跨阶段数据通过共享结果契约或 `contracts` 传递。
+流程领域包禁止反向导入 `coordinator`。Detection 与 Inspect 只能调用 Analysis 公共能力；Analysis 不得反向依赖它们。跨阶段数据通过共享结果契约或 `contracts` 传递。
 
 ### support
 
@@ -257,7 +264,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 - app 是否仍只是 CLI 适配？
 - coordinator 是否仍只是编排？
 - relation 能力是否通过 `RelationsScheduler` 暴露？
-- analysis 是否负责结构和边界，extraction 是否只执行解压？
+- analysis 是否仍是无业务调度的通用能力，detection/inspect 是否只通过公共入口调用？
+- 正常主流程是否不进入 inspect，repair 首轮是否先获得 inspection feedback？
 - verification 是否先于 repair 给出完整度、source integrity 和 repair 决策？
 - repair 是否通过 native I/O 处理二进制？
 - repair 候选是否重新进入 extraction + verification，而不是直接标记成功？
@@ -268,13 +276,14 @@ powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 ```text
 sunpack/
   app/          CLI 命令、参数、输出和运行时适配
-  analysis/     压缩包结构分析和边界标注
+  analysis/     无业务策略的归档分析、probe、view 和 embedded 能力
   config/       配置读取、校验、归一化和领域配置视图
   contracts/    跨模块数据契约
   coordinator/  pipeline 编排、批量调度和递归
   detection/    候选检测、fact pipeline、规则判断、scene 策略
   extraction/   worker 解压黑盒和解压结果
   filesystem/   通用目录扫描、过滤和 watcher 监控能力
+  inspect/      repair loop 的归档状态检查与反馈投影
   passwords/    密码候选、调度和 verifier
   postprocess/  解压成功后的清理和扁平化
   relations/    文件关系、分卷和候选组
@@ -284,7 +293,7 @@ sunpack/
   verification/ 解压结果校验流水线
 ```
 
-`PipelineEngine` 拥有进程级资源调度器。调度器随 Engine 启停，所有 coordinator/analysis 并发阶段只能注册 workload 和申请资源 token，不能按批次自行创建或关闭调度器。
+`PipelineEngine` 拥有进程级资源调度器和调用层 executor。调度器随 Engine 启停；跨任务 input planning 并发由 Coordinator 管理，Analysis 只使用注入的 capability executor，不拥有跨任务生命周期。
 
 仓库级目录：
 
