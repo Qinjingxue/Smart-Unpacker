@@ -75,11 +75,14 @@ def handle(args, ctx):
             reporter.info(ctx.t("cli.inspect.effective_config"))
             reporter.info(to_json_text(effective_config))
         for item in items:
-            reporter.info(f"- {item['path']}")
-            reporter.info(
-                f"  Decision={item['decision']} Extract={'Yes' if item['should_extract'] else 'No'} "
-                f"Score={item['score']} Detected={item['detected_ext'] or '-'}"
-            )
+            reporter.info(ctx.t("cli.item_path", path=item["path"]))
+            reporter.info(ctx.t(
+                "cli.inspect.details",
+                decision=item["decision"],
+                extract=ctx.t("common.yes" if item["should_extract"] else "common.no"),
+                score=item["score"],
+                detected=item["detected_ext"] or "-",
+            ))
             reporter.info(ctx.t("cli.inspect.decision_trace",
                 stage=item.get("decision_stage") or "-",
                 discarded_at=item.get("discarded_at") or "-",

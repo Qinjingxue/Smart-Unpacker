@@ -175,10 +175,10 @@ class RunReporter:
             relation = self.i18n.t("report.relation.from", parent=parent) if parent else ""
             detail = ""
             if self.verbose and success and out_dir:
-                detail = f" -> {out_dir}"
+                detail = self.i18n.t("report.detail.output", output=out_dir)
             elif self.verbose and not success:
                 error = str(getattr(result, "error", "") or "")
-                detail = f"：{error}" if error else ""
+                detail = self.i18n.t("report.detail.error", error=error) if error else ""
             print(f"{prefix}[{status} {progress}] {name}{relation}{detail}", flush=True)
 
     def log_final_summary(

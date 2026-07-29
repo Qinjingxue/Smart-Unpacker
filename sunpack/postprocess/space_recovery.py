@@ -9,14 +9,14 @@ class ArchiveSpaceRecovery:
 
     def cleanup_next_archive_group(self) -> bool:
         if self.actions.cleanup_mode == "keep":
-            print("[CRITICAL] Disk is full, but config is set to keep original archives. Cannot free space.")
+            print(self.actions.t("space.full_keep"))
             return False
 
         if not self.context.unpacked_archives:
-            print("[CRITICAL] Disk is full, no archives left to delete!")
+            print(self.actions.t("space.full_no_archives"))
             return False
 
         parts_to_delete = self.context.unpacked_archives.pop(0)
         for path in parts_to_delete:
-            self.actions.cleanup_archive_file(path, "[SPACE] Freeing space: ")
+            self.actions.cleanup_archive_file(path, self.actions.t("space.freeing"))
         return True

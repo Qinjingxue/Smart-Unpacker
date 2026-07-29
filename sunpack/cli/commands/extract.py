@@ -112,7 +112,7 @@ def handle(args, ctx):
                 "wrong_password_failure": has_password_failure(failures),
                 "failures": [failure.to_dict() for failure in failures],
             })
-            _emit_verbose_recovery_details(reporter, summary)
+            _emit_verbose_recovery_details(reporter, summary, ctx)
             if not _should_retry_password_failure(args, failures):
                 break
             if not _confirm_password_retry(ctx):
@@ -198,7 +198,7 @@ def has_password_failure(failures: list[FailureInfo]) -> bool:
     return any(failure.is_password_failure for failure in failures)
 
 
-def _emit_verbose_recovery_details(reporter, summary) -> None:
+def _emit_verbose_recovery_details(reporter, summary, ctx) -> None:
     recovered = list(getattr(summary, "recovered_outputs", []) or [])
     if not recovered or not getattr(reporter, "verbose", False):
         return
@@ -209,19 +209,19 @@ def _emit_verbose_recovery_details(reporter, summary) -> None:
         selected = report.get("selected_attempt") if isinstance(report.get("selected_attempt"), dict) else {}
         comparison = report.get("comparison") if isinstance(report.get("comparison"), dict) else {}
         if selected:
-            reporter.detail(_selected_attempt_label(item, selected, comparison))
+            reporter.detail(_selected_attempt_label(item, selected, comparison, ctx))
         rejected = [entry for entry in report.get("rejected_attempts") or [] if isinstance(entry, dict)]
         for entry in rejected[:5]:
-            reporter.detail(_rejected_attempt_label(entry))
+            reporter.detail(_rejected_attempt_label(entry, ctx))
         if not files:
             continue
-        reporter.detail(f"[CLI] Partial recovery files for {item.get('archive', '')}:")
+        reporter.detail(ctx.t("cli.extract.recovery_files", archive=item.get("archive", "")))
         for file in files:
-            name = file.get("archive_path") or file.get("output_path") or "<unknown>"
+            name = file.get("archive_path") or file.get("output_path") or ctx.t("common.unknown")
             status = file.get("status") or "unverified"
             size = _file_size_label(file)
             action = file.get("user_action") or "inspect_manually"
-            reporter.detail(f"  - [{status}] {name}{size} ({action})")
+            reporter.detail(ctx.t("cli.extract.recovery_file", status=status, name=name, size=size, action=action))
 
 
 def _read_recovery_report(path: str) -> dict:
@@ -235,7 +235,7 @@ def _read_recovery_report(path: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _selected_attempt_label(item: dict, selected: dict, comparison: dict) -> str:
+def _selected_attempt_label(item: dict, selected: dict, comparison: dict, ctx) -> str:
     vector = selected.get("rank_vector") if isinstance(selected.get("rank_vector"), dict) else {}
     reasons = selected.get("reasons") if isinstance(selected.get("reasons"), list) else []
     reason_label = ", ".join(_reason_label(reason) for reason in reasons[:3] if isinstance(reason, dict))
@@ -245,24 +245,14 @@ def _selected_attempt_label(item: dict, selected: dict, comparison: dict) -> str
         score_label = f"{float(score):.3f}"
     except (TypeError, ValueError):
         score_label = str(score or "")
-    return (
-        f"[CLI] Selected recovery attempt for {item.get('archive', '')}: "
-        f"{selected.get('decision', 'selected')} score={score_label} "
-        f"source={vector.get('source', 'verification')} stop={stop_reason}"
-        + (f" ({reason_label})" if reason_label else "")
-    )
+    return ctx.t("cli.extract.selected_attempt", archive=item.get("archive", ""), decision=selected.get("decision", "selected"), score=score_label, source=vector.get("source", "verification"), stop=stop_reason, reasons=f" ({reason_label})" if reason_label else "")
 
 
-def _rejected_attempt_label(entry: dict) -> str:
+def _rejected_attempt_label(entry: dict, ctx) -> str:
     rank = entry.get("rank") if isinstance(entry.get("rank"), dict) else {}
     vector = rank.get("rank_vector") if isinstance(rank.get("rank_vector"), dict) else {}
     coverage = entry.get("archive_coverage") if isinstance(entry.get("archive_coverage"), dict) else {}
-    return (
-        "[CLI] Rejected recovery attempt: "
-        f"source={entry.get('source', '')} module={entry.get('repair_module', '')} "
-        f"decision={rank.get('decision', '')} completeness={coverage.get('completeness', '')} "
-        f"complete_files={coverage.get('complete_files', '')} failed_missing={vector.get('failed_missing_files', '')}"
-    )
+    return ctx.t("cli.extract.rejected_attempt", source=entry.get("source", ""), module=entry.get("repair_module", ""), decision=rank.get("decision", ""), completeness=coverage.get("completeness", ""), complete_files=coverage.get("complete_files", ""), failed_missing=vector.get("failed_missing_files", ""))
 
 
 def _reason_label(reason: dict) -> str:

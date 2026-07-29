@@ -4,12 +4,14 @@ from typing import Any, Dict, Iterable
 from sunpack.contracts.run_context import RunContext
 from sunpack.postprocess.internal.cleanup import ArchiveCleanup
 from sunpack.postprocess.internal.flatten import DirectoryFlattener
+from sunpack.i18n import I18nContext
 
 
 class PostProcessActions:
     def __init__(self, config: Dict[str, Any], context: RunContext | None = None, language: str = "en"):
         self.config = config
         self.context = context
+        self.i18n = I18nContext(language)
         self.cleanup_mode = config.get("post_extract", {}).get("archive_cleanup_mode", "recycle")
         if self.cleanup_mode not in {"keep", "recycle", "delete"}:
             raise ValueError("archive_cleanup_mode must be normalized before PostProcessActions starts")
@@ -34,6 +36,9 @@ class PostProcessActions:
 
     def cleanup_archive_file(self, path: str, reason: str = "[CLEAN]"):
         self.cleanup.cleanup_archive_file(path, reason)
+
+    def t(self, key: str, **params) -> str:
+        return self.i18n.t(key, **params)
 
     def _consume_archives_to_clean(self, archives_to_clean: Iterable[Iterable[str]] | None) -> list[list[str]]:
         if archives_to_clean is not None:

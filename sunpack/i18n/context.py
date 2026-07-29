@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from string import Formatter
 from typing import Any
 
 from sunpack.i18n.catalog import CATALOG
@@ -34,8 +35,17 @@ class I18nContext:
 
 def validate_catalog() -> None:
     base_keys = set(CATALOG[DEFAULT_LANGUAGE])
+    formatter = Formatter()
     for language, texts in CATALOG.items():
         missing = sorted(base_keys - set(texts))
         extra = sorted(set(texts) - base_keys)
         if missing or extra:
             raise ValueError(f"Catalog key mismatch for {language}: missing={missing} extra={extra}")
+        for key in sorted(base_keys):
+            base_fields = {name for _, name, _, _ in formatter.parse(CATALOG[DEFAULT_LANGUAGE][key]) if name}
+            translated_fields = {name for _, name, _, _ in formatter.parse(texts[key]) if name}
+            if translated_fields != base_fields:
+                raise ValueError(
+                    f"Catalog placeholder mismatch for {language}.{key}: "
+                    f"expected={sorted(base_fields)} actual={sorted(translated_fields)}"
+                )

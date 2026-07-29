@@ -4,6 +4,8 @@ import os
 import sys
 
 from sunpack.support.runtime_cwd import runtime_working_directory
+from sunpack.config.cli_settings import load_cli_language_from_config
+from sunpack.i18n import I18nContext
 
 
 SERVER_ARG = "--persistent-server"
@@ -45,6 +47,7 @@ def server_command() -> list[str]:
 
 
 def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
+    i18n = I18nContext(load_cli_language_from_config())
     request_cwd = os.getcwd()
     request_argv = list(argv)
     pause = "--pause" in request_argv
@@ -70,7 +73,7 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
             print(stderr, end="", file=sys.stderr)
         if pause and sys.stdin is not None and sys.stdin.isatty():
             try:
-                input("Press Enter to continue...")
+                input(i18n.t("cli.press_enter"))
             except (EOFError, KeyboardInterrupt):
                 pass
         return int(response.get("exit_code", 1))
@@ -103,7 +106,7 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         if response is not None:
             return response
         time.sleep(0.025)
-    return {"exit_code": 1, "stdout": "", "stderr": "SunPack persistent process did not start in time.\n"}
+    return {"exit_code": 1, "stdout": "", "stderr": I18nContext(load_cli_language_from_config()).t("cli.persistent_start_timeout") + "\n"}
 
 
 def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -345,7 +348,7 @@ def _execute_streaming_request(main, payload: dict[str, Any], connection) -> int
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             return int(main(argv) or 0)
     except BaseException as exc:
-        print(f"SunPack persistent request failed: {exc}", file=stderr)
+        print(I18nContext(load_cli_language_from_config()).t("cli.persistent_request_failed", error=exc), file=stderr)
         return 1
     finally:
         sys.stdin = previous_stdin

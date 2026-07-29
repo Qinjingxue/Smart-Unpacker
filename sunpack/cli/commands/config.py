@@ -41,7 +41,7 @@ def handle(args, ctx):
             item = validate_config_payload(payload)
             if not item["ok"]:
                 for error in item["errors"]:
-                    reporter.error(f"[CONFIG] {error}")
+                    reporter.error(ctx.t("cli.config.validation_error", error=error))
                 return EXIT_USAGE, CliCommandResult(
                     command=COMMAND,
                     inputs={"action": args.config_action},
