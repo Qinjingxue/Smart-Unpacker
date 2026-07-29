@@ -28,9 +28,22 @@ pub(crate) fn seven_zip_scan_source(
 
     let offsets = find_all(&data, SEVEN_Z_MAGIC);
     result.set_item("signature_count", offsets.len())?;
-    result.set_item("signature_offsets", PyList::new(py, offsets.iter().take(max_candidates.max(1)).copied().collect::<Vec<_>>())?)?;
+    result.set_item(
+        "signature_offsets",
+        PyList::new(
+            py,
+            offsets
+                .iter()
+                .take(max_candidates.max(1))
+                .copied()
+                .collect::<Vec<_>>(),
+        )?,
+    )?;
     let Some(offset) = offsets.first().copied() else {
-        result.set_item("route_evidence_flags", PyList::new(py, ["seven_zip_signature_missing"])?)?;
+        result.set_item(
+            "route_evidence_flags",
+            PyList::new(py, ["seven_zip_signature_missing"])?,
+        )?;
         result.set_item("structure", PyDict::new(py))?;
         result.set_item("candidates", PyList::empty(py))?;
         return Ok(result.unbind());
@@ -38,7 +51,8 @@ pub(crate) fn seven_zip_scan_source(
 
     let loose = loose_seven_zip_header_facts(&data, offset);
     let header = parse_seven_zip_header(&data, offset);
-    let candidates = scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
+    let candidates =
+        scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
     let candidate_list = PyList::empty(py);
     for candidate in &candidates {
         let item = PyDict::new(py);
@@ -55,7 +69,10 @@ pub(crate) fn seven_zip_scan_source(
     structure.set_item("password_present", password.is_some())?;
     structure.set_item("password_required", password_status.password_required)?;
     structure.set_item("password_rejected", password_status.password_rejected)?;
-    structure.set_item("archive_readable_with_password", password_status.archive_readable)?;
+    structure.set_item(
+        "archive_readable_with_password",
+        password_status.archive_readable,
+    )?;
     structure.set_item("encrypted_header", password_status.encrypted_header)?;
     if let Some(message) = password_status.message.as_ref() {
         structure.set_item("password_diagnostic", message)?;
@@ -79,7 +96,10 @@ pub(crate) fn seven_zip_scan_source(
     structure.set_item("next_header_out_of_range", !loose.range_valid)?;
     if let Some(header) = &header {
         structure.set_item("archive_end", header.archive_end)?;
-        structure.set_item("trailing_bytes", data.len().saturating_sub(header.archive_end))?;
+        structure.set_item(
+            "trailing_bytes",
+            data.len().saturating_sub(header.archive_end),
+        )?;
         structure.set_item("next_header_start", header.next_header_start)?;
         structure.set_item("next_header_offset", header.next_header_offset)?;
         structure.set_item("next_header_size", header.next_header_size)?;
@@ -88,13 +108,21 @@ pub(crate) fn seven_zip_scan_source(
         structure.set_item("next_header_nid", header.next_header_nid)?;
         structure.set_item("next_header_crc_ok", header.next_header_crc_ok())?;
         structure.set_item("next_header_nid_valid", header.next_header_nid_valid)?;
-        structure.set_item("encoded_header_present", header.next_header_nid == SZ_ENCODED_HEADER)?;
+        structure.set_item(
+            "encoded_header_present",
+            header.next_header_nid == SZ_ENCODED_HEADER,
+        )?;
         let ast_for_scan = if header.next_header_nid == SZ_ENCODED_HEADER {
             parse_seven_zip_encoded_header_ast(&data, header)
         } else {
             parse_seven_zip_header_ast(&data, header)
         };
         if let Ok(ast) = ast_for_scan {
+            structure.set_item("header_graph_complete", ast.diagnostics.is_empty())?;
+            structure.set_item(
+                "header_graph_diagnostics",
+                PyList::new(py, &ast.diagnostics)?,
+            )?;
             if let Some(pack) = ast.pack_info.as_ref() {
                 structure.set_item("pack_stream_count", pack.num_streams)?;
                 structure.set_item("pack_stream_offset", pack.pack_pos.value)?;
@@ -102,15 +130,27 @@ pub(crate) fn seven_zip_scan_source(
                 structure.set_item("pack_stream_sizes", PyList::new(py, pack_sizes)?)?;
                 if pack.num_streams == 1 && pack.sizes.len() == 1 {
                     let expected_offset = if header.next_header_nid == SZ_ENCODED_HEADER {
-                        header.next_header_offset.checked_sub(pack.sizes[0].value).unwrap_or(0)
+                        header
+                            .next_header_offset
+                            .checked_sub(pack.sizes[0].value)
+                            .unwrap_or(0)
                     } else {
                         0
                     };
                     structure.set_item("pack_stream_offset_expected", expected_offset)?;
-                    structure.set_item("pack_stream_offset_bad", pack.pack_pos.value != expected_offset)?;
-                    let expected_size = header.next_header_offset.checked_sub(pack.pack_pos.value).unwrap_or(0);
+                    structure.set_item(
+                        "pack_stream_offset_bad",
+                        pack.pack_pos.value != expected_offset,
+                    )?;
+                    let expected_size = header
+                        .next_header_offset
+                        .checked_sub(pack.pack_pos.value)
+                        .unwrap_or(0);
                     structure.set_item("pack_stream_size_expected", expected_size)?;
-                    structure.set_item("pack_stream_size_bad", expected_size > 0 && expected_size != pack.sizes[0].value)?;
+                    structure.set_item(
+                        "pack_stream_size_bad",
+                        expected_size > 0 && expected_size != pack.sizes[0].value,
+                    )?;
                 } else {
                     structure.set_item("pack_stream_offset_bad", pack.pack_pos.value != 0)?;
                 }
@@ -119,16 +159,27 @@ pub(crate) fn seven_zip_scan_source(
                         let stream_start = SEVEN_Z_HEADER_SIZE
                             .checked_add(usize::try_from(pack.pack_pos.value).unwrap_or(usize::MAX))
                             .unwrap_or(usize::MAX);
-                        let stream_size = usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
-                        let stream_end = stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
-                        if stream_start >= SEVEN_Z_HEADER_SIZE && stream_end <= data.len() && stream_end <= header.next_header_start {
+                        let stream_size =
+                            usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
+                        let stream_end =
+                            stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
+                        if stream_start >= SEVEN_Z_HEADER_SIZE
+                            && stream_end <= data.len()
+                            && stream_end <= header.next_header_start
+                        {
                             let computed_crc = crc32(&data[stream_start..stream_end]);
                             structure.set_item("computed_stream_crc", computed_crc)?;
                             structure.set_item("stored_stream_crc", pack.crc_values[0].value)?;
                             if header.next_header_nid == SZ_ENCODED_HEADER {
-                                structure.set_item("encoded_header_stream_crc_bad", computed_crc != pack.crc_values[0].value)?;
+                                structure.set_item(
+                                    "encoded_header_stream_crc_bad",
+                                    computed_crc != pack.crc_values[0].value,
+                                )?;
                             } else {
-                                structure.set_item("stream_crc_bad", computed_crc != pack.crc_values[0].value)?;
+                                structure.set_item(
+                                    "stream_crc_bad",
+                                    computed_crc != pack.crc_values[0].value,
+                                )?;
                             }
                         }
                     }
@@ -136,9 +187,101 @@ pub(crate) fn seven_zip_scan_source(
             }
             if let Some(files) = ast.files_info.as_ref() {
                 structure.set_item("file_count_metadata", files.num_files.value)?;
-                structure.set_item("empty_stream_property_present", files.empty_stream_property.is_some())?;
-                structure.set_item("empty_file_property_present", files.empty_file_property.is_some())?;
+                structure.set_item(
+                    "empty_stream_property_present",
+                    files.empty_stream_property.is_some(),
+                )?;
+                structure.set_item(
+                    "empty_file_property_present",
+                    files.empty_file_property.is_some(),
+                )?;
                 structure.set_item("anti_item_property_present", files.anti_property.is_some())?;
+            }
+            if let Some(unpack) = ast.unpack_info.as_ref() {
+                structure.set_item("folder_count", unpack.folders.len())?;
+                structure.set_item(
+                    "folder_coder_counts",
+                    PyList::new(py, unpack.folders.iter().map(|folder| folder.coders.len()))?,
+                )?;
+                structure.set_item(
+                    "folder_packed_stream_counts",
+                    PyList::new(
+                        py,
+                        unpack
+                            .folders
+                            .iter()
+                            .map(|folder| folder.packed_streams.len()),
+                    )?,
+                )?;
+                structure.set_item(
+                    "folder_unpack_sizes",
+                    PyList::new(py, unpack.folders.iter().map(|folder| folder.unpack_size))?,
+                )?;
+                structure.set_item(
+                    "folder_crc_defined",
+                    PyList::new(
+                        py,
+                        unpack
+                            .folders
+                            .iter()
+                            .map(|folder| folder.expected_crc.is_some()),
+                    )?,
+                )?;
+                let coder_methods = unpack
+                    .folders
+                    .iter()
+                    .map(|folder| {
+                        folder
+                            .coders
+                            .iter()
+                            .map(|coder| {
+                                coder
+                                    .method_id
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                structure.set_item("folder_coder_methods", coder_methods)?;
+                let coder_property_ranges = unpack
+                    .folders
+                    .iter()
+                    .map(|folder| {
+                        folder
+                            .coders
+                            .iter()
+                            .map(|coder| coder.properties_range)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                structure.set_item("folder_coder_property_ranges", coder_property_ranges)?;
+            }
+            if let Some(substreams) = ast.substreams_info.as_ref() {
+                structure.set_item("substream_count", substreams.unpack_size_values.len())?;
+                structure.set_item(
+                    "folder_substream_counts",
+                    PyList::new(py, &substreams.num_unpack_streams)?,
+                )?;
+                structure.set_item(
+                    "substream_unpack_sizes",
+                    PyList::new(py, &substreams.unpack_size_values)?,
+                )?;
+                structure.set_item(
+                    "substream_crc_defined",
+                    PyList::new(py, substreams.crc_values.iter().map(Option::is_some))?,
+                )?;
+                structure.set_item(
+                    "explicit_substream_size_ranges",
+                    PyList::new(
+                        py,
+                        substreams
+                            .unpack_sizes
+                            .iter()
+                            .map(|span| (span.start, span.end)),
+                    )?,
+                )?;
             }
         }
     } else {
@@ -153,7 +296,9 @@ pub(crate) fn seven_zip_scan_source(
             .as_ref()
             .is_none_or(|item| !item.next_header_nid_valid);
     if needs_header_candidate_scan {
-        if let Some((offset_candidate, size_candidate)) = find_next_header_candidate(&data[offset..], max_scan_bytes.max(1)) {
+        if let Some((offset_candidate, size_candidate)) =
+            find_next_header_candidate(&data[offset..], max_scan_bytes.max(1))
+        {
             structure.set_item("encoded_header_candidate_found", true)?;
             structure.set_item("encoded_header_candidate_offset", offset_candidate)?;
             structure.set_item("encoded_header_candidate_size", size_candidate)?;
@@ -172,14 +317,21 @@ pub(crate) fn seven_zip_scan_source(
                 }
                 Err(reason) => {
                     structure.set_item("encoded_header_decodable", false)?;
-                    structure.set_item("encoded_header_decoder_method_supported", !reason.contains("unsupported"))?;
+                    structure.set_item(
+                        "encoded_header_decoder_method_supported",
+                        !reason.contains("unsupported"),
+                    )?;
                     structure.set_item(
                         "encoded_header_coder_properties_bad",
                         !reason.contains("password") && reason.contains("coder_properties"),
                     )?;
                     if reason.contains("password") {
                         structure.set_item(
-                            if password.is_some() { "encoded_header_decode_password_rejected" } else { "encoded_header_decode_password_required" },
+                            if password.is_some() {
+                                "encoded_header_decode_password_rejected"
+                            } else {
+                                "encoded_header_decode_password_required"
+                            },
                             true,
                         )?;
                     }
@@ -204,7 +356,9 @@ pub(crate) fn seven_zip_scan_source(
         structure.set_item("encoded_header_coder_properties_bad", false)?;
     }
     if let Some(header) = &header {
-        let raw = data.get(header.next_header_start..header.archive_end).unwrap_or(&[]);
+        let raw = data
+            .get(header.next_header_start..header.archive_end)
+            .unwrap_or(&[]);
         structure.set_item(
             "header_end_marker_bad",
             raw.last().copied().is_some_and(|item| item != SZ_END),
@@ -222,14 +376,22 @@ pub(crate) fn seven_zip_scan_source(
     structure.set_item("anti_item_flags_bad", false)?;
     if let Some(header) = &header {
         if header.next_header_nid == SZ_ENCODED_HEADER {
-            let raw = data.get(header.next_header_start..header.archive_end).unwrap_or(&[]);
+            let raw = data
+                .get(header.next_header_start..header.archive_end)
+                .unwrap_or(&[]);
             structure.set_item(
                 "folder_bind_pairs_bad",
-                matches!(seven_zip_encoded_header_folder_bind_pairs_patch(raw), Ok(Some(_))),
+                matches!(
+                    seven_zip_encoded_header_folder_bind_pairs_patch(raw),
+                    Ok(Some(_))
+                ),
             )?;
             structure.set_item(
                 "folder_stream_counts_bad",
-                matches!(seven_zip_encoded_header_folder_stream_counts_patch(raw), Ok(Some(_))),
+                matches!(
+                    seven_zip_encoded_header_folder_stream_counts_patch(raw),
+                    Ok(Some(_))
+                ),
             )?;
         } else {
             structure.set_item("folder_bind_pairs_bad", false)?;
@@ -248,7 +410,8 @@ pub(crate) fn seven_zip_scan_source(
     structure.set_item("verified_folder_available", false)?;
     result.set_item("structure", structure)?;
 
-    let mut route_flags = seven_zip_route_flags(&data, offset, header.as_ref(), &loose, password.as_deref());
+    let mut route_flags =
+        seven_zip_route_flags(&data, offset, header.as_ref(), &loose, password.as_deref());
     if password_status.password_required {
         push_unique_string(&mut route_flags, "password_required");
         push_unique_string(&mut route_flags, "encrypted_header");
@@ -258,7 +421,13 @@ pub(crate) fn seven_zip_scan_source(
         push_unique_string(&mut route_flags, "encrypted_header");
     }
     result.set_item("route_evidence_flags", PyList::new(py, &route_flags)?)?;
-    result.set_item("container_tags", PyList::new(py, seven_zip_container_tags(offset, header.as_ref(), data.len()))?)?;
+    result.set_item(
+        "container_tags",
+        PyList::new(
+            py,
+            seven_zip_container_tags(offset, header.as_ref(), data.len()),
+        )?,
+    )?;
     Ok(result.unbind())
 }
 
@@ -275,7 +444,9 @@ fn scan_archive_signatures(
         }
         if let Some(candidate) = seven_zip_candidate(data, offset) {
             output.push(candidate);
-            if output.len() >= max_candidates { return output; }
+            if output.len() >= max_candidates {
+                return output;
+            }
         }
     }
     output.sort_by_key(|candidate| candidate.offset);
@@ -287,16 +458,21 @@ pub(crate) fn carrier_scan_candidates(
     require_carrier_offset: bool,
     max_candidates: usize,
 ) -> Vec<CarrierScanCandidate> {
-    scan_archive_signatures(data, TargetFormat::SevenZip, require_carrier_offset, max_candidates)
-        .into_iter()
-        .map(|candidate| CarrierScanCandidate {
-            offset: candidate.offset,
-            archive_end: candidate.archive_end,
-            start_crc_ok: candidate.start_crc_ok,
-            next_header_crc_ok: candidate.next_header_crc_ok,
-            warnings: candidate.warnings,
-        })
-        .collect()
+    scan_archive_signatures(
+        data,
+        TargetFormat::SevenZip,
+        require_carrier_offset,
+        max_candidates,
+    )
+    .into_iter()
+    .map(|candidate| CarrierScanCandidate {
+        offset: candidate.offset,
+        archive_end: candidate.archive_end,
+        start_crc_ok: candidate.start_crc_ok,
+        next_header_crc_ok: candidate.next_header_crc_ok,
+        warnings: candidate.warnings,
+    })
+    .collect()
 }
 
 fn seven_zip_route_flags(
@@ -332,14 +508,22 @@ fn seven_zip_route_flags(
         }
         if header.next_header_nid == SZ_ENCODED_HEADER {
             flags.push("encoded_header_present".to_string());
-            let raw = data.get(header.next_header_start..header.archive_end).unwrap_or(&[]);
+            let raw = data
+                .get(header.next_header_start..header.archive_end)
+                .unwrap_or(&[]);
             if raw.last().copied().is_some_and(|item| item != SZ_END) {
                 flags.push("header_end_marker_bad".to_string());
             }
-            if matches!(seven_zip_encoded_header_folder_bind_pairs_patch(raw), Ok(Some(_))) {
+            if matches!(
+                seven_zip_encoded_header_folder_bind_pairs_patch(raw),
+                Ok(Some(_))
+            ) {
                 flags.push("folder_bind_pairs_bad".to_string());
             }
-            if matches!(seven_zip_encoded_header_folder_stream_counts_patch(raw), Ok(Some(_))) {
+            if matches!(
+                seven_zip_encoded_header_folder_stream_counts_patch(raw),
+                Ok(Some(_))
+            ) {
                 flags.push("folder_stream_counts_bad".to_string());
             }
         }
@@ -352,17 +536,26 @@ fn seven_zip_route_flags(
             parse_seven_zip_header_ast(data, header)
         };
         if let Ok(ast) = ast_for_route {
+            if !ast.diagnostics.is_empty() {
+                flags.push("seven_zip_header_graph_unparsed".to_string());
+            }
             if let Some(pack) = ast.pack_info.as_ref() {
                 if pack.num_streams == 1 && pack.sizes.len() == 1 {
                     let expected_offset = if header.next_header_nid == SZ_ENCODED_HEADER {
-                        header.next_header_offset.checked_sub(pack.sizes[0].value).unwrap_or(0)
+                        header
+                            .next_header_offset
+                            .checked_sub(pack.sizes[0].value)
+                            .unwrap_or(0)
                     } else {
                         0
                     };
                     if pack.pack_pos.value != expected_offset {
                         flags.push("pack_stream_offset_bad".to_string());
                     }
-                    let expected_size = header.next_header_offset.checked_sub(pack.pack_pos.value).unwrap_or(0);
+                    let expected_size = header
+                        .next_header_offset
+                        .checked_sub(pack.pack_pos.value)
+                        .unwrap_or(0);
                     if expected_size > 0 && expected_size != pack.sizes[0].value {
                         flags.push("pack_stream_size_bad".to_string());
                     }
@@ -370,9 +563,14 @@ fn seven_zip_route_flags(
                         let stream_start = SEVEN_Z_HEADER_SIZE
                             .checked_add(usize::try_from(pack.pack_pos.value).unwrap_or(usize::MAX))
                             .unwrap_or(usize::MAX);
-                        let stream_size = usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
-                        let stream_end = stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
-                        if stream_start >= SEVEN_Z_HEADER_SIZE && stream_end <= data.len() && stream_end <= header.next_header_start {
+                        let stream_size =
+                            usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
+                        let stream_end =
+                            stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
+                        if stream_start >= SEVEN_Z_HEADER_SIZE
+                            && stream_end <= data.len()
+                            && stream_end <= header.next_header_start
+                        {
                             let computed_crc = crc32(&data[stream_start..stream_end]);
                             if computed_crc != pack.crc_values[0].value {
                                 if header.next_header_nid == SZ_ENCODED_HEADER {
@@ -390,9 +588,7 @@ fn seven_zip_route_flags(
         }
         if header.next_header_nid == SZ_ENCODED_HEADER {
             if let Err(reason) = decode_seven_zip_encoded_header_payload(data, header, password) {
-                if !reason.contains("password")
-                    && reason.contains("coder_properties")
-                {
+                if !reason.contains("password") && reason.contains("coder_properties") {
                     flags.push("encoded_header_coder_properties_bad".to_string());
                 }
             }
@@ -401,7 +597,11 @@ fn seven_zip_route_flags(
     flags
 }
 
-fn seven_zip_container_tags(offset: usize, header: Option<&SevenZipHeader>, input_len: usize) -> Vec<String> {
+fn seven_zip_container_tags(
+    offset: usize,
+    header: Option<&SevenZipHeader>,
+    input_len: usize,
+) -> Vec<String> {
     let mut tags = vec!["7z".to_string()];
     if offset > 0 {
         tags.push("carrier_prefix".to_string());
@@ -413,4 +613,3 @@ fn seven_zip_container_tags(offset: usize, header: Option<&SevenZipHeader>, inpu
 
     tags
 }
-

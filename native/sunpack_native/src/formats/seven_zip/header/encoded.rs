@@ -132,6 +132,7 @@ fn parse_seven_zip_encoded_header_descriptor(
     pos += 1;
     let mut pack_info = None;
     let mut folder = None;
+    let mut unpack_info = None;
     loop {
         let Some(nid) = raw.get(pos).copied() else {
             return Err("encoded_header_tree_truncated".to_string());
@@ -141,13 +142,16 @@ fn parse_seven_zip_encoded_header_descriptor(
             SZ_END => break,
             SZ_PACK_INFO => pack_info = Some(parse_seven_zip_pack_info(raw, &mut pos)?),
             SZ_UNPACK_INFO => {
-                folder = Some(parse_seven_zip_encoded_header_unpack_info(raw, &mut pos)?)
+                let parsed = parse_seven_zip_unpack_info(raw, &mut pos)?;
+                folder = Some(seven_zip_encoded_folder_from_unpack_info(&parsed)?);
+                unpack_info = Some(parsed);
             }
-            SZ_SUB_STREAMS_INFO => skip_seven_zip_unhandled_property_tree(
-                raw,
-                &mut pos,
-                "EncodedHeader SubStreamsInfo",
-            )?,
+            SZ_SUB_STREAMS_INFO => {
+                let unpack = unpack_info
+                    .as_ref()
+                    .ok_or_else(|| "encoded_header_substreams_require_unpack_info".to_string())?;
+                parse_seven_zip_substreams_info(raw, &mut pos, unpack)?;
+            }
             _ => {
                 return Err(format!(
                     "encoded_header_unsupported_streams_nid_0x{nid:02x}"
@@ -528,76 +532,33 @@ fn seven_zip_aes_key_iv(
     Ok((key, iv))
 }
 
-fn parse_seven_zip_encoded_header_unpack_info(
-    data: &[u8],
-    pos: &mut usize,
+fn seven_zip_encoded_folder_from_unpack_info(
+    unpack: &SevenZipUnpackInfoAst,
 ) -> Result<SevenZipEncodedHeaderFolder, String> {
-    let mut coders = None;
-    let mut bind_pairs = Vec::new();
-    let mut packed_streams = Vec::new();
-    let mut main_output_stream = 0u64;
-    let mut folder_output_stream_count = 0u64;
-    let mut unpack_sizes = Vec::new();
-    let mut expected_crc = None;
-    loop {
-        let Some(nid) = data.get(*pos).copied() else {
-            return Err("encoded_header_unpack_info_truncated".to_string());
-        };
-        *pos += 1;
-        match nid {
-            SZ_END => break,
-            SZ_FOLDER => {
-                let (
-                    parsed_coders,
-                    output_stream_count,
-                    parsed_bind_pairs,
-                    parsed_packed_streams,
-                    parsed_main_output,
-                ) = parse_seven_zip_encoded_header_folder(data, pos)?;
-                folder_output_stream_count = output_stream_count;
-                coders = Some(parsed_coders);
-                bind_pairs = parsed_bind_pairs;
-                packed_streams = parsed_packed_streams;
-                main_output_stream = parsed_main_output;
-            }
-            SZ_CODERS_UNPACK_SIZE => {
-                let count = usize::try_from(folder_output_stream_count.max(1))
-                    .map_err(|_| "encoded_header_unpack_size_count_too_large".to_string())?;
-                unpack_sizes.clear();
-                for _ in 0..count {
-                    let span = read_sz_vint(data, pos)
-                        .ok_or_else(|| "encoded_header_unpack_size_truncated".to_string())?;
-                    unpack_sizes.push(span.value);
-                }
-            }
-            SZ_CRC => {
-                let defined = parse_seven_zip_bool_vector(data, pos, 1)?;
-                for is_defined in defined {
-                    if is_defined {
-                        if *pos + 4 > data.len() {
-                            return Err("encoded_header_crc_truncated".to_string());
-                        }
-                        expected_crc =
-                            Some(u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()));
-                        *pos += 4;
-                    }
-                }
-            }
-            _ => return Err(format!("encoded_header_unsupported_unpack_nid_0x{nid:02x}")),
-        }
+    let folder = unpack
+        .folders
+        .first()
+        .ok_or_else(|| "encoded_header_folder_missing".to_string())?;
+    if unpack.folders.len() != 1 {
+        return Err("encoded_header_folder_not_unique".to_string());
     }
-    let unpack_size = unpack_sizes
-        .last()
-        .copied()
-        .ok_or_else(|| "encoded_header_unpack_size_missing".to_string())?;
     Ok(SevenZipEncodedHeaderFolder {
-        coders: coders.ok_or_else(|| "encoded_header_folder_missing".to_string())?,
-        bind_pairs,
-        packed_streams,
-        main_output_stream,
-        unpack_size,
-        unpack_sizes,
-        expected_crc,
+        coders: folder
+            .coders
+            .iter()
+            .map(|coder| SevenZipEncodedHeaderCoder {
+                method_id: coder.method_id.clone(),
+                properties: coder.properties.clone(),
+                num_in_streams: coder.num_in_streams,
+                num_out_streams: coder.num_out_streams,
+            })
+            .collect(),
+        bind_pairs: folder.bind_pairs.clone(),
+        packed_streams: folder.packed_streams.clone(),
+        main_output_stream: folder.main_output_stream,
+        unpack_size: folder.unpack_size,
+        unpack_sizes: folder.unpack_sizes.iter().map(|span| span.value).collect(),
+        expected_crc: folder.expected_crc.map(|crc| crc.value),
     })
 }
 
@@ -650,7 +611,8 @@ fn seven_zip_probe_folder_supported(folder: &SevenZipEncodedHeaderFolder) -> boo
     aes_count == 1 && folder.unpack_size <= 64 * 1024 * 1024
 }
 
-fn parse_seven_zip_encoded_header_folder(
+#[cfg(any())]
+fn parse_seven_zip_encoded_header_folder_legacy(
     data: &[u8],
     pos: &mut usize,
 ) -> Result<

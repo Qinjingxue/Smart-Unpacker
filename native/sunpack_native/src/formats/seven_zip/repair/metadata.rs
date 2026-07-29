@@ -32,17 +32,44 @@ pub(crate) fn seven_zip_atomic_repair(
     }
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
-        Err(message) => return seven_zip_atomic_status(py, "skipped", target, "7z", "", &message, &[], &[], &[], 0.0, &[], &[]),
+        Err(message) => {
+            return seven_zip_atomic_status(
+                py,
+                "skipped",
+                target,
+                "7z",
+                "",
+                &message,
+                &[],
+                &[],
+                &[],
+                0.0,
+                &[],
+                &[],
+            )
+        }
     };
     match target {
-        "trailing_junk" => seven_zip_repair_boundary_target(py, &data, workspace, target, false, max_candidates),
-        "carrier_prefix" => seven_zip_repair_boundary_target(py, &data, workspace, target, true, max_candidates),
-        "signature_header_version" => seven_zip_repair_signature_header_version(py, &data, workspace, target),
+        "trailing_junk" => {
+            seven_zip_repair_boundary_target(py, &data, workspace, target, false, max_candidates)
+        }
+        "carrier_prefix" => {
+            seven_zip_repair_boundary_target(py, &data, workspace, target, true, max_candidates)
+        }
+        "signature_header_version" => {
+            seven_zip_repair_signature_header_version(py, &data, workspace, target)
+        }
         "start_header_crc" => seven_zip_repair_crc_target(py, &data, workspace, target),
         "next_header_crc" => seven_zip_repair_crc_target(py, &data, workspace, target),
-        "next_header_offset" => seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes),
-        "next_header_size" => seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes),
-        "next_header_repoint" => seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes),
+        "next_header_offset" => {
+            seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes)
+        }
+        "next_header_size" => {
+            seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes)
+        }
+        "next_header_repoint" => {
+            seven_zip_repair_next_header_target(py, &data, workspace, target, max_scan_bytes)
+        }
         "pack_stream_offset"
         | "pack_stream_size"
         | "stream_crc"
@@ -52,18 +79,75 @@ pub(crate) fn seven_zip_atomic_repair(
         | "encoded_header_stream_crc"
         | "folder_bind_pairs"
         | "folder_stream_counts"
-        | "empty_stream_flags" => seven_zip_repair_metadata_target(py, &data, workspace, target, extract_password(source_input).as_deref()),
+        | "empty_stream_flags" => seven_zip_repair_metadata_target(
+            py,
+            &data,
+            workspace,
+            target,
+            extract_password(source_input).as_deref(),
+        ),
         "non_solid_entries" => {
-            let result = seven_zip_salvage_non_solid_entries_native(py, source_input, workspace, max_input_size_mb, max_output_size_mb, max_entries)?;
-            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_non_solid_entries", "source_format=7z", "output_container=7z", "partial=true", "repacked_recovered_entries_as_7z"], &["partial_recovery_remaining"])?;
+            let result = seven_zip_salvage_non_solid_entries_native(
+                py,
+                source_input,
+                workspace,
+                max_input_size_mb,
+                max_output_size_mb,
+                max_entries,
+            )?;
+            set_seven_zip_atomic_fields(
+                py,
+                &result,
+                target,
+                &[
+                    "salvaged_non_solid_entries",
+                    "source_format=7z",
+                    "output_container=7z",
+                    "partial=true",
+                    "repacked_recovered_entries_as_7z",
+                ],
+                &["partial_recovery_remaining"],
+            )?;
             Ok(result)
         }
         "solid_prefix" => {
-            let result = seven_zip_salvage_solid_prefix_native(py, source_input, workspace, max_input_size_mb, max_output_size_mb, max_entries)?;
-            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_solid_prefix", "source_format=7z", "output_container=7z", "partial=true", "repacked_recovered_entries_as_7z"], &["partial_recovery_remaining"])?;
+            let result = seven_zip_salvage_solid_prefix_native(
+                py,
+                source_input,
+                workspace,
+                max_input_size_mb,
+                max_output_size_mb,
+                max_entries,
+            )?;
+            set_seven_zip_atomic_fields(
+                py,
+                &result,
+                target,
+                &[
+                    "salvaged_solid_prefix",
+                    "source_format=7z",
+                    "output_container=7z",
+                    "partial=true",
+                    "repacked_recovered_entries_as_7z",
+                ],
+                &["partial_recovery_remaining"],
+            )?;
             Ok(result)
         }
-        _ => seven_zip_atomic_status(py, "target_mismatch", target, "7z", "", "unsupported 7z atomic repair target", &[], &[], &[], 0.0, &[], &[]),
+        _ => seven_zip_atomic_status(
+            py,
+            "target_mismatch",
+            target,
+            "7z",
+            "",
+            "unsupported 7z atomic repair target",
+            &[],
+            &[],
+            &[],
+            0.0,
+            &[],
+            &[],
+        ),
     }
 }
 fn seven_zip_repair_metadata_target(
@@ -75,25 +159,71 @@ fn seven_zip_repair_metadata_target(
 ) -> PyResult<Py<PyDict>> {
     let offset = if data.starts_with(SEVEN_Z_MAGIC) {
         0
-    } else if data.windows(SEVEN_Z_MAGIC.len()).any(|window| window == SEVEN_Z_MAGIC) {
+    } else if data
+        .windows(SEVEN_Z_MAGIC.len())
+        .any(|window| window == SEVEN_Z_MAGIC)
+    {
         1
     } else {
-        return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z signature was not found", &[], &[], &[], 0.0, &["seven_zip_signature_missing"], &[]);
+        return seven_zip_atomic_status(
+            py,
+            "unrepairable",
+            target,
+            "7z",
+            "",
+            "7z signature was not found",
+            &[],
+            &[],
+            &[],
+            0.0,
+            &["seven_zip_signature_missing"],
+            &[],
+        );
     };
     if offset != 0 {
-        return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z metadata writer requires the current source to start at the 7z signature", &[], &[], &[], 0.0, &["carrier_prefix_remaining"], &[]);
+        return seven_zip_atomic_status(
+            py,
+            "unrepairable",
+            target,
+            "7z",
+            "",
+            "7z metadata writer requires the current source to start at the 7z signature",
+            &[],
+            &[],
+            &[],
+            0.0,
+            &["carrier_prefix_remaining"],
+            &[],
+        );
     }
     let Some(header) = parse_seven_zip_header(data, offset) else {
-        return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z start header could not be parsed", &[], &[], &[], 0.0, &["start_header_unreadable"], &[]);
+        return seven_zip_atomic_status(
+            py,
+            "unrepairable",
+            target,
+            "7z",
+            "",
+            "7z start header could not be parsed",
+            &[],
+            &[],
+            &[],
+            0.0,
+            &["start_header_unreadable"],
+            &[],
+        );
     };
     if target == "encoded_header_decode" {
-        return seven_zip_repair_encoded_header_decode_target(py, data, workspace, &header, target, password);
+        return seven_zip_repair_encoded_header_decode_target(
+            py, data, workspace, &header, target, password,
+        );
     }
     if target == "header_end_marker" {
         return seven_zip_repair_header_end_marker(py, data, workspace, &header, target);
     }
     if target == "encoded_header_coder_properties" && header.next_header_nid == SZ_ENCODED_HEADER {
-        return match seven_zip_repair_encoded_header_coder_properties(py, data, workspace, &header, target, password) {
+        return match seven_zip_repair_encoded_header_coder_properties(
+            py, data, workspace, &header, target, password,
+        ) {
             Ok(result) => Ok(result),
             Err(message) => seven_zip_atomic_status(
                 py,
@@ -112,7 +242,9 @@ fn seven_zip_repair_metadata_target(
         };
     }
     if target == "folder_bind_pairs" && header.next_header_nid == SZ_ENCODED_HEADER {
-        return match seven_zip_repair_encoded_header_folder_bind_pairs(py, data, workspace, &header, target) {
+        return match seven_zip_repair_encoded_header_folder_bind_pairs(
+            py, data, workspace, &header, target,
+        ) {
             Ok(result) => Ok(result),
             Err(message) => seven_zip_atomic_status(
                 py,
@@ -131,7 +263,9 @@ fn seven_zip_repair_metadata_target(
         };
     }
     if target == "folder_stream_counts" && header.next_header_nid == SZ_ENCODED_HEADER {
-        return match seven_zip_repair_encoded_header_folder_stream_counts(py, data, workspace, &header, target) {
+        return match seven_zip_repair_encoded_header_folder_stream_counts(
+            py, data, workspace, &header, target,
+        ) {
             Ok(result) => Ok(result),
             Err(message) => seven_zip_atomic_status(
                 py,
@@ -149,7 +283,9 @@ fn seven_zip_repair_metadata_target(
             ),
         };
     }
-    if header.next_header_nid == SZ_ENCODED_HEADER && matches!(target, "pack_stream_offset" | "pack_stream_size") {
+    if header.next_header_nid == SZ_ENCODED_HEADER
+        && matches!(target, "pack_stream_offset" | "pack_stream_size")
+    {
         match seven_zip_repair_encoded_header_pack_target(py, data, workspace, &header, target) {
             Ok(result) => return Ok(result),
             Err(message) => {
@@ -177,16 +313,61 @@ fn seven_zip_repair_metadata_target(
     } {
         Ok(ast) => ast,
         Err(message) => {
-            return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", &message, &[], &[], &[], 0.0, &["seven_zip_header_graph_unparsed"], &[]);
+            return seven_zip_atomic_status(
+                py,
+                "unrepairable",
+                target,
+                "7z",
+                "",
+                &message,
+                &[],
+                &[],
+                &[],
+                0.0,
+                &["seven_zip_header_graph_unparsed"],
+                &[],
+            );
         }
     };
-    let Some(pack) = ast.pack_info.as_ref() else {
-        return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z Header graph does not contain PackInfo metadata for this target", &[], &[], &[], 0.0, &["pack_info_missing"], &[]);
-    };
+    let pack_target = matches!(
+        target,
+        "pack_stream_offset" | "pack_stream_size" | "stream_crc" | "encoded_header_stream_crc"
+    );
+    if pack_target && ast.pack_info.is_none() {
+        return seven_zip_atomic_status(
+            py,
+            "unrepairable",
+            target,
+            "7z",
+            "",
+            "7z Header graph does not contain PackInfo metadata for this target",
+            &[],
+            &[],
+            &[],
+            0.0,
+            &["pack_info_missing"],
+            &[],
+        );
+    }
+    let pack = ast.pack_info.as_ref();
     let (new_header, patch_fact, action, detail_fact) = match target {
         "pack_stream_offset" => {
+            let pack = pack.expect("pack target was validated above");
             if pack.pack_pos.value == 0 {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z PackInfo offset is already canonical", &[], &[], &[], 0.0, &["pack_stream_offset_already_valid"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z PackInfo offset is already canonical",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["pack_stream_offset_already_valid"],
+                    &[],
+                );
             }
             (
                 replace_header_vint(&ast.header, pack.pack_pos, 0),
@@ -196,15 +377,42 @@ fn seven_zip_repair_metadata_target(
             )
         }
         "pack_stream_size" => {
+            let pack = pack.expect("pack target was validated above");
             if pack.num_streams != 1 || pack.sizes.len() != 1 {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z PackSizes repair requires exactly one pack stream", &[], &[], &[], 0.0, &["pack_stream_size_not_unique"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z PackSizes repair requires exactly one pack stream",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["pack_stream_size_not_unique"],
+                    &[],
+                );
             }
             let expected = header
                 .next_header_offset
                 .checked_sub(pack.pack_pos.value)
                 .unwrap_or(0);
             if expected == 0 || expected == pack.sizes[0].value {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z PackSizes value is already valid or cannot be inferred", &[], &[], &[], 0.0, &["pack_stream_size_not_inferable"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z PackSizes value is already valid or cannot be inferred",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["pack_stream_size_not_inferable"],
+                    &[],
+                );
             }
             (
                 replace_header_vint(&ast.header, pack.sizes[0], expected),
@@ -214,20 +422,67 @@ fn seven_zip_repair_metadata_target(
             )
         }
         "stream_crc" => {
-            if pack.num_streams != 1 || pack.sizes.len() != 1 || pack.crc_values.len() != 1 || !pack.crc_defined_all {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z stream CRC repair requires one defined pack stream CRC", &[], &[], &[], 0.0, &["stream_crc_not_unique"], &[]);
+            let pack = pack.expect("pack target was validated above");
+            if pack.num_streams != 1
+                || pack.sizes.len() != 1
+                || pack.crc_values.len() != 1
+                || !pack.crc_defined_all
+            {
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z stream CRC repair requires one defined pack stream CRC",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["stream_crc_not_unique"],
+                    &[],
+                );
             }
             let stream_start = SEVEN_Z_HEADER_SIZE
                 .checked_add(usize::try_from(pack.pack_pos.value).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX);
             let stream_size = usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
             let stream_end = stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
-            if stream_start < SEVEN_Z_HEADER_SIZE || stream_end > data.len() || stream_end > header.next_header_start {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z stream CRC repair cannot read a unique pack stream range", &[], &[], &[], 0.0, &["stream_range_invalid"], &[]);
+            if stream_start < SEVEN_Z_HEADER_SIZE
+                || stream_end > data.len()
+                || stream_end > header.next_header_start
+            {
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z stream CRC repair cannot read a unique pack stream range",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["stream_range_invalid"],
+                    &[],
+                );
             }
             let computed = crc32(&data[stream_start..stream_end]);
             if computed == pack.crc_values[0].value {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z stream CRC metadata already matches payload", &[], &[], &[], 0.0, &["stream_crc_already_valid"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z stream CRC metadata already matches payload",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["stream_crc_already_valid"],
+                    &[],
+                );
             }
             (
                 replace_header_u32_le(&ast.header, pack.crc_values[0].start, computed),
@@ -237,23 +492,83 @@ fn seven_zip_repair_metadata_target(
             )
         }
         "encoded_header_stream_crc" => {
+            let pack = pack.expect("pack target was validated above");
             if header.next_header_nid != SZ_ENCODED_HEADER {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EncodedHeader stream CRC target requires an EncodedHeader", &[], &[], &[], 0.0, &["encoded_header_absent"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EncodedHeader stream CRC target requires an EncodedHeader",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["encoded_header_absent"],
+                    &[],
+                );
             }
-            if pack.num_streams != 1 || pack.sizes.len() != 1 || pack.crc_values.len() != 1 || !pack.crc_defined_all {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EncodedHeader stream CRC repair requires one defined pack stream CRC", &[], &[], &[], 0.0, &["encoded_header_stream_crc_not_unique"], &[]);
+            if pack.num_streams != 1
+                || pack.sizes.len() != 1
+                || pack.crc_values.len() != 1
+                || !pack.crc_defined_all
+            {
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EncodedHeader stream CRC repair requires one defined pack stream CRC",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["encoded_header_stream_crc_not_unique"],
+                    &[],
+                );
             }
             let stream_start = SEVEN_Z_HEADER_SIZE
                 .checked_add(usize::try_from(pack.pack_pos.value).unwrap_or(usize::MAX))
                 .unwrap_or(usize::MAX);
             let stream_size = usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
             let stream_end = stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
-            if stream_start < SEVEN_Z_HEADER_SIZE || stream_end > data.len() || stream_end > header.next_header_start {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EncodedHeader stream CRC repair cannot read a unique pack stream range", &[], &[], &[], 0.0, &["encoded_header_stream_range_invalid"], &[]);
+            if stream_start < SEVEN_Z_HEADER_SIZE
+                || stream_end > data.len()
+                || stream_end > header.next_header_start
+            {
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EncodedHeader stream CRC repair cannot read a unique pack stream range",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["encoded_header_stream_range_invalid"],
+                    &[],
+                );
             }
             let computed = crc32(&data[stream_start..stream_end]);
             if computed == pack.crc_values[0].value {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EncodedHeader stream CRC metadata already matches payload", &[], &[], &[], 0.0, &["encoded_header_stream_crc_already_valid"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EncodedHeader stream CRC metadata already matches payload",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["encoded_header_stream_crc_already_valid"],
+                    &[],
+                );
             }
             (
                 replace_header_u32_le(&ast.header, pack.crc_values[0].start, computed),
@@ -264,14 +579,53 @@ fn seven_zip_repair_metadata_target(
         }
         "empty_stream_flags" => {
             let Some(files) = ast.files_info.as_ref() else {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z FilesInfo is missing for EmptyStream flag repair", &[], &[], &[], 0.0, &["files_info_missing"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z FilesInfo is missing for EmptyStream flag repair",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["files_info_missing"],
+                    &[],
+                );
             };
             let expected = (usize::try_from(files.num_files.value).unwrap_or(usize::MAX) + 7) / 8;
             let Some((start, end)) = files.empty_stream_property else {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EmptyStream property is absent", &[], &[], &[], 0.0, &["empty_stream_flags_absent"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EmptyStream property is absent",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["empty_stream_flags_absent"],
+                    &[],
+                );
             };
             if end.saturating_sub(start) == expected {
-                return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EmptyStream flag length is already valid", &[], &[], &[], 0.0, &["empty_stream_flags_already_valid"], &[]);
+                return seven_zip_atomic_status(
+                    py,
+                    "unrepairable",
+                    target,
+                    "7z",
+                    "",
+                    "7z EmptyStream flag length is already valid",
+                    &[],
+                    &[],
+                    &[],
+                    0.0,
+                    &["empty_stream_flags_already_valid"],
+                    &[],
+                );
             }
             return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z EmptyStream value repair needs unique file-to-stream mapping; length-only evidence is not sufficient", &[], &[], &[], 0.0, &["empty_stream_flags_not_unique"], &[]);
         }
@@ -324,17 +678,25 @@ fn seven_zip_repair_encoded_header_pack_target(
         }
     }
     if num_streams.value != 1 {
-        return Err("7z EncodedHeader PackInfo repair requires exactly one pack stream".to_string());
+        return Err(
+            "7z EncodedHeader PackInfo repair requires exactly one pack stream".to_string(),
+        );
     }
     match target {
         "pack_stream_offset" => {
             let mut pos = 2usize;
             let pack = match parse_seven_zip_pack_info(raw, &mut pos) {
                 Ok(pack) => pack,
-                Err(message) => return Err(format!("7z EncodedHeader PackInfo offset needs parseable PackSizes: {message}")),
+                Err(message) => {
+                    return Err(format!(
+                        "7z EncodedHeader PackInfo offset needs parseable PackSizes: {message}"
+                    ))
+                }
             };
             if pack.sizes.len() != 1 {
-                return Err("7z EncodedHeader PackInfo offset repair requires one PackSize".to_string());
+                return Err(
+                    "7z EncodedHeader PackInfo offset repair requires one PackSize".to_string(),
+                );
             }
             let expected = header
                 .next_header_offset
@@ -377,16 +739,21 @@ fn seven_zip_repair_encoded_header_pack_target(
             } else {
                 let scan_end = raw.len().min(after_num_streams.saturating_add(48));
                 for index in after_num_streams + 1..scan_end {
-                    if matches!(raw[index], SZ_CRC | SZ_UNPACK_INFO | SZ_SUB_STREAMS_INFO | SZ_END) {
+                    if matches!(
+                        raw[index],
+                        SZ_CRC | SZ_UNPACK_INFO | SZ_SUB_STREAMS_INFO | SZ_END
+                    ) {
                         property_end = Some(index);
                         break;
                     }
                 }
             }
-            let property_end = property_end.ok_or_else(|| "7z EncodedHeader PackSize boundary is not unique".to_string())?;
+            let property_end = property_end
+                .ok_or_else(|| "7z EncodedHeader PackSize boundary is not unique".to_string())?;
             let mut replacement = vec![SZ_SIZE];
             replacement.extend_from_slice(&write_sz_vint(expected));
-            let new_header = replace_header_range(raw, after_num_streams, property_end, &replacement);
+            let new_header =
+                replace_header_range(raw, after_num_streams, property_end, &replacement);
             seven_zip_materialize_header_graph_patch(
                 py,
                 data,
@@ -527,7 +894,10 @@ fn repair_encoded_header_pack_offset_by_tail_resync(
         if raw.get(2..pack_pos_end) == Some(replacement.as_slice()) {
             continue;
         }
-        candidates.push((replace_header_range(raw, 2, pack_pos_end, &replacement), expected_offset));
+        candidates.push((
+            replace_header_range(raw, 2, pack_pos_end, &replacement),
+            expected_offset,
+        ));
     }
     if candidates.len() > 1 {
         return Err("7z EncodedHeader PackInfo offset resync is not unique".to_string());
@@ -549,8 +919,9 @@ fn seven_zip_encoded_header_folder_bind_pairs_patch(raw: &[u8]) -> Result<Option
         match nid {
             SZ_END => break,
             SZ_PACK_INFO => {
-                parse_seven_zip_pack_info(raw, &mut pos)
-                    .map_err(|message| format!("7z EncodedHeader PackInfo is not parseable: {message}"))?;
+                parse_seven_zip_pack_info(raw, &mut pos).map_err(|message| {
+                    format!("7z EncodedHeader PackInfo is not parseable: {message}")
+                })?;
             }
             SZ_UNPACK_INFO => loop {
                 let Some(unpack_nid) = raw.get(pos).copied() else {
@@ -679,11 +1050,32 @@ fn seven_zip_encoded_header_folder_bind_pairs_patch(raw: &[u8]) -> Result<Option
                     _ => return Err(format!("7z EncodedHeader UnpackInfo NID 0x{unpack_nid:02x} is unsupported for bind pair repair")),
                 }
             },
-            SZ_SUB_STREAMS_INFO => skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo")?,
-            _ => return Err(format!("7z EncodedHeader StreamsInfo NID 0x{nid:02x} is unsupported for bind pair repair")),
+            SZ_SUB_STREAMS_INFO => consume_empty_seven_zip_property_tree(
+                raw,
+                &mut pos,
+                "EncodedHeader SubStreamsInfo",
+            )?,
+            _ => return Err(format!(
+                "7z EncodedHeader StreamsInfo NID 0x{nid:02x} is unsupported for bind pair repair"
+            )),
         }
     }
     Err("7z EncodedHeader Folder graph was not found".to_string())
+}
+
+fn consume_empty_seven_zip_property_tree(
+    data: &[u8],
+    pos: &mut usize,
+    label: &str,
+) -> Result<(), String> {
+    match data.get(*pos).copied() {
+        Some(SZ_END) => {
+            *pos += 1;
+            Ok(())
+        }
+        Some(nid) => Err(format!("7z {label} is non-empty at NID 0x{nid:02x}")),
+        None => Err(format!("7z {label} ended before End NID")),
+    }
 }
 
 fn encoded_header_raw_parses(raw: &[u8]) -> bool {
@@ -694,6 +1086,7 @@ fn encoded_header_raw_parses(raw: &[u8]) -> bool {
     pos += 1;
     let mut saw_pack = false;
     let mut saw_unpack = false;
+    let mut unpack_info = None;
     loop {
         let Some(nid) = raw.get(pos).copied() else {
             return false;
@@ -708,13 +1101,17 @@ fn encoded_header_raw_parses(raw: &[u8]) -> bool {
                 saw_pack = true;
             }
             SZ_UNPACK_INFO => {
-                if parse_seven_zip_encoded_header_unpack_info(raw, &mut pos).is_err() {
+                let Ok(parsed) = parse_seven_zip_unpack_info(raw, &mut pos) else {
                     return false;
-                }
+                };
+                unpack_info = Some(parsed);
                 saw_unpack = true;
             }
             SZ_SUB_STREAMS_INFO => {
-                if skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo").is_err() {
+                let Some(unpack) = unpack_info.as_ref() else {
+                    return false;
+                };
+                if parse_seven_zip_substreams_info(raw, &mut pos, unpack).is_err() {
                     return false;
                 }
             }
@@ -723,7 +1120,9 @@ fn encoded_header_raw_parses(raw: &[u8]) -> bool {
     }
 }
 
-fn seven_zip_encoded_header_folder_stream_counts_patch(raw: &[u8]) -> Result<Option<Vec<u8>>, String> {
+fn seven_zip_encoded_header_folder_stream_counts_patch(
+    raw: &[u8],
+) -> Result<Option<Vec<u8>>, String> {
     let mut pos = 0usize;
     if raw.get(pos).copied() != Some(SZ_ENCODED_HEADER) {
         return Err("7z EncodedHeader NID is missing".to_string());
@@ -870,7 +1269,7 @@ fn seven_zip_encoded_header_folder_stream_counts_patch(raw: &[u8]) -> Result<Opt
                     _ => return Err(format!("7z EncodedHeader UnpackInfo NID 0x{unpack_nid:02x} is unsupported for folder stream count repair")),
                 }
             },
-            SZ_SUB_STREAMS_INFO => skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo")?,
+            SZ_SUB_STREAMS_INFO => return Err("7z EncodedHeader repair target was not found before SubStreamsInfo".to_string()),
             _ => return Err(format!("7z EncodedHeader StreamsInfo NID 0x{nid:02x} is unsupported for folder stream count repair")),
         }
     }
@@ -904,7 +1303,9 @@ fn seven_zip_repair_encoded_header_folder_stream_counts(
     .map_err(|err| err.to_string())
 }
 
-fn seven_zip_encoded_header_coder_property_ranges(raw: &[u8]) -> Result<Vec<(usize, usize, Vec<u8>)>, String> {
+fn seven_zip_encoded_header_coder_property_ranges(
+    raw: &[u8],
+) -> Result<Vec<(usize, usize, Vec<u8>)>, String> {
     let mut pos = 0usize;
     if raw.get(pos).copied() != Some(SZ_ENCODED_HEADER) {
         return Err("7z EncodedHeader NID is missing".to_string());
@@ -1027,7 +1428,7 @@ fn seven_zip_encoded_header_coder_property_ranges(raw: &[u8]) -> Result<Vec<(usi
                     _ => return Err(format!("7z EncodedHeader UnpackInfo NID 0x{unpack_nid:02x} is unsupported for coder property repair")),
                 }
             },
-            SZ_SUB_STREAMS_INFO => skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo")?,
+            SZ_SUB_STREAMS_INFO => consume_empty_seven_zip_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo")?,
             _ => return Err(format!("7z EncodedHeader StreamsInfo NID 0x{nid:02x} is unsupported for coder property repair")),
         }
     }
@@ -1055,7 +1456,11 @@ fn seven_zip_aes_property_candidate_values(properties: &[u8], relative_index: us
     values
 }
 
-fn seven_zip_property_candidate_values(method_id: &[u8], properties: &[u8], relative_index: usize) -> Vec<u8> {
+fn seven_zip_property_candidate_values(
+    method_id: &[u8],
+    properties: &[u8],
+    relative_index: usize,
+) -> Vec<u8> {
     if method_id == EncoderMethod::ID_AES256_SHA256 {
         return seven_zip_aes_property_candidate_values(properties, relative_index);
     }
@@ -1078,10 +1483,13 @@ enum SevenZipEncodedHeaderCoderPropertiesCacheValue {
     Failure(String),
 }
 
-fn seven_zip_encoded_header_coder_properties_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>> {
+fn seven_zip_encoded_header_coder_properties_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>,
+> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>>,
+        std::sync::Mutex<
+            std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>,
+        >,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -1105,7 +1513,8 @@ fn seven_zip_encoded_header_pack_stream_range_from_raw(
                 if pack.num_streams != 1 || pack.sizes.len() != 1 {
                     return None;
                 }
-                let stream_start = SEVEN_Z_HEADER_SIZE.checked_add(usize::try_from(pack.pack_pos.value).ok()?)?;
+                let stream_start =
+                    SEVEN_Z_HEADER_SIZE.checked_add(usize::try_from(pack.pack_pos.value).ok()?)?;
                 let stream_size = usize::try_from(pack.sizes[0].value).ok()?;
                 let stream_end = stream_start.checked_add(stream_size)?;
                 if stream_start < SEVEN_Z_HEADER_SIZE || stream_end > header.next_header_start {
@@ -1114,10 +1523,16 @@ fn seven_zip_encoded_header_pack_stream_range_from_raw(
                 return Some((stream_start, stream_end));
             }
             SZ_UNPACK_INFO => {
-                skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader UnpackInfo").ok()?;
+                consume_empty_seven_zip_property_tree(raw, &mut pos, "EncodedHeader UnpackInfo")
+                    .ok()?;
             }
             SZ_SUB_STREAMS_INFO => {
-                skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo").ok()?;
+                consume_empty_seven_zip_property_tree(
+                    raw,
+                    &mut pos,
+                    "EncodedHeader SubStreamsInfo",
+                )
+                .ok()?;
             }
             _ => return None,
         }
@@ -1133,7 +1548,9 @@ fn seven_zip_encoded_header_coder_properties_cache_key(
     let mut sha = sha2::Sha256::default();
     sha.update(b"7z-encoded-header-coder-properties-v1");
     sha.update(raw);
-    if let Some((stream_start, stream_end)) = seven_zip_encoded_header_pack_stream_range_from_raw(header, raw) {
+    if let Some((stream_start, stream_end)) =
+        seven_zip_encoded_header_pack_stream_range_from_raw(header, raw)
+    {
         if let Some(stream) = data.get(stream_start..stream_end) {
             sha.update(b"|stream|");
             sha.update(stream);
@@ -1152,24 +1569,30 @@ fn seven_zip_encoded_header_coder_properties_infer(
     raw: &[u8],
     password: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let cache_key = seven_zip_encoded_header_coder_properties_cache_key(data, header, raw, password);
+    let cache_key =
+        seven_zip_encoded_header_coder_properties_cache_key(data, header, raw, password);
     if let Ok(cache) = seven_zip_encoded_header_coder_properties_cache().lock() {
         if let Some(cached) = cache.get(&cache_key) {
             return match cached {
                 SevenZipEncodedHeaderCoderPropertiesCacheValue::Success(value) => Ok(value.clone()),
-                SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message) => Err(message.clone()),
+                SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message) => {
+                    Err(message.clone())
+                }
             };
         }
     }
 
-    let result = seven_zip_encoded_header_coder_properties_infer_uncached(data, header, raw, password);
+    let result =
+        seven_zip_encoded_header_coder_properties_infer_uncached(data, header, raw, password);
     if let Ok(mut cache) = seven_zip_encoded_header_coder_properties_cache().lock() {
         if cache.len() >= 2048 {
             cache.clear();
         }
         let value = match &result {
             Ok(header) => SevenZipEncodedHeaderCoderPropertiesCacheValue::Success(header.clone()),
-            Err(message) => SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message.clone()),
+            Err(message) => {
+                SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message.clone())
+            }
         };
         cache.insert(cache_key, value);
     }
@@ -1182,7 +1605,9 @@ fn seven_zip_encoded_header_coder_properties_infer_uncached(
     raw: &[u8],
     password: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    if let Ok(decoded) = decode_seven_zip_encoded_header_payload_from_raw(data, header, raw, password) {
+    if let Ok(decoded) =
+        decode_seven_zip_encoded_header_payload_from_raw(data, header, raw, password)
+    {
         if decoded.first().copied() == Some(SZ_HEADER) {
             return Err("7z EncodedHeader coder properties are already decodable".to_string());
         }
@@ -1207,12 +1632,16 @@ fn seven_zip_encoded_header_coder_properties_infer_uncached(
         let properties = &raw[start..end];
         for index in start..end {
             let relative_index = index - start;
-            for value in seven_zip_property_candidate_values(&method_id, properties, relative_index) {
+            for value in seven_zip_property_candidate_values(&method_id, properties, relative_index)
+            {
                 let mut patched = raw.to_vec();
                 patched[index] = value;
                 attempts += 1;
                 if attempts > 1024 {
-                    return Err("7z EncodedHeader coder properties repair exceeded candidate limit".to_string());
+                    return Err(
+                        "7z EncodedHeader coder properties repair exceeded candidate limit"
+                            .to_string(),
+                    );
                 }
                 if matches!(
                     decode_seven_zip_encoded_header_payload_from_raw(data, header, &patched, password),
@@ -1229,7 +1658,9 @@ fn seven_zip_encoded_header_coder_properties_infer_uncached(
     candidates.sort();
     candidates.dedup();
     if candidates.is_empty() {
-        return Err("7z EncodedHeader coder properties repair found no decodable candidate".to_string());
+        return Err(
+            "7z EncodedHeader coder properties repair found no decodable candidate".to_string(),
+        );
     }
     if candidates.len() > 1 {
         return Err("7z EncodedHeader coder properties repair is not unique".to_string());
@@ -1268,7 +1699,9 @@ fn seven_zip_repair_encoded_header_coder_properties(
     .map_err(|err| err.to_string())
 }
 
-fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Option<Vec<u8>>, String> {
+fn seven_zip_encoded_header_coder_property_size_patch(
+    raw: &[u8],
+) -> Result<Option<Vec<u8>>, String> {
     let mut pos = 0usize;
     if raw.get(pos).copied() != Some(SZ_ENCODED_HEADER) {
         return Err("7z EncodedHeader NID is missing".to_string());
@@ -1282,8 +1715,9 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
         match nid {
             SZ_END => return Ok(None),
             SZ_PACK_INFO => {
-                parse_seven_zip_pack_info(raw, &mut pos)
-                    .map_err(|message| format!("7z EncodedHeader PackInfo is not parseable: {message}"))?;
+                parse_seven_zip_pack_info(raw, &mut pos).map_err(|message| {
+                    format!("7z EncodedHeader PackInfo is not parseable: {message}")
+                })?;
             }
             SZ_UNPACK_INFO => loop {
                 let Some(unpack_nid) = raw.get(pos).copied() else {
@@ -1294,32 +1728,42 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                     SZ_END => break,
                     SZ_FOLDER => {
                         let num_folders = read_sz_vint(raw, &mut pos)
-                            .ok_or_else(|| "7z EncodedHeader Folder count is truncated".to_string())?
+                            .ok_or_else(|| {
+                                "7z EncodedHeader Folder count is truncated".to_string()
+                            })?
                             .value;
                         if num_folders != 1 {
-                            return Err("7z coder property size repair requires exactly one folder".to_string());
+                            return Err(
+                                "7z coder property size repair requires exactly one folder"
+                                    .to_string(),
+                            );
                         }
-                        let external = *raw
-                            .get(pos)
-                            .ok_or_else(|| "7z EncodedHeader Folder external flag is missing".to_string())?;
+                        let external = *raw.get(pos).ok_or_else(|| {
+                            "7z EncodedHeader Folder external flag is missing".to_string()
+                        })?;
                         pos += 1;
                         if external != 0 {
                             return Err("7z external Folder graph is not supported".to_string());
                         }
                         let num_coders = usize::try_from(
                             read_sz_vint(raw, &mut pos)
-                                .ok_or_else(|| "7z EncodedHeader coder count is truncated".to_string())?
+                                .ok_or_else(|| {
+                                    "7z EncodedHeader coder count is truncated".to_string()
+                                })?
                                 .value,
                         )
                         .map_err(|_| "7z EncodedHeader coder count is too large".to_string())?;
                         if num_coders == 0 || num_coders > 8 {
-                            return Err("7z coder property size repair requires a small coder graph".to_string());
+                            return Err(
+                                "7z coder property size repair requires a small coder graph"
+                                    .to_string(),
+                            );
                         }
                         let mut candidates = Vec::new();
                         for _ in 0..num_coders {
-                            let flags = *raw
-                                .get(pos)
-                                .ok_or_else(|| "7z EncodedHeader coder flags are missing".to_string())?;
+                            let flags = *raw.get(pos).ok_or_else(|| {
+                                "7z EncodedHeader coder flags are missing".to_string()
+                            })?;
                             pos += 1;
                             let id_size = usize::from(flags & 0x0f);
                             if id_size == 0 || pos + id_size > raw.len() {
@@ -1328,15 +1772,22 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                             let method_id = raw[pos..pos + id_size].to_vec();
                             pos += id_size;
                             if flags & 0x10 != 0 {
-                                read_sz_vint(raw, &mut pos)
-                                    .ok_or_else(|| "7z EncodedHeader coder input stream count is truncated".to_string())?;
-                                read_sz_vint(raw, &mut pos)
-                                    .ok_or_else(|| "7z EncodedHeader coder output stream count is truncated".to_string())?;
+                                read_sz_vint(raw, &mut pos).ok_or_else(|| {
+                                    "7z EncodedHeader coder input stream count is truncated"
+                                        .to_string()
+                                })?;
+                                read_sz_vint(raw, &mut pos).ok_or_else(|| {
+                                    "7z EncodedHeader coder output stream count is truncated"
+                                        .to_string()
+                                })?;
                             }
                             if flags & 0x20 != 0 {
-                                let size_span = read_sz_vint(raw, &mut pos)
-                                    .ok_or_else(|| "7z EncodedHeader coder properties size is truncated".to_string())?;
-                                let current_size = usize::try_from(size_span.value).unwrap_or(usize::MAX);
+                                let size_span = read_sz_vint(raw, &mut pos).ok_or_else(|| {
+                                    "7z EncodedHeader coder properties size is truncated"
+                                        .to_string()
+                                })?;
+                                let current_size =
+                                    usize::try_from(size_span.value).unwrap_or(usize::MAX);
                                 if pos + current_size <= raw.len() {
                                     pos += current_size;
                                 } else {
@@ -1345,13 +1796,13 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                                         if pos + 2 <= raw.len() {
                                             let b0 = raw[pos];
                                             let b1 = raw[pos + 1];
-                                            let iv_size =
-                                                usize::from(((b0 >> 6) & 1) + (b1 & 15));
+                                            let iv_size = usize::from(((b0 >> 6) & 1) + (b1 & 15));
                                             let salt_size =
                                                 usize::from(((b0 >> 7) & 1) + (b1 >> 4));
                                             let expected = 2 + salt_size + iv_size;
                                             if expected <= 48 {
-                                                size_candidates.push(u64::try_from(expected).unwrap_or(0));
+                                                size_candidates
+                                                    .push(u64::try_from(expected).unwrap_or(0));
                                             }
                                         }
                                     } else if method_id == EncoderMethod::ID_LZMA {
@@ -1366,14 +1817,21 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                                     size_candidates.dedup();
                                     for size in size_candidates {
                                         let replacement = write_sz_vint(size);
-                                        if replacement.len() != size_span.end.saturating_sub(size_span.start)
+                                        if replacement.len()
+                                            != size_span.end.saturating_sub(size_span.start)
                                             || size == size_span.value
                                         {
                                             continue;
                                         }
-                                        let patched =
-                                            replace_header_range(raw, size_span.start, size_span.end, &replacement);
-                                        if seven_zip_encoded_header_coder_property_ranges(&patched).is_ok() {
+                                        let patched = replace_header_range(
+                                            raw,
+                                            size_span.start,
+                                            size_span.end,
+                                            &replacement,
+                                        );
+                                        if seven_zip_encoded_header_coder_property_ranges(&patched)
+                                            .is_ok()
+                                        {
                                             candidates.push(patched);
                                         }
                                     }
@@ -1388,21 +1846,28 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                                 }
                             }
                             if flags & 0x80 != 0 {
-                                return Err("7z alternative coder methods are not supported".to_string());
+                                return Err(
+                                    "7z alternative coder methods are not supported".to_string()
+                                );
                             }
                         }
                     }
                     SZ_CODERS_UNPACK_SIZE => {
-                        read_sz_vint(raw, &mut pos)
-                            .ok_or_else(|| "7z EncodedHeader unpack size is truncated".to_string())?;
+                        read_sz_vint(raw, &mut pos).ok_or_else(|| {
+                            "7z EncodedHeader unpack size is truncated".to_string()
+                        })?;
                     }
                     SZ_CRC => {
-                        let defined = parse_seven_zip_bool_vector(raw, &mut pos, 1)
-                            .map_err(|message| format!("7z EncodedHeader CRC bitset is not parseable: {message}"))?;
+                        let defined =
+                            parse_seven_zip_bool_vector(raw, &mut pos, 1).map_err(|message| {
+                                format!("7z EncodedHeader CRC bitset is not parseable: {message}")
+                            })?;
                         for is_defined in defined {
                             if is_defined {
                                 if pos + 4 > raw.len() {
-                                    return Err("7z EncodedHeader CRC value is truncated".to_string());
+                                    return Err(
+                                        "7z EncodedHeader CRC value is truncated".to_string()
+                                    );
                                 }
                                 pos += 4;
                             }
@@ -1416,7 +1881,11 @@ fn seven_zip_encoded_header_coder_property_size_patch(raw: &[u8]) -> Result<Opti
                 }
             },
             SZ_SUB_STREAMS_INFO => {
-                skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo")?;
+                consume_empty_seven_zip_property_tree(
+                    raw,
+                    &mut pos,
+                    "EncodedHeader SubStreamsInfo",
+                )?;
             }
             _ => {
                 return Err(format!(
@@ -1549,7 +2018,22 @@ fn seven_zip_materialize_header_graph_patch(
     let output_path = Path::new(workspace).join(format!("seven_zip_{target}.7z"));
     let output_bytes = match write_slice_candidate(&candidate, &output_path) {
         Ok(bytes) => bytes,
-        Err(err) => return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", &format!("7z header graph patch could not be written: {err}"), &[], &[], &[], 0.0, &[], &[]),
+        Err(err) => {
+            return seven_zip_atomic_status(
+                py,
+                "unrepairable",
+                target,
+                "7z",
+                "",
+                &format!("7z header graph patch could not be written: {err}"),
+                &[],
+                &[],
+                &[],
+                0.0,
+                &[],
+                &[],
+            )
+        }
     };
     let selected = WrittenArchiveCandidate {
         name: target.to_string(),
@@ -1560,7 +2044,12 @@ fn seven_zip_materialize_header_graph_patch(
         end_offset: candidate.len() as u64,
         output_bytes,
         confidence: 0.88,
-        actions: vec![action.to_string(), "rewrite_7z_header_graph".to_string(), "recompute_7z_next_header_crc".to_string(), "recompute_7z_start_header_crc".to_string()],
+        actions: vec![
+            action.to_string(),
+            "rewrite_7z_header_graph".to_string(),
+            "recompute_7z_next_header_crc".to_string(),
+            "recompute_7z_start_header_crc".to_string(),
+        ],
         warnings: Vec::new(),
     };
     let selected_path = selected.path.clone();
@@ -1575,14 +2064,26 @@ fn seven_zip_materialize_header_graph_patch(
         candidate.len() as u64,
         output_bytes,
         0.88,
-        &[action, "rewrite_7z_header_graph", "recompute_7z_next_header_crc", "recompute_7z_start_header_crc"],
+        &[
+            action,
+            "rewrite_7z_header_graph",
+            "recompute_7z_next_header_crc",
+            "recompute_7z_start_header_crc",
+        ],
         &[selected],
     )?;
     set_seven_zip_atomic_fields(
         py,
         &result,
         target,
-        &[patch_fact, detail_fact, "rewrote_7z_header_graph_ast", "updated_next_header_crc", "updated_start_header_crc", "source_format=7z"],
+        &[
+            patch_fact,
+            detail_fact,
+            "rewrote_7z_header_graph_ast",
+            "updated_next_header_crc",
+            "updated_start_header_crc",
+            "source_format=7z",
+        ],
         &[],
     )?;
     add_seven_zip_candidate_replace_patch_plans(py, &result, data, target)?;
@@ -1595,7 +2096,9 @@ fn seven_zip_metadata_target_not_materialized(
 ) -> PyResult<Py<PyDict>> {
     let reason = match target {
         "encoded_header_decode" => "7z encoded header decode requires a decoded header writer",
-        "encoded_header_stream_crc" => "7z encoded header stream CRC repair requires parsed stream metadata",
+        "encoded_header_stream_crc" => {
+            "7z encoded header stream CRC repair requires parsed stream metadata"
+        }
         "pack_stream_offset" => "7z PackInfo offset repair requires parsed pack stream metadata",
         "pack_stream_size" => "7z PackSizes repair requires parsed pack stream metadata",
         "unpack_size" => "7z UnpackSize repair requires parsed folder/substream metadata",
@@ -1603,12 +2106,22 @@ fn seven_zip_metadata_target_not_materialized(
         "bad_folder_quarantine" => "7z folder quarantine requires folder-level decode verification",
         "empty_stream_flags" => "7z empty stream flag repair requires parsed file table metadata",
         "folder_bind_pairs" => "7z folder bind pair repair requires parsed folder graph metadata",
-        "folder_stream_counts" => "7z folder stream count repair requires parsed folder graph metadata",
+        "folder_stream_counts" => {
+            "7z folder stream count repair requires parsed folder graph metadata"
+        }
         "file_count_metadata" => "7z file count repair requires parsed file table metadata",
-        "file_names_utf16" => "7z UTF-16 filename repair requires parsed Names property graph metadata",
-        "unreferenced_folder" => "7z unreferenced folder drop requires parsed folder-to-file graph metadata",
-        "unreferenced_file_record" => "7z unreferenced file record drop requires parsed file-to-stream graph metadata",
-        "stream_crc_defined_flag" => "7z CRC defined flag repair requires parsed CRC bitset and stream map metadata",
+        "file_names_utf16" => {
+            "7z UTF-16 filename repair requires parsed Names property graph metadata"
+        }
+        "unreferenced_folder" => {
+            "7z unreferenced folder drop requires parsed folder-to-file graph metadata"
+        }
+        "unreferenced_file_record" => {
+            "7z unreferenced file record drop requires parsed file-to-stream graph metadata"
+        }
+        "stream_crc_defined_flag" => {
+            "7z CRC defined flag repair requires parsed CRC bitset and stream map metadata"
+        }
         _ => "unsupported 7z metadata repair target",
     };
     seven_zip_atomic_status(

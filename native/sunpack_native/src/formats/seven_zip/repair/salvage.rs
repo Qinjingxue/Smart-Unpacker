@@ -23,7 +23,20 @@ fn seven_zip_salvage_solid_prefix_native(
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
             let residual_refs = residual.iter().map(String::as_str).collect::<Vec<_>>();
-            return seven_zip_atomic_status(py, "unrepairable", "solid_prefix", "7z", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
+            return seven_zip_atomic_status(
+                py,
+                "unrepairable",
+                "solid_prefix",
+                "7z",
+                "",
+                &message,
+                &[],
+                &[],
+                &[],
+                0.0,
+                &residual_refs,
+                &[],
+            );
         }
     };
     if recovered.is_empty() {
@@ -95,7 +108,9 @@ fn seven_zip_salvage_solid_prefix_native(
         ],
         &[selected.clone()],
     )?;
-    result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    result
+        .bind(py)
+        .set_item("recovered_entry_count", recovered.len())?;
     add_seven_zip_candidate_replace_patch_plans(py, &result, &data, "solid_prefix")?;
     Ok(result)
 }
@@ -125,7 +140,20 @@ fn seven_zip_salvage_non_solid_entries_native(
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
             let residual_refs = residual.iter().map(String::as_str).collect::<Vec<_>>();
-            return seven_zip_atomic_status(py, "unrepairable", "non_solid_entries", "7z", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
+            return seven_zip_atomic_status(
+                py,
+                "unrepairable",
+                "non_solid_entries",
+                "7z",
+                "",
+                &message,
+                &[],
+                &[],
+                &[],
+                0.0,
+                &residual_refs,
+                &[],
+            );
         }
     };
     if recovered.is_empty() {
@@ -178,9 +206,7 @@ fn seven_zip_salvage_non_solid_entries_native(
             "quarantine_failed_7z_entries".to_string(),
             "repack_recoverable_entries_as_7z".to_string(),
         ],
-        warnings: vec![
-            "7z partial salvage container contains recovered files only".to_string(),
-        ],
+        warnings: vec!["7z partial salvage container contains recovered files only".to_string()],
     };
     let result = status_dict_with_candidates(
         py,
@@ -201,7 +227,9 @@ fn seven_zip_salvage_non_solid_entries_native(
         ],
         &[selected.clone()],
     )?;
-    result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    result
+        .bind(py)
+        .set_item("recovered_entry_count", recovered.len())?;
     add_seven_zip_candidate_replace_patch_plans(py, &result, &data, "non_solid_entries")?;
     Ok(result)
 }
@@ -291,7 +319,9 @@ fn guard_seven_zip_salvage_header(data: &[u8]) -> Result<(), String> {
         return Err("7z salvage requires a valid start header CRC".to_string());
     }
     if !header.next_header_crc_ok() {
-        return Err("7z salvage requires a valid next header CRC before block decoding".to_string());
+        return Err(
+            "7z salvage requires a valid next header CRC before block decoding".to_string(),
+        );
     }
     if header.next_header_nid == SZ_ENCODED_HEADER {
         return Err("7z EncodedHeader must be decoded before entry salvage".to_string());
@@ -300,7 +330,16 @@ fn guard_seven_zip_salvage_header(data: &[u8]) -> Result<(), String> {
         return Err("7z salvage requires a valid Header or EncodedHeader NID".to_string());
     }
     parse_seven_zip_header_ast(data, &header)
-        .map(|_| ())
+        .and_then(|ast| {
+            if ast.diagnostics.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "7z Header graph is incomplete: {}",
+                    ast.diagnostics.join(", ")
+                ))
+            }
+        })
         .map_err(|message| format!("7z salvage requires a parseable plain Header: {message}"))
 }
 fn write_stored_7z_entries(
@@ -311,7 +350,9 @@ fn write_stored_7z_entries(
     ensure_parent(output).map_err(|err| err.to_string())?;
     let recovered_payload_bytes = entries
         .iter()
-        .try_fold(0u64, |total, entry| total.checked_add(entry.data.len() as u64))
+        .try_fold(0u64, |total, entry| {
+            total.checked_add(entry.data.len() as u64)
+        })
         .ok_or_else(|| "recovered entry payload size overflow".to_string())?;
     if max_output_bytes.is_some_and(|limit| recovered_payload_bytes > limit) {
         return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());

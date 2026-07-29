@@ -11,6 +11,7 @@ const SZ_SIZE: u8 = 0x09;
 const SZ_CRC: u8 = 0x0A;
 const SZ_FOLDER: u8 = 0x0B;
 const SZ_CODERS_UNPACK_SIZE: u8 = 0x0C;
+const SZ_NUM_UNPACK_STREAM: u8 = 0x0D;
 const SZ_EMPTY_STREAM: u8 = 0x0E;
 const SZ_EMPTY_FILE: u8 = 0x0F;
 const SZ_ANTI: u8 = 0x10;
