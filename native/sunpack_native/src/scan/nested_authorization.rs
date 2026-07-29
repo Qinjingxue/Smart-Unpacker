@@ -76,7 +76,7 @@ struct CandidateContext {
 
 struct Evaluation {
     byte_ratio: f64,
-    project_cleanliness: f64,
+    project_ratio: f64,
     score: f64,
 }
 
@@ -85,8 +85,9 @@ struct Evaluation {
     raw_snapshot,
     root_path,
     candidates,
-    other_project_tolerance,
-    byte_ratio_weight,
+    byte_ratio_exponent,
+    project_ratio_exponent,
+    authorization_bias,
     minimum_authorization_score,
     minimum_archive_byte_ratio,
     hard_maximum_other_projects
@@ -97,8 +98,9 @@ pub(crate) fn authorize_nested_candidates(
     raw_snapshot: PyRef<'_, NativeDirectorySnapshot>,
     root_path: &str,
     candidates: Vec<CandidateTuple>,
-    other_project_tolerance: f64,
-    byte_ratio_weight: f64,
+    byte_ratio_exponent: f64,
+    project_ratio_exponent: f64,
+    authorization_bias: f64,
     minimum_authorization_score: f64,
     minimum_archive_byte_ratio: f64,
     hard_maximum_other_projects: usize,
@@ -233,8 +235,18 @@ pub(crate) fn authorize_nested_candidates(
         .map(|context| {
             let result = PyDict::new(py);
             let local_stats = scope_stats.get(&context.scope_key).unwrap_or(&root_stats);
-            let local = evaluate(local_stats, other_project_tolerance, byte_ratio_weight);
-            let root_evaluation = evaluate(&root_stats, other_project_tolerance, byte_ratio_weight);
+            let local = evaluate(
+                local_stats,
+                byte_ratio_exponent,
+                project_ratio_exponent,
+                authorization_bias,
+            );
+            let root_evaluation = evaluate(
+                &root_stats,
+                byte_ratio_exponent,
+                project_ratio_exponent,
+                authorization_bias,
+            );
             let (authorization_score, limiting_context) = if root_evaluation.score < local.score {
                 (root_evaluation.score, "root")
             } else {
@@ -317,33 +329,59 @@ fn immediate_branch(path: &Path, scope: &Path, is_dir: bool) -> Option<PathBuf> 
     Some(scope.join(first.as_os_str()))
 }
 
-fn evaluate(stats: &ScopeStats, tolerance: f64, byte_ratio_weight: f64) -> Evaluation {
+fn evaluate(
+    stats: &ScopeStats,
+    byte_ratio_exponent: f64,
+    project_ratio_exponent: f64,
+    authorization_bias: f64,
+) -> Evaluation {
     let byte_ratio = ratio(stats.candidate_bytes, stats.total_bytes);
-    let project_cleanliness = project_cleanliness(stats.other_project_count(), tolerance);
-    let score = harmonic_score(byte_ratio, project_cleanliness, byte_ratio_weight);
+    let project_ratio = project_ratio(stats.candidate_projects, stats.other_project_count());
+    let score = odds_fusion_score(
+        byte_ratio,
+        project_ratio,
+        byte_ratio_exponent,
+        project_ratio_exponent,
+        authorization_bias,
+    );
     Evaluation {
         byte_ratio,
-        project_cleanliness,
+        project_ratio,
         score,
     }
 }
 
-fn project_cleanliness(other_projects: usize, tolerance: f64) -> f64 {
-    if other_projects == 0 {
-        return 1.0;
+fn project_ratio(candidate_projects: usize, other_projects: usize) -> f64 {
+    let total_projects = candidate_projects.saturating_add(other_projects);
+    if total_projects == 0 {
+        0.0
+    } else {
+        candidate_projects as f64 / total_projects as f64
     }
-    if tolerance <= 0.0 {
-        return 0.0;
-    }
-    let normalized = other_projects as f64 / tolerance;
-    1.0 / (1.0 + normalized * normalized)
 }
 
-fn harmonic_score(byte_ratio: f64, cleanliness: f64, byte_ratio_weight: f64) -> f64 {
-    if byte_ratio <= 0.0 || cleanliness <= 0.0 {
+fn odds_fusion_score(
+    byte_ratio: f64,
+    project_ratio: f64,
+    byte_ratio_exponent: f64,
+    project_ratio_exponent: f64,
+    authorization_bias: f64,
+) -> f64 {
+    if byte_ratio <= 0.0 || project_ratio <= 0.0 {
         return 0.0;
     }
-    1.0 / (byte_ratio_weight / byte_ratio + (1.0 - byte_ratio_weight) / cleanliness)
+    const EPSILON: f64 = 1e-12;
+    let byte_ratio = byte_ratio.clamp(EPSILON, 1.0 - EPSILON);
+    let project_ratio = project_ratio.clamp(EPSILON, 1.0 - EPSILON);
+    let log_odds = authorization_bias
+        + byte_ratio_exponent * (byte_ratio / (1.0 - byte_ratio)).ln()
+        + project_ratio_exponent * (project_ratio / (1.0 - project_ratio)).ln();
+    if log_odds >= 0.0 {
+        1.0 / (1.0 + (-log_odds).exp())
+    } else {
+        let odds = log_odds.exp();
+        odds / (1.0 + odds)
+    }
 }
 
 fn set_scope_items(
@@ -376,8 +414,8 @@ fn set_scope_items(
         stats.other_project_count(),
     )?;
     result.set_item(
-        format!("{prefix}_project_cleanliness"),
-        evaluation.project_cleanliness,
+        format!("{prefix}_candidate_project_ratio"),
+        evaluation.project_ratio,
     )?;
     result.set_item(format!("{prefix}_authorization_score"), evaluation.score)?;
     Ok(())
@@ -440,16 +478,20 @@ mod tests {
     }
 
     #[test]
-    fn project_cleanliness_has_half_score_at_tolerance() {
-        assert_eq!(project_cleanliness(0, 2.0), 1.0);
-        assert_eq!(project_cleanliness(2, 2.0), 0.5);
-        assert!((project_cleanliness(20, 2.0) - (1.0 / 101.0)).abs() < 1e-12);
+    fn project_ratio_uses_candidate_share_of_all_projects() {
+        assert_eq!(project_ratio(0, 0), 0.0);
+        assert_eq!(project_ratio(1, 0), 1.0);
+        assert_eq!(project_ratio(1, 19), 0.05);
+        assert_eq!(project_ratio(2, 3), 0.4);
     }
 
     #[test]
-    fn harmonic_score_is_pulled_down_by_weak_evidence() {
-        assert!(harmonic_score(0.99, 0.8, 0.5) > 0.88);
-        assert!(harmonic_score(0.99, 0.01, 0.5) < 0.02);
+    fn odds_fusion_accelerates_at_extreme_ratios() {
+        let score = |bytes, projects| odds_fusion_score(bytes, projects, 1.0, 1.0, 0.0);
+        assert!(score(0.99, 1.0 / 6.0) > 0.95);
+        assert!((score(0.99, 0.05) - 0.839).abs() < 0.002);
+        assert!(score(0.99, 1.0 / 31.0) < 0.77);
+        assert!(score(0.999, 0.05) > score(0.99, 0.05));
     }
 
     #[test]

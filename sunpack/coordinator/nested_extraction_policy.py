@@ -86,11 +86,12 @@ class NestedExtractionPolicy:
                 snapshot.raw_native_snapshot,
                 root,
                 candidates,
-                float(self.config.get("other_project_tolerance", 2.0)),
-                float(self.config.get("byte_ratio_weight", 0.5)),
-                float(self.config.get("minimum_authorization_score", 0.65)),
+                float(self.config.get("byte_ratio_exponent", 1.0)),
+                float(self.config.get("project_ratio_exponent", 1.0)),
+                float(self.config.get("authorization_bias", 0.0)),
+                float(self.config.get("minimum_authorization_score", 0.85)),
                 float(self.config.get("minimum_archive_byte_ratio", 0.1)),
-                int(self.config.get("hard_maximum_other_projects", 64)),
+                int(self.config.get("hard_maximum_other_projects", 1000)),
             ))
             if len(rows) != len(root_tasks):
                 raise RuntimeError("Native nested extraction authorization returned an invalid row count")

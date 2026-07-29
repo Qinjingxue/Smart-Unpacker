@@ -52,8 +52,9 @@ def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
     if not isinstance(config.get("enabled"), bool):
         raise ValueError("nested_extraction_policy.enabled must be boolean")
     try:
-        tolerance = float(config["other_project_tolerance"])
-        byte_ratio_weight = float(config["byte_ratio_weight"])
+        byte_ratio_exponent = float(config["byte_ratio_exponent"])
+        project_ratio_exponent = float(config["project_ratio_exponent"])
+        authorization_bias = float(config["authorization_bias"])
         minimum_score = float(config["minimum_authorization_score"])
         minimum_ratio = float(config["minimum_archive_byte_ratio"])
     except (TypeError, ValueError) as exc:
@@ -63,19 +64,21 @@ def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
         raise ValueError(
             "nested_extraction_policy.hard_maximum_other_projects must be an integer"
         )
-    if not math.isfinite(tolerance) or tolerance <= 0.0:
+    if not math.isfinite(byte_ratio_exponent) or byte_ratio_exponent <= 0.0:
         raise ValueError(
-            "nested_extraction_policy.other_project_tolerance must be positive"
+            "nested_extraction_policy.byte_ratio_exponent must be positive"
         )
-    if not 0.0 < byte_ratio_weight < 1.0:
+    if not math.isfinite(project_ratio_exponent) or project_ratio_exponent <= 0.0:
         raise ValueError(
-            "nested_extraction_policy.byte_ratio_weight must be between 0 and 1 exclusively"
+            "nested_extraction_policy.project_ratio_exponent must be positive"
         )
-    if not 0.0 <= minimum_score <= 1.0:
+    if not math.isfinite(authorization_bias):
+        raise ValueError("nested_extraction_policy.authorization_bias must be finite")
+    if not math.isfinite(minimum_score) or not 0.0 <= minimum_score <= 1.0:
         raise ValueError(
             "nested_extraction_policy.minimum_authorization_score must be between 0 and 1"
         )
-    if not 0.0 <= minimum_ratio <= 1.0:
+    if not math.isfinite(minimum_ratio) or not 0.0 <= minimum_ratio <= 1.0:
         raise ValueError(
             "nested_extraction_policy.minimum_archive_byte_ratio must be between 0 and 1"
         )
@@ -83,8 +86,9 @@ def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
         raise ValueError(
             "nested_extraction_policy.hard_maximum_other_projects must be non-negative"
         )
-    config["other_project_tolerance"] = tolerance
-    config["byte_ratio_weight"] = byte_ratio_weight
+    config["byte_ratio_exponent"] = byte_ratio_exponent
+    config["project_ratio_exponent"] = project_ratio_exponent
+    config["authorization_bias"] = authorization_bias
     config["minimum_authorization_score"] = minimum_score
     config["minimum_archive_byte_ratio"] = minimum_ratio
     config["hard_maximum_other_projects"] = hard_maximum
