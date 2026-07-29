@@ -2,7 +2,7 @@ from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from tests.helpers.detection_config import with_detection_pipeline
 
 
-def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
+def test_filename_only_scan_does_not_absorb_unmarked_fuzzy_parts(tmp_path):
     first = tmp_path / "rj081295.7z.001"
     normal_2 = tmp_path / "rj081295"
     normal_3 = tmp_path / "rj081295.7z"
@@ -21,14 +21,14 @@ def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
     bags = build_fact_bags_for_targets([str(tmp_path)], config=config)
     grouped = next(bag for bag in bags if bag.get("file.path") == str(first))
 
-    assert grouped.get("candidate.member_paths") == [str(first), str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]
+    assert grouped.get("candidate.member_paths") == [str(first)]
     assert [
         (item["path"], item["number"], item["source"])
         for item in grouped.get("relation.split_volumes")
     ] == [
         (str(first), 1, "standard"),
-        (str(normal_2), 2, "candidate"),
-        (str(normal_3), 3, "candidate"),
-        (str(fuzzy_4), 4, "candidate"),
-        (str(fuzzy_5), 5, "candidate"),
     ]
+    assert all(
+        str(path) not in grouped.get("candidate.member_paths")
+        for path in (normal_2, normal_3, fuzzy_4, fuzzy_5)
+    )

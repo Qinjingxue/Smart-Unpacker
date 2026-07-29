@@ -26,7 +26,7 @@ def test_relation_group_builder_groups_split_volumes(tmp_path):
     assert orphan_group.relation.is_split_related is False
 
 
-def test_later_orphan_volume_does_not_invent_a_fuzzy_head(tmp_path):
+def test_filename_only_grouping_does_not_claim_unmarked_sibling(tmp_path):
     orphan = tmp_path / "other.7z.005"
     real_head = tmp_path / "archive.7z.001"
     disguised_part = tmp_path / "archive"
@@ -44,7 +44,9 @@ def test_later_orphan_volume_does_not_invent_a_fuzzy_head(tmp_path):
     assert orphan_group.split_group_complete is False
     assert orphan_group.split_missing_reason == "missing_head"
     assert real_group.head_path == str(real_head)
-    assert str(disguised_part) in real_group.all_paths
+    assert real_group.all_paths == [str(real_head)]
+    disguised_group = next(group for group in groups if group.head_path == str(disguised_part))
+    assert disguised_group.all_paths == [str(disguised_part)]
 
 
 def test_relation_group_builder_groups_rar_sfx_split_volumes(tmp_path):
@@ -109,7 +111,7 @@ def test_relation_group_builder_keeps_same_stem_split_archive_formats_separate(t
     assert zip_group.member_paths == []
 
 
-def test_relation_group_builder_attaches_sfx_companion_without_merging_formats(tmp_path):
+def test_relation_group_builder_keeps_ambiguous_sfx_companion_separate_from_formats(tmp_path):
     names = [
         "bundle.exe",
         "bundle.7z.001.camouflage",
@@ -128,9 +130,87 @@ def test_relation_group_builder_attaches_sfx_companion_without_merging_formats(t
     }
 
     assert part_sets == {
-        frozenset({"bundle.exe", "bundle.7z.001.camouflage", "bundle.7z.002.camouflage"}),
-        frozenset({"bundle.exe", "bundle.zip.001.camouflage", "bundle.zip.002.camouflage"}),
+        frozenset({"bundle.exe"}),
+        frozenset({"bundle.7z.001.camouflage", "bundle.7z.002.camouflage"}),
+        frozenset({"bundle.zip.001.camouflage", "bundle.zip.002.camouflage"}),
     }
+    assert sum("bundle.exe" in paths for paths in part_sets) == 1
+
+
+def test_relation_group_builder_groups_unambiguous_generic_sfx_sequence(tmp_path):
+    names = ["setup.exe", "setup.001", "setup.002"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "setup")
+
+    assert [Path(path).name for path in split_group.all_paths] == names
+    assert [volume.number for volume in split_group.split_volumes] == [1, 2, 3]
+    assert {volume.style for volume in split_group.split_volumes} == {"sfx_numeric_suffix"}
+    assert split_group.split_group_complete is True
+
+
+def test_relation_group_builder_arbitrates_mixed_standard_volume_formats_by_name(tmp_path):
+    families = {
+        "7z_numbered": ["X.7z.001", "X.7z.002"],
+        "zip_numbered": ["X.zip.001", "X.zip.002"],
+        "zip_spanned": ["X.z01", "X.z02", "X.zip"],
+        "rar_part": ["X.part01.rar", "X.part02.rar"],
+        "rar_numbered": ["X.rar.001", "X.rar.002"],
+    }
+    for names in families.values():
+        for name in names:
+            (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    x_groups = [group for group in groups if group.logical_name == "X"]
+    actual = {
+        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        for group in x_groups
+    }
+
+    assert actual == {family: set(names) for family, names in families.items()}
+    claimed = [path for group in x_groups for path in group.all_paths]
+    assert len(claimed) == len(set(claimed)) == sum(map(len, families.values()))
+
+
+def test_relation_group_builder_groups_noisy_declared_formats_without_cross_pollution(tmp_path):
+    families = {
+        "rar_part": [
+            "X.AApart01tail.BBrarCC",
+            "X.DDpart02more.EErarFF",
+            "X.GGpart03noise.HHrarII",
+        ],
+        "7z_numbered": [
+            "X.AA7zZZ.BB001CC",
+            "X.DD7zYY.EE002FF",
+            "X.GG7zXX.HH003II",
+        ],
+        "zip_numbered": [
+            "X.AAzipZZ.BB001CC",
+            "X.DDzipYY.EE002FF",
+            "X.GGzipXX.HH003II",
+        ],
+    }
+    for names in families.values():
+        for name in names:
+            (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    x_groups = [group for group in groups if group.logical_name == "X"]
+    actual = {
+        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        for group in x_groups
+    }
+
+    assert actual == {family: set(names) for family, names in families.items()}
+    assert all(group.split_group_complete is True for group in x_groups)
+    assert all(
+        volume.source == "candidate"
+        for group in x_groups
+        for volume in group.split_volumes
+    )
 
 
 def test_relation_public_helpers_parse_split_names():

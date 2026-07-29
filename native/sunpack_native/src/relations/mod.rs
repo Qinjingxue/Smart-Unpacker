@@ -42,6 +42,25 @@ struct ParsedVolume {
     decorated: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NativeSplitVolume {
+    path: String,
+    number: u32,
+    role: &'static str,
+    source: &'static str,
+    style: String,
+    prefix: String,
+    width: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSplitContract {
+    volumes: Vec<NativeSplitVolume>,
+    complete: Option<bool>,
+    missing_reason: String,
+    missing_indices: Vec<u32>,
+}
+
 #[pyfunction]
 pub(crate) fn relations_detect_split_role(filename: &str) -> Option<String> {
     detect_split_role(filename).map(str::to_string)
@@ -131,12 +150,68 @@ fn build_candidate_groups_from_inputs(
             }
         }
 
-        // An SFX executable and explicitly formatted disguised volumes use
-        // different family keys ("companion" vs. "7z"/"zip"/"rar"). Attach
-        // the executable to every matching split-format group instead of
-        // collapsing those formats into one group. This preserves format
-        // isolation while ensuring the archive header in the executable is
-        // available to downstream detection.
+        // A canonical archive name can safely stand in for a missing numbered
+        // head only inside the same declared extension family.  This preserves
+        // `name.7z + name.7z.002` without allowing an unmarked or cross-format
+        // sibling to enter the group.
+        let plain_head_keys: Vec<String> = logical_order
+            .iter()
+            .filter(|key| {
+                logical_groups.get(*key).is_some_and(|group| {
+                    group.len() == 1
+                        && relations.get(&group[0].name).is_some_and(|relation| {
+                            relation.split_role.is_none()
+                                && numbered_family_for_plain_extension(&relation.filename).is_some()
+                        })
+                })
+            })
+            .cloned()
+            .collect();
+        for plain_key in plain_head_keys {
+            let Some(heads) = logical_groups.get(&plain_key).cloned() else {
+                continue;
+            };
+            let Some(head_relation) = relations.get(&heads[0].name) else {
+                continue;
+            };
+            let Some(expected_family) =
+                numbered_family_for_plain_extension(&head_relation.filename)
+            else {
+                continue;
+            };
+            let target_keys: Vec<String> = logical_order
+                .iter()
+                .filter(|key| **key != plain_key)
+                .filter(|key| {
+                    logical_groups.get(*key).is_some_and(|group| {
+                        let mut same_family = false;
+                        let mut has_first = false;
+                        for entry in group {
+                            if let Some(relation) = relations.get(&entry.name) {
+                                same_family |= relation.logical_name == head_relation.logical_name
+                                    && relation.split_family == expected_family;
+                                has_first |= relation.split_index == 1;
+                            }
+                        }
+                        same_family && !has_first
+                    })
+                })
+                .cloned()
+                .collect();
+            if target_keys.len() != 1 {
+                continue;
+            }
+            if let Some(target) = logical_groups.get_mut(&target_keys[0]) {
+                target.extend(heads.iter().cloned());
+            }
+            logical_groups.remove(&plain_key);
+        }
+
+        // An executable does not declare whether it is a 7z, ZIP, or RAR SFX.
+        // Attach it only when the directory contains exactly one matching
+        // filename-family group.  With multiple families the executable stays
+        // in its own group; duplicating it into every group would violate the
+        // directory-wide single-owner invariant.
         let companion_keys: Vec<String> = logical_order
             .iter()
             .filter(|key| {
@@ -175,19 +250,17 @@ fn build_candidate_groups_from_inputs(
                 })
                 .cloned()
                 .collect();
-            if target_keys.is_empty() {
+            if target_keys.len() != 1 {
                 continue;
             }
-            for target_key in target_keys {
-                if let Some(target) = logical_groups.get_mut(&target_key) {
-                    target.extend(companions.iter().cloned());
-                }
+            if let Some(target) = logical_groups.get_mut(&target_keys[0]) {
+                target.extend(companions.iter().cloned());
             }
             logical_groups.remove(&companion_key);
         }
 
         for logical_name in logical_order {
-            let Some(mut group_entries) = logical_groups.remove(&logical_name) else {
+            let Some(group_entries) = logical_groups.remove(&logical_name) else {
                 continue;
             };
             if group_entries.is_empty() {
@@ -200,15 +273,10 @@ fn build_candidate_groups_from_inputs(
                     .unwrap_or(false)
             });
             if has_split_relation {
-                group_entries.retain(|entry| {
-                    relations
-                        .get(&entry.name)
-                        .map(|relation| relation.is_split_related)
-                        .unwrap_or(false)
-                });
-                if group_entries.is_empty() {
-                    continue;
-                }
+                // Keep canonical heads and uniquely attached SFX companions.
+                // They were admitted by the directory-wide same-family
+                // arbitration above even though their individual filename
+                // relation is not itself a numbered member.
             } else if group_entries.len() > 1 {
                 for entry in group_entries {
                     groups.push(native_group_to_dict(
@@ -241,36 +309,56 @@ fn native_group_to_dict(
     relations: &HashMap<String, FileRelationNative>,
     allow_multi_split_candidate: bool,
 ) -> PyResult<Py<PyDict>> {
-    let head_index = select_head_index(group_entries);
+    let split_contract = build_native_split_contract(group_entries, relations);
+    let head_index = split_contract
+        .volumes
+        .iter()
+        .find(|volume| volume.number == 1)
+        .and_then(|volume| {
+            group_entries
+                .iter()
+                .position(|entry| entry.path == volume.path)
+        })
+        .unwrap_or_else(|| select_head_index(group_entries));
     let head = &group_entries[head_index];
     let mut relation = relations
         .get(&head.name)
         .cloned()
         .unwrap_or_else(|| build_file_relation(&head.name, &HashSet::new()));
-    let mut expand_misnamed = false;
     let mut is_split_candidate = relation.is_split_related;
 
     if group_entries.len() > 1 {
         is_split_candidate = allow_multi_split_candidate;
-        expand_misnamed = true;
         if detect_split_role(&head.name) == Some("first")
             || head.name.to_ascii_lowercase().ends_with(".exe")
         {
             relation.split_role = Some("first".to_string());
         }
-    } else if detect_split_role(&head.name) == Some("first") {
-        expand_misnamed = true;
     }
 
-    let all_parts: Vec<String> = std::iter::once(head.path.clone())
-        .chain(
-            group_entries
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != head_index)
-                .map(|(_, entry)| entry.path.clone()),
-        )
-        .collect();
+    let all_parts: Vec<String> = if split_contract.volumes.is_empty() {
+        std::iter::once(head.path.clone())
+            .chain(
+                group_entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != head_index)
+                    .map(|(_, entry)| entry.path.clone()),
+            )
+            .collect()
+    } else {
+        split_contract
+            .volumes
+            .iter()
+            .map(|volume| volume.path.clone())
+            .collect()
+    };
+
+    let volume_dicts: Vec<Py<PyDict>> = split_contract
+        .volumes
+        .iter()
+        .map(|volume| native_split_volume_to_dict(py, volume))
+        .collect::<PyResult<_>>()?;
 
     let dict = PyDict::new(py);
     dict.set_item("directory", directory)?;
@@ -281,8 +369,274 @@ fn native_group_to_dict(
     dict.set_item("all_parts", PyList::new(py, &all_parts)?)?;
     dict.set_item("is_split_candidate", is_split_candidate)?;
     dict.set_item("head_size", head.size)?;
-    dict.set_item("expand_misnamed", expand_misnamed)?;
+    dict.set_item("split_volumes", PyList::new(py, &volume_dicts)?)?;
+    dict.set_item("split_group_complete", split_contract.complete)?;
+    dict.set_item("split_missing_reason", &split_contract.missing_reason)?;
+    dict.set_item("split_missing_indices", &split_contract.missing_indices)?;
     Ok(dict.unbind())
+}
+
+fn native_split_volume_to_dict(py: Python<'_>, volume: &NativeSplitVolume) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("path", &volume.path)?;
+    dict.set_item("number", volume.number)?;
+    dict.set_item("role", volume.role)?;
+    dict.set_item("source", volume.source)?;
+    dict.set_item("style", &volume.style)?;
+    dict.set_item("prefix", &volume.prefix)?;
+    dict.set_item("width", volume.width)?;
+    Ok(dict.unbind())
+}
+
+fn split_styles_compatible(left: &str, right: &str) -> bool {
+    left == right
+        || (matches!(left, "rar_part" | "rar_sfx_part")
+            && matches!(right, "rar_part" | "rar_sfx_part"))
+}
+
+fn build_native_split_contract(
+    group_entries: &[RelationInput],
+    relations: &HashMap<String, FileRelationNative>,
+) -> NativeSplitContract {
+    let parsed: Vec<(&RelationInput, ParsedVolume)> = group_entries
+        .iter()
+        .filter_map(|entry| parse_numbered_volume(&entry.path).map(|parsed| (entry, parsed)))
+        .collect();
+    let sfx_head = group_entries.iter().find(|entry| {
+        relations.get(&entry.name).is_some_and(|relation| {
+            relation.is_split_exe_companion || relation.is_disguised_split_exe_companion
+        })
+    });
+
+    if let (Some(head), Some((_, anchor))) = (sfx_head, parsed.first()) {
+        let mut volumes = vec![NativeSplitVolume {
+            path: head.path.clone(),
+            number: 1,
+            role: "first",
+            source: "standard",
+            style: "sfx_numeric_suffix".to_string(),
+            prefix: anchor.prefix.clone(),
+            width: anchor.width,
+        }];
+        for (entry, parsed) in &parsed {
+            volumes.push(NativeSplitVolume {
+                path: entry.path.clone(),
+                number: parsed.number.saturating_add(1),
+                role: "member",
+                source: if parsed.decorated {
+                    "candidate"
+                } else {
+                    "standard"
+                },
+                style: "sfx_numeric_suffix".to_string(),
+                prefix: anchor.prefix.clone(),
+                width: anchor.width,
+            });
+        }
+        volumes.sort_by(|left, right| {
+            left.number.cmp(&right.number).then_with(|| {
+                left.path
+                    .to_ascii_lowercase()
+                    .cmp(&right.path.to_ascii_lowercase())
+            })
+        });
+        let external_numbers: HashSet<u32> = parsed.iter().map(|(_, item)| item.number).collect();
+        let max_external = external_numbers.iter().copied().max().unwrap_or(0);
+        let missing: Vec<u32> = (1..=max_external)
+            .filter(|number| !external_numbers.contains(number))
+            .map(|number| number.saturating_add(1))
+            .collect();
+        return NativeSplitContract {
+            volumes,
+            complete: Some(missing.is_empty()),
+            missing_reason: if missing.is_empty() {
+                String::new()
+            } else {
+                "missing_middle".to_string()
+            },
+            missing_indices: missing,
+        };
+    }
+
+    let anchor = parsed
+        .first()
+        .map(|(_, parsed)| parsed.clone())
+        .or_else(|| {
+            group_entries.iter().find_map(|entry| {
+                let relation = relations.get(&entry.name)?;
+                if relation.split_family == "rar_oldstyle" && relation.split_index == 1 {
+                    let directory = Path::new(&entry.path)
+                        .parent()
+                        .map(|value| value.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let separator = if directory.is_empty() {
+                        ""
+                    } else {
+                        std::path::MAIN_SEPARATOR_STR
+                    };
+                    return Some(ParsedVolume {
+                        prefix: format!("{directory}{separator}{}", relation.logical_name),
+                        number: 1,
+                        style: "rar_oldstyle",
+                        width: 2,
+                        family: "rar",
+                        decorated: false,
+                    });
+                }
+                None
+            })
+        });
+    let Some(anchor) = anchor else {
+        return NativeSplitContract {
+            volumes: Vec::new(),
+            complete: None,
+            missing_reason: String::new(),
+            missing_indices: Vec::new(),
+        };
+    };
+
+    let mut by_number: HashMap<u32, NativeSplitVolume> = HashMap::new();
+    let mut substituted_indices: Vec<u32> = Vec::new();
+    for (entry, parsed) in parsed {
+        if parsed.family != anchor.family
+            || !split_styles_compatible(parsed.style, anchor.style)
+            || !parsed.prefix.eq_ignore_ascii_case(&anchor.prefix)
+        {
+            continue;
+        }
+        let candidate = NativeSplitVolume {
+            path: entry.path.clone(),
+            number: parsed.number,
+            role: if parsed.number == 1 {
+                "first"
+            } else {
+                "member"
+            },
+            source: if parsed.decorated {
+                "candidate"
+            } else {
+                "standard"
+            },
+            style: anchor.style.to_string(),
+            prefix: anchor.prefix.clone(),
+            width: anchor.width,
+        };
+        by_number
+            .entry(parsed.number)
+            .and_modify(|existing| {
+                if candidate.path.to_ascii_lowercase() < existing.path.to_ascii_lowercase() {
+                    *existing = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    if anchor.style == "numeric_suffix" {
+        if let Some(entry) = group_entries
+            .iter()
+            .find(|entry| entry.path.eq_ignore_ascii_case(&anchor.prefix))
+        {
+            by_number.insert(
+                1,
+                NativeSplitVolume {
+                    path: entry.path.clone(),
+                    number: 1,
+                    role: "first",
+                    source: "candidate",
+                    style: anchor.style.to_string(),
+                    prefix: anchor.prefix.clone(),
+                    width: anchor.width,
+                },
+            );
+            substituted_indices.push(1);
+        }
+    }
+
+    if anchor.style == "rar_oldstyle" {
+        if let Some(entry) = group_entries.iter().find(|entry| {
+            relations.get(&entry.name).is_some_and(|relation| {
+                relation.split_family == "rar_oldstyle" && relation.split_index == 1
+            })
+        }) {
+            by_number.insert(
+                1,
+                NativeSplitVolume {
+                    path: entry.path.clone(),
+                    number: 1,
+                    role: "first",
+                    source: "standard",
+                    style: anchor.style.to_string(),
+                    prefix: anchor.prefix.clone(),
+                    width: anchor.width,
+                },
+            );
+        }
+    }
+
+    let max_number = by_number.keys().copied().max().unwrap_or(0);
+    let mut missing: Vec<u32> = (1..=max_number)
+        .filter(|number| !by_number.contains_key(number))
+        .collect();
+
+    if anchor.style == "zip_spanned" {
+        let terminal = group_entries.iter().find(|entry| {
+            relations.get(&entry.name).is_some_and(|relation| {
+                relation.split_family == "zip_spanned"
+                    && relation.split_role.as_deref() == Some("terminal")
+            })
+        });
+        if let Some(entry) = terminal {
+            by_number.insert(
+                max_number.saturating_add(1),
+                NativeSplitVolume {
+                    path: entry.path.clone(),
+                    number: max_number.saturating_add(1),
+                    role: "terminal",
+                    source: "standard",
+                    style: anchor.style.to_string(),
+                    prefix: anchor.prefix.clone(),
+                    width: anchor.width,
+                },
+            );
+        } else if missing.is_empty() {
+            missing.push(max_number.saturating_add(1));
+        }
+    }
+
+    let mut volumes: Vec<NativeSplitVolume> = by_number.into_values().collect();
+    volumes.sort_by(|left, right| {
+        left.number.cmp(&right.number).then_with(|| {
+            left.path
+                .to_ascii_lowercase()
+                .cmp(&right.path.to_ascii_lowercase())
+        })
+    });
+    let missing_reason = if missing.is_empty() {
+        String::new()
+    } else if missing.contains(&1) {
+        "missing_head".to_string()
+    } else if anchor.style == "zip_spanned"
+        && missing.len() == 1
+        && missing[0] == max_number.saturating_add(1)
+    {
+        "missing_tail".to_string()
+    } else {
+        "missing_middle".to_string()
+    };
+    if missing.is_empty() && !substituted_indices.is_empty() {
+        return NativeSplitContract {
+            volumes,
+            complete: None,
+            missing_reason: "candidate_substitution".to_string(),
+            missing_indices: substituted_indices,
+        };
+    }
+    NativeSplitContract {
+        volumes,
+        complete: Some(missing.is_empty()),
+        missing_reason,
+        missing_indices: missing,
+    }
 }
 
 fn select_head_index(entries: &[RelationInput]) -> usize {
@@ -369,6 +723,16 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
         is_split_member = true;
         split_family = "rar_oldstyle".to_string();
         split_index = 1;
+    }
+
+    if ext == ".zip" {
+        if let Some(max_member) = max_zip_spanned_member(lower_names, &base) {
+            logical_name = base.clone();
+            split_role = Some("terminal".to_string());
+            is_split_member = true;
+            split_family = "zip_spanned".to_string();
+            split_index = max_member.saturating_add(1);
+        }
     }
 
     let match_rar_disguised = rar_disguised_re().is_match(filename);
@@ -566,6 +930,17 @@ fn parse_numbered_volume_name(filename: &str) -> Option<ParsedVolume> {
             } else {
                 "rar_part"
             },
+            width: number.len(),
+            family: "rar",
+            decorated: false,
+        });
+    }
+    if let Some(captures) = parse_old_rar_re().captures(filename) {
+        let number = captures.name("number")?.as_str();
+        return Some(ParsedVolume {
+            prefix: captures.name("prefix")?.as_str().to_string(),
+            number: number.parse::<u32>().ok()?.saturating_add(2),
+            style: "rar_oldstyle",
             width: number.len(),
             family: "rar",
             decorated: false,
@@ -802,6 +1177,23 @@ fn has_oldstyle_rar_members(lower_names: &HashSet<String>, base_name: &str) -> b
         .unwrap_or(false)
 }
 
+fn max_zip_spanned_member(lower_names: &HashSet<String>, base_name: &str) -> Option<u32> {
+    let escaped = regex::escape(base_name);
+    let pattern = RegexBuilder::new(&format!(r"^{escaped}\.z(?P<number>\d{{2}})$"))
+        .case_insensitive(true)
+        .build()
+        .ok()?;
+    lower_names
+        .iter()
+        .filter_map(|candidate| {
+            pattern
+                .captures(candidate)
+                .and_then(|captures| captures.name("number"))
+                .and_then(|number| number.as_str().parse::<u32>().ok())
+        })
+        .max()
+}
+
 fn split_ext(filename: &str) -> (String, String) {
     let basename_start = filename
         .rfind(['\\', '/'])
@@ -847,31 +1239,49 @@ fn split_first_patterns() -> &'static [Regex; 5] {
 }
 
 fn relation_group_key(relation: &FileRelationNative) -> String {
-    let family = match relation.split_family.as_str() {
-        "7z_numbered" => "7z",
-        "zip_numbered" | "zip_spanned" => "zip",
-        "rar_numbered" | "rar_part" | "rar_oldstyle" => "rar",
-        "exe_companion" => "companion",
-        "generic_numbered" => "generic",
+    let family_and_scheme = match relation.split_family.as_str() {
+        "7z_numbered" => "7z:numeric",
+        "zip_numbered" => "zip:numeric",
+        "zip_spanned" => "zip:spanned",
+        "rar_numbered" => "rar:numeric",
+        "rar_part" => "rar:part",
+        "rar_oldstyle" => "rar:oldstyle",
+        "exe_companion" => "companion:sfx",
+        "generic_numbered" => "generic:numeric",
         _ => {
             if relation.split_role.is_some() {
                 // Preserve an explicit archive family even when an extra suffix
                 // prevented parse_numbered_volume from assigning split_family.
                 // The matching executable is attached to this group separately.
-                disguised_archive_family(&relation.filename).unwrap_or("companion")
+                match disguised_archive_family(&relation.filename) {
+                    Some("7z") => "7z:numeric",
+                    Some("zip") => "zip:numeric",
+                    Some("rar") => "rar:numeric",
+                    _ => "companion:unknown",
+                }
             } else {
                 let (_, ext) = split_ext(&relation.filename);
                 match ext.to_ascii_lowercase().as_str() {
-                    ".7z" => "7z",
-                    ".zip" => "zip",
-                    ".rar" => "rar",
-                    ".exe" => "exe",
-                    _ => "plain",
+                    ".7z" => "7z:plain",
+                    ".zip" => "zip:plain",
+                    ".rar" => "rar:plain",
+                    ".exe" => "exe:plain",
+                    _ => "plain:file",
                 }
             }
         }
     };
-    format!("{}\u{001f}{}", relation.logical_name, family)
+    format!("{}\u{001f}{}", relation.logical_name, family_and_scheme)
+}
+
+fn numbered_family_for_plain_extension(filename: &str) -> Option<&'static str> {
+    let (_, ext) = split_ext(filename);
+    match ext.to_ascii_lowercase().as_str() {
+        ".7z" => Some("7z_numbered"),
+        ".zip" => Some("zip_numbered"),
+        ".rar" => Some("rar_numbered"),
+        _ => None,
+    }
 }
 
 fn disguised_archive_family(filename: &str) -> Option<&'static str> {
@@ -964,6 +1374,11 @@ fn parse_rar_part_re() -> &'static Regex {
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.(?P<format>rar|exe)$"))
 }
 
+fn parse_old_rar_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.r(?P<number>\d{2})$"))
+}
+
 fn parse_plain_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.(?P<number>\d{3})$"))
@@ -1013,4 +1428,41 @@ fn decorated_old_rar_re() -> &'static Regex {
 fn old_rar_member_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"\.r(\d{2})$"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noisy_rar_part_names_keep_the_same_declared_family_and_prefix() {
+        let first = parse_numbered_volume_name("X.AApart01tail.BBrarCC").unwrap();
+        let second = parse_numbered_volume_name("X.DDpart02more.EErarFF").unwrap();
+
+        assert_eq!(first.family, "rar");
+        assert_eq!(second.family, "rar");
+        assert_eq!(first.style, "rar_part");
+        assert_eq!(second.style, "rar_part");
+        assert_eq!(first.prefix, "X");
+        assert_eq!(second.prefix, "X");
+        assert_eq!((first.number, second.number), (1, 2));
+        assert!(first.decorated && second.decorated);
+    }
+
+    #[test]
+    fn noisy_format_tokens_remain_cross_family_incompatible() {
+        let seven_zip = parse_numbered_volume_name("X.AA7zZZ.BB001CC").unwrap();
+        let zip = parse_numbered_volume_name("X.DDzipYY.EE001FF").unwrap();
+        let rar = parse_numbered_volume_name("X.GGpart01noise.HHrarII").unwrap();
+
+        assert_eq!(
+            (seven_zip.family, seven_zip.style),
+            ("7z", "numeric_suffix")
+        );
+        assert_eq!((zip.family, zip.style), ("zip", "numeric_suffix"));
+        assert_eq!((rar.family, rar.style), ("rar", "rar_part"));
+        assert_ne!(seven_zip.family, zip.family);
+        assert_ne!(seven_zip.family, rar.family);
+        assert_ne!(zip.family, rar.family);
+    }
 }

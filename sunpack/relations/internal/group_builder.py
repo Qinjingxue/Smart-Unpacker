@@ -23,40 +23,14 @@ class RelationsGroupBuilder:
 
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
         native_groups = _native_build_candidate_groups(snapshot.native_snapshot)
-        support_directories = {
-            str(raw.get("directory") or "")
-            for raw in native_groups
-            if isinstance(raw, dict)
-            and (
-                bool(raw.get("is_split_candidate"))
-                or bool(raw.get("expand_misnamed"))
-                or bool((raw.get("relation") or {}).get("is_split_related"))
-            )
-            and raw.get("directory")
-        }
-        dir_files: Dict[str, List[FileEntry]] = defaultdict(list)
-        for entry in snapshot.file_entries_for_directories(support_directories):
-            parent = str(entry.path.parent)
-            dir_files[parent].append(entry)
-        directory_indexes = {
-            directory: self._build_directory_index(entries)
-            for directory, entries in dir_files.items()
-        }
-        classic_groups, classic_paths = self._build_classic_zip_spanned_groups(dir_files, directory_indexes)
-        zero_zip_groups, zero_zip_paths = self._build_zero_based_zip_numbered_groups(dir_files, directory_indexes)
-        claimed_paths = classic_paths | zero_zip_paths
         groups: List[CandidateGroup] = []
         for raw in native_groups:
             if not isinstance(raw, dict):
                 raise ValueError("native relations returned a non-object group")
-            group = self._candidate_group_from_native(raw, directory_indexes)
+            group = self._candidate_group_from_native(raw)
             if group is None:
                 raise ValueError("native relations returned an invalid group")
-            if any(path_key(path) in claimed_paths for path in group.all_paths):
-                continue
             groups.append(group)
-        groups.extend(classic_groups)
-        groups.extend(zero_zip_groups)
         return groups
 
     def _build_classic_zip_spanned_groups(
@@ -115,7 +89,6 @@ class RelationsGroupBuilder:
     def _candidate_group_from_native(
         self,
         raw: dict,
-        directory_indexes: Dict[str, DirectoryFileIndex],
     ) -> CandidateGroup | None:
         relation_payload = raw.get("relation")
         if not isinstance(relation_payload, dict):
@@ -124,20 +97,19 @@ class RelationsGroupBuilder:
             relation = FileRelation(**relation_payload)
             head_path = str(raw.get("head_path") or "")
             all_parts = [str(path) for path in (raw.get("all_parts") or [])]
-            directory_index = directory_indexes.get(str(raw.get("directory") or ""))
             if not head_path or not all_parts:
                 return None
-            if bool(raw.get("expand_misnamed")):
-                all_parts = self.expand_misnamed_split_parts(head_path, all_parts, directory_index)
-            split_volumes, split_complete, missing_reason, missing_indices = self.build_split_volume_entries(
-                head_path,
-                all_parts,
-                directory_index,
-            )
+            split_volumes = [
+                SplitVolumeEntry(**payload)
+                for payload in (raw.get("split_volumes") or [])
+                if isinstance(payload, dict)
+            ]
+            split_complete = raw.get("split_group_complete")
+            missing_reason = str(raw.get("split_missing_reason") or "")
+            missing_indices = [int(value) for value in (raw.get("split_missing_indices") or [])]
             first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
             if first_volume:
                 head_path = first_volume.path
-            head_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else None
             return CandidateGroup(
                 head_path=head_path,
                 logical_name=str(raw.get("logical_name") or relation.logical_name),
@@ -149,7 +121,7 @@ class RelationsGroupBuilder:
                 split_group_complete=split_complete,
                 split_missing_reason=missing_reason,
                 split_missing_indices=missing_indices,
-                head_metadata=dict(head_entry.metadata or {}) if head_entry is not None else {},
+                head_metadata={},
             )
         except (TypeError, ValueError):
             return None
