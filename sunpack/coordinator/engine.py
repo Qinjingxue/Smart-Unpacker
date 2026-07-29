@@ -37,6 +37,7 @@ from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.archive_sessions import clear_archive_sessions
+from sunpack.detection.options import DetectionOptions
 
 
 @dataclass
@@ -78,14 +79,15 @@ class PipelineEngine:
 
     _STOP = object()
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
+        self.detection_options = detection_options or DetectionOptions()
         pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
         self.batch_window_seconds = max(0.0, float(pipeline_config["batch_window_seconds"]))
         self.max_batch_requests = max(1, int(pipeline_config["max_batch_requests"]))
         queue_capacity = max(1, int(pipeline_config["queue_capacity"]))
         self._queue: queue.Queue = queue.Queue(maxsize=queue_capacity)
-        self._runtime = _PipelineRuntime(config)
+        self._runtime = _PipelineRuntime(config, self.detection_options)
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._pressure_lock = threading.Lock()
@@ -292,7 +294,7 @@ def _replace_mapping_in_place(target: dict, source: dict) -> None:
 class _PipelineRuntime:
     """Long-lived pipeline components; request state is rebound per micro-batch."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
         cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
         self.i18n = I18nContext(cli_config.get("language"))
@@ -337,7 +339,7 @@ class _PipelineRuntime:
             thread_name_prefix="sunpack-task",
         )
         initial_context = RunContext()
-        self.task_scanner = ArchiveTaskScanner(config, initial_context)
+        self.task_scanner = ArchiveTaskScanner(config, initial_context, detection_options=detection_options)
         self.rename_scheduler = RenameScheduler()
         self.output_scan_policy = NestedOutputScanPolicy(config)
         self.nested_extraction_policy = NestedExtractionPolicy(config)

@@ -109,7 +109,13 @@ class ArchiveAnalysisScheduler:
                 expected_size=int(view.size),
             )
             embedded_prepass = embedded.to_prepass()
-            if embedded.candidates:
+            fallback_candidates = [item for item in embedded.candidates if item.offset > 0]
+            if fallback_candidates:
+                embedded_prepass["embedded_candidates"] = [item.to_dict() for item in fallback_candidates]
+                embedded_prepass["hits"] = [
+                    item for item in embedded_prepass["hits"] if int(item.get("offset") or 0) > 0
+                ]
+                embedded_prepass["formats"] = sorted({item.format for item in fallback_candidates})
                 prepass = embedded_prepass
                 structure_context = {**prepass, "fuzzy": fuzzy}
                 modules = self._selected_structure_modules(structure_context)

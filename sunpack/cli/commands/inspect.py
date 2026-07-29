@@ -1,4 +1,4 @@
-from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
+from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, build_detection_parser, localize_help_action
 from sunpack.cli.cli_runtime import (
     build_effective_config,
     inspect_result_to_item,
@@ -13,6 +13,7 @@ from sunpack.config.loader import load_config
 from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.coordinator.inspector import InspectOrchestrator
 from sunpack.support.json_format import to_json_text
+from sunpack.detection.options import DetectionOptions
 
 COMMAND = "inspect"
 ORDER = 30
@@ -21,7 +22,7 @@ ORDER = 30
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
-        parents=[build_common_parser(ctx)],
+        parents=[build_common_parser(ctx), build_detection_parser(ctx)],
         help=ctx.t("cli.inspect.help"),
         usage="sunpack inspect [options] <paths...>",
         formatter_class=CliHelpFormatter,
@@ -40,7 +41,8 @@ def handle(args, ctx):
 
     config = load_config()
     effective_config = build_effective_config(config)
-    results = InspectOrchestrator(config).inspect(target_paths)
+    detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
+    results = InspectOrchestrator(config, detection_options).inspect(target_paths)
     all_items = [inspect_result_to_item(res) for res in results]
     if args.analyze:
         analyses = _analysis_by_path(results, config)
@@ -121,6 +123,7 @@ def handle(args, ctx):
             "analyze": bool(args.analyze),
             "effective_config": effective_config,
             "detection": effective_config["detection"],
+            "deep_detect": bool(args.deep_detect),
         },
         summary=summary,
         items=items,

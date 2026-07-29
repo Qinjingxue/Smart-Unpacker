@@ -1,4 +1,4 @@
-from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
+from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, build_detection_parser, localize_help_action
 from sunpack.cli.cli_runtime import (
     resolve_common_root,
     resolve_target_paths,
@@ -8,6 +8,7 @@ from sunpack.cli.cli_runtime import (
 from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.scanner import ScanOrchestrator
+from sunpack.detection.options import DetectionOptions
 
 COMMAND = "scan"
 ORDER = 20
@@ -16,7 +17,7 @@ ORDER = 20
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
-        parents=[build_common_parser(ctx)],
+        parents=[build_common_parser(ctx), build_detection_parser(ctx)],
         help=ctx.t("cli.scan.help"),
         usage="sunpack scan [options] <paths...>",
         formatter_class=CliHelpFormatter,
@@ -32,7 +33,7 @@ def handle(args, ctx):
         return result_for_missing(COMMAND, args, missing_paths)
 
     config = load_config()
-    orchestrator = ScanOrchestrator(config)
+    orchestrator = ScanOrchestrator(config, DetectionOptions(deep_scan=bool(args.deep_detect)))
     task_items = [scan_result_to_item(res) for res in orchestrator.scan_targets(target_paths)]
     task_items.sort(key=lambda item: item["main_path"].lower())
 
@@ -52,7 +53,7 @@ def handle(args, ctx):
 
     return 0, CliCommandResult(
         command=COMMAND,
-        inputs={"paths": target_paths, "common_root": resolve_common_root(target_paths), "config_overrides": {}},
+        inputs={"paths": target_paths, "common_root": resolve_common_root(target_paths), "config_overrides": {}, "deep_detect": bool(args.deep_detect)},
         summary=summary,
         tasks=task_items,
     )

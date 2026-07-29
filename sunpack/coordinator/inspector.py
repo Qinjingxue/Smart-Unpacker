@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from dataclasses import dataclass
 
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
+from sunpack.detection.options import DetectionOptions
 
 @dataclass
 class InspectResult:
@@ -20,8 +21,8 @@ class InspectResult:
     score_breakdown: list
 
 class InspectOrchestrator:
-    def __init__(self, config: Dict[str, Any]):
-        self.detector = ArchiveTaskProvider(config)
+    def __init__(self, config: Dict[str, Any], detection_options: DetectionOptions | None = None):
+        self.detector = ArchiveTaskProvider(config, detection_options=detection_options)
 
     def inspect(self, paths: List[str]) -> List[InspectResult]:
         results = []

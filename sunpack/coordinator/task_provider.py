@@ -7,6 +7,7 @@ from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
+from sunpack.detection.options import DetectionOptions
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task
@@ -21,11 +22,12 @@ STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".
 class ArchiveTaskProvider:
     """Public detection facade that turns detection decisions into archive tasks."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], detection_options: DetectionOptions | None = None):
         self.config = config
+        self.detection_options = detection_options or DetectionOptions()
         cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
         self.i18n = I18nContext(cli_config.get("language"))
-        self.detector = DetectionScheduler(config)
+        self.detector = DetectionScheduler(config, options=self.detection_options)
         self._relations = RelationsScheduler()
         self.failed_candidates: list[str] = []
         self.failed_candidate_failures: list[FailureInfo] = []
@@ -91,6 +93,8 @@ class ArchiveTaskProvider:
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
         initial = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+        if self.detection_options.deep_scan:
+            return initial
         ratio = self._embedded_deep_scan_single_candidate_ratio()
         if ratio <= 0.0:
             return initial
@@ -135,6 +139,8 @@ class ArchiveTaskProvider:
         return 0.0
 
     def _detection_pipeline_disabled(self) -> bool:
+        if self.detection_options.deep_scan:
+            return False
         detector_config = detection_config(self.config)
         if detector_config.get("enabled") is False:
             return True

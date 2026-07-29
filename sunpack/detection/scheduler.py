@@ -11,6 +11,8 @@ from sunpack.detection.pipeline.processors.runner import ProcessingCoordinator
 from sunpack.detection.pipeline.rules.manager import RuleManager
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleDecision
+from sunpack.detection.deep_scan import evaluate_deep_bag
+from sunpack.detection.options import DetectionOptions
 
 
 @dataclass(frozen=True)
@@ -22,8 +24,9 @@ class DetectionResult:
 class DetectionScheduler:
     """Coordinates fact collection, fact processing, and rule evaluation."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], options: DetectionOptions | None = None):
         self.config = config
+        self.options = options or DetectionOptions()
         discover_collectors()
         discover_processors()
         detector_config = detection_config(config)
@@ -49,7 +52,7 @@ class DetectionScheduler:
     ) -> RuleDecision:
         if fact_provider is not None and not fact_bag.has("file.path"):
             fact_bag.set("file.path", fact_provider.base_path)
-        return self.rule_manager.evaluate_pool([fact_bag])[fact_bag]
+        return self.evaluate_pool([fact_bag])[fact_bag]
 
     def evaluate(
         self,
@@ -63,6 +66,8 @@ class DetectionScheduler:
         fact_bags: list[FactBag],
         scan_session: Any = None,
     ) -> dict[FactBag, RuleDecision]:
+        if self.options.deep_scan:
+            return {fact_bag: evaluate_deep_bag(fact_bag) for fact_bag in fact_bags}
         self._active_scan_session = scan_session
         self.rule_manager.ensure_pool_facts = self._ensure_pool_facts
         try:

@@ -9,14 +9,15 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.scan_session import DetectionScanSession
+from sunpack.detection.options import DetectionOptions
 from sunpack.relations.internal.group_builder import RelationsGroupBuilder
 
 
 class ArchiveTaskScanner:
-    def __init__(self, config: dict[str, Any], context: RunContext):
+    def __init__(self, config: dict[str, Any], context: RunContext, detection_options: DetectionOptions | None = None):
         self.config = config
         self.context = context
-        self.provider = ArchiveTaskProvider(config)
+        self.provider = ArchiveTaskProvider(config, detection_options=detection_options)
         self.detector = self.provider.detector
         self.last_scan_session: DetectionScanSession | None = None
 

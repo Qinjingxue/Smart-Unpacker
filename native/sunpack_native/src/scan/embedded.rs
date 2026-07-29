@@ -454,13 +454,11 @@ fn record_raw_hit(
     } else {
         absolute
     };
-    if candidate_offset > 0 {
-        hits.push(RawHit {
-            hit_name,
-            kind,
-            offset: candidate_offset,
-        });
-    }
+    hits.push(RawHit {
+        hit_name,
+        kind,
+        offset: candidate_offset,
+    });
 }
 
 fn validate_candidate(
@@ -1049,13 +1047,11 @@ mod tests {
             } else {
                 absolute
             };
-            if candidate_offset > 0 {
-                hits.push(RawHit {
-                    hit_name,
-                    kind,
-                    offset: candidate_offset,
-                });
-            }
+            hits.push(RawHit {
+                hit_name,
+                kind,
+                offset: candidate_offset,
+            });
         }
         hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
         hits
@@ -1171,6 +1167,32 @@ mod tests {
                 gzip_offset
             );
         });
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn finds_primary_and_later_stream_across_invalid_gap() {
+        let mut first = GzEncoder::new(Vec::new(), Compression::fast());
+        first.write_all(b"first payload").unwrap();
+        let first = first.finish().unwrap();
+        let gap = b"invalid bytes between valid streams";
+        let second_offset = (first.len() + gap.len()) as u64;
+        let mut second = GzEncoder::new(Vec::new(), Compression::fast());
+        second.write_all(b"second payload").unwrap();
+
+        let mut data = first;
+        data.extend_from_slice(gap);
+        data.extend_from_slice(&second.finish().unwrap());
+        let path = temp_file("embedded_primary_gap_stream", &data);
+        let result = scan_embedded_archives_native(ManagedReader::open(&path).unwrap()).unwrap();
+        let gzip_offsets = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.format == "gzip")
+            .map(|candidate| candidate.offset)
+            .collect::<Vec<_>>();
+
+        assert_eq!(gzip_offsets, [0, second_offset]);
         let _ = fs::remove_file(path);
     }
 

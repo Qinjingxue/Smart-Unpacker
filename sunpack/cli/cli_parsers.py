@@ -68,6 +68,12 @@ def build_password_parser(ctx: CliContext) -> argparse.ArgumentParser:
     return parser
 
 
+def build_detection_parser(ctx: CliContext) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--deep-detect", action="store_true", help=ctx.t("cli.deep_detect"))
+    return parser
+
+
 def build_extract_config_override_parser(ctx: CliContext) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--recur", dest="recursive_extract", type=parse_recursive_extract_value, help=ctx.t("cli.recursive_extract"))

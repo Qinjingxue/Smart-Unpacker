@@ -10,6 +10,7 @@ from sunpack.config.loader import config_cache_token
 from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.cli.runtime_state import server_runtime_active, set_server_runtime_active
+from sunpack.detection.options import DetectionOptions
 
 
 _MUTABLE_PATHS = {
@@ -24,7 +25,7 @@ _MUTABLE_PATHS = {
 }
 _LOCK = threading.RLock()
 _ENGINE: PipelineEngine | None = None
-_ENGINE_KEY: tuple[tuple[object, ...], str] | None = None
+_ENGINE_KEY: tuple[tuple[object, ...], str, bool] | None = None
 
 
 def enable_persistent_runtime() -> None:
@@ -61,14 +62,18 @@ def persistent_server_idle_seconds() -> float:
 
 
 @contextmanager
-def pipeline_engine(config: dict) -> Iterator[PipelineEngine]:
+def pipeline_engine(
+    config: dict,
+    detection_options: DetectionOptions | None = None,
+) -> Iterator[PipelineEngine]:
     global _ENGINE, _ENGINE_KEY
     with _LOCK:
         enabled = server_runtime_active()
     if not enabled:
         raise RuntimeError("extract pipeline is only available inside the persistent server")
 
-    key = (config_cache_token(), _stable_config_key(config))
+    options = detection_options or DetectionOptions()
+    key = (config_cache_token(), _stable_config_key(config), options.deep_scan)
     with _LOCK:
         if _ENGINE is None or _ENGINE_KEY != key:
             previous = _ENGINE
@@ -76,7 +81,12 @@ def pipeline_engine(config: dict) -> Iterator[PipelineEngine]:
             _ENGINE_KEY = None
             if previous is not None:
                 previous.close(graceful=True)
-            _ENGINE = PipelineEngine(copy.deepcopy(config)).start()
+            engine_config = copy.deepcopy(config)
+            _ENGINE = (
+                PipelineEngine(engine_config, detection_options=options)
+                if options.deep_scan
+                else PipelineEngine(engine_config)
+            ).start()
             _ENGINE_KEY = key
         else:
             _ENGINE.reconfigure_request(config)

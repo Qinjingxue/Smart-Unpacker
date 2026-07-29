@@ -4,6 +4,7 @@ from sunpack.cli.cli_constants import EXIT_PARTIAL, EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
     build_common_parser,
+    build_detection_parser,
     build_extract_config_override_parser,
     build_password_parser,
     localize_help_action,
@@ -25,6 +26,7 @@ from sunpack.cli.persistent_runtime import pipeline_engine
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
 from sunpack.support.collections import dedupe_values
+from sunpack.detection.options import DetectionOptions
 
 COMMAND = "extract"
 ORDER = 10
@@ -33,7 +35,7 @@ ORDER = 10
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
-        parents=[build_common_parser(ctx), build_password_parser(ctx), build_extract_config_override_parser(ctx)],
+        parents=[build_common_parser(ctx), build_detection_parser(ctx), build_password_parser(ctx), build_extract_config_override_parser(ctx)],
         help=ctx.t("cli.extract.help"),
         usage="sunpack extract [options] <paths...>",
         formatter_class=CliHelpFormatter,
@@ -85,7 +87,8 @@ def handle(args, ctx):
         quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
         verbose=bool(getattr(reporter, "verbose", False)),
     )
-    with pipeline_engine(run_config) as engine:
+    detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
+    with pipeline_engine(run_config, detection_options=detection_options) as engine:
         while True:
             password_summary = build_password_summary(
                 passwords,
@@ -149,6 +152,7 @@ def handle(args, ctx):
             "verbose": args.verbose,
             "config_overrides": config_overrides,
             "direct_file": bool(getattr(args, "direct_file", False)),
+            "deep_detect": bool(args.deep_detect),
         },
         summary={
             "success_count": summary.success_count,

@@ -47,7 +47,7 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
         archive_format = str(row.get("format") or "")
         detected_ext = str(row.get("detected_ext") or "")
         offset = int(row.get("offset") or 0)
-        if not archive_format or not detected_ext or offset <= 0:
+        if not archive_format or not detected_ext or offset < 0:
             raise TypeError("Native scan_embedded_archives returned an invalid candidate")
         end_offset = row.get("end_offset")
         candidates.append(EmbeddedCandidate(
@@ -74,7 +74,7 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
             raise TypeError("Native scan_embedded_archives returned a non-dict hit")
         name = str(row.get("name") or "")
         offset = int(row.get("offset") or 0)
-        if name and offset > 0 and hit_formats.get(name) in validated_formats:
+        if name and offset >= 0 and hit_formats.get(name) in validated_formats:
             hits.append(SignatureHit(name=name, offset=offset))
 
     return EmbeddedScanResult(

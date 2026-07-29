@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from sunpack.contracts.run_context import RunContext
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
+from sunpack.detection.options import DetectionOptions
 
 @dataclass
 class ScanResult:
@@ -18,8 +19,8 @@ class ScanResult:
     decision: str
 
 class ScanOrchestrator:
-    def __init__(self, config: Dict[str, Any]):
-        self.task_scanner = ArchiveTaskScanner(config, RunContext())
+    def __init__(self, config: Dict[str, Any], detection_options: DetectionOptions | None = None):
+        self.task_scanner = ArchiveTaskScanner(config, RunContext(), detection_options=detection_options)
 
     def scan(self, root_dir: str) -> List[ScanResult]:
         return self.scan_targets([root_dir])
