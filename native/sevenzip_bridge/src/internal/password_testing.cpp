@@ -193,6 +193,7 @@ PasswordTestResult test_one_password(
         HRESULT last_hr = E_FAIL;
 
         Int32 last_op_res = kOpOk;
+        bool last_encryption_evidence = false;
 
 
 
@@ -231,9 +232,11 @@ PasswordTestResult test_one_password(
 
 
             const std::wstring callback_path = canonical_names.empty() ? callback_archive_path(archive_path, part_paths) : canonical_names.front();
-            ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_path, part_paths, canonical_names));
+            auto* raw_open_callback = new OpenCallback(password, callback_path, part_paths, canonical_names);
+            ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
             hr = archive->Open(stream.get(), nullptr, open_callback.get());
+            last_encryption_evidence = raw_open_callback->password_requested();
 
             if (hr != S_OK) {
 
@@ -244,6 +247,7 @@ PasswordTestResult test_one_password(
             }
 
             any_opened = true;
+            last_encryption_evidence = last_encryption_evidence || archive_has_encrypted_items(archive.get());
 
 
 
@@ -272,6 +276,7 @@ PasswordTestResult test_one_password(
                     extract_callback.get());
 
                 last_op_res = raw_extract_callback->operation_result();
+                last_encryption_evidence = last_encryption_evidence || raw_extract_callback->password_requested();
 
             }
 
@@ -293,7 +298,7 @@ PasswordTestResult test_one_password(
 
 
 
-            if (looks_wrong_password(hr, last_op_res)) {
+            if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
                 result.status = PasswordTestStatus::WrongPassword;
 
@@ -343,7 +348,7 @@ PasswordTestResult test_one_password(
 
             result.message = "archive appears damaged";
 
-        } else if (looks_wrong_password(last_hr, last_op_res)) {
+        } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
             result.status = PasswordTestStatus::WrongPassword;
 
@@ -422,6 +427,7 @@ PasswordTestResult test_one_password_reuse_stream(
     HRESULT last_hr = E_FAIL;
 
     Int32 last_op_res = kOpOk;
+    bool last_encryption_evidence = false;
 
 
 
@@ -449,9 +455,11 @@ PasswordTestResult test_one_password_reuse_stream(
 
 
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream, nullptr, open_callback.get());
+        last_encryption_evidence = raw_open_callback->password_requested();
 
         if (hr != S_OK) {
 
@@ -462,6 +470,7 @@ PasswordTestResult test_one_password_reuse_stream(
         }
 
         any_opened = true;
+        last_encryption_evidence = last_encryption_evidence || archive_has_encrypted_items(archive.get());
 
 
 
@@ -474,6 +483,7 @@ PasswordTestResult test_one_password_reuse_stream(
         last_hr = hr;
 
         last_op_res = raw_extract_callback->operation_result();
+        last_encryption_evidence = last_encryption_evidence || raw_extract_callback->password_requested();
 
         archive->Close();
 
@@ -491,7 +501,7 @@ PasswordTestResult test_one_password_reuse_stream(
 
 
 
-        if (looks_wrong_password(hr, last_op_res)) {
+        if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
             result.status = PasswordTestStatus::WrongPassword;
 
@@ -535,7 +545,7 @@ PasswordTestResult test_one_password_reuse_stream(
 
         result.message = "archive appears damaged";
 
-    } else if (looks_wrong_password(last_hr, last_op_res)) {
+    } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
         result.status = PasswordTestStatus::WrongPassword;
 

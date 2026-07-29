@@ -143,6 +143,35 @@ def test_worker_failed_result_includes_diagnostics(tmp_path):
     assert "output_trace" in worker_result["diagnostics"]
 
 
+def test_worker_does_not_classify_unencrypted_open_failure_as_wrong_password(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive = tmp_path / "malformed.7z"
+    archive.write_bytes(b"7z\xbc\xaf'\x1c" + b"\x00" * 26)
+    payload = {
+        "job_id": "unencrypted-open-failure",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(tmp_path / "out"),
+        "password": "irrelevant",
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+
+    assert result.returncode != 0
+    assert worker_result["wrong_password"] is False
+    assert worker_result["encrypted"] is False
+    assert worker_result["failure_kind"] != "encrypted_or_wrong_password"
+
+
 def test_persistent_worker_result_escapes_control_characters(tmp_path):
     worker_path = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()

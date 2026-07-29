@@ -287,6 +287,7 @@ public:
 
     bool missing_volume_requested() const { return missing_volume_requested_; }
     bool volume_open_failed() const { return volume_open_failed_; }
+    bool password_requested() const { return password_requested_; }
     const std::wstring& missing_volume_name() const { return missing_volume_name_; }
     const std::wstring& failed_volume_name() const { return failed_volume_name_; }
 
@@ -298,6 +299,7 @@ public:
 
         }
 
+        password_requested_ = true;
         *password = SysAllocString(password_.c_str());
 
         return *password ? S_OK : E_OUTOFMEMORY;
@@ -330,6 +332,7 @@ private:
 
     bool missing_volume_requested_ = false;
     bool volume_open_failed_ = false;
+    bool password_requested_ = false;
     std::wstring missing_volume_name_;
     std::wstring failed_volume_name_;
 
@@ -344,6 +347,7 @@ public:
     explicit ExtractCallback(std::wstring password) : password_(std::move(password)) {}
 
     Int32 operation_result() const { return operation_result_; }
+    bool password_requested() const { return password_requested_; }
 
 
 
@@ -429,6 +433,7 @@ public:
 
         }
 
+        password_requested_ = true;
         *password = SysAllocString(password_.c_str());
 
         return *password ? S_OK : E_OUTOFMEMORY;
@@ -444,6 +449,7 @@ private:
     std::wstring password_;
 
     Int32 operation_result_ = kOpOk;
+    bool password_requested_ = false;
 
 };
 
@@ -989,6 +995,7 @@ public:
 
 
     Int32 operation_result() const { return operation_result_; }
+    bool password_requested() const { return password_requested_; }
 
     UInt32 files_written() const { return files_written_; }
 
@@ -1422,6 +1429,7 @@ public:
 
         }
 
+        password_requested_ = true;
         *password = SysAllocString(password_.c_str());
 
         return *password ? S_OK : E_OUTOFMEMORY;
@@ -1652,6 +1660,7 @@ private:
     bool output_error_ = false;
 
     bool output_finalized_ = false;
+    bool password_requested_ = false;
 
 };
 

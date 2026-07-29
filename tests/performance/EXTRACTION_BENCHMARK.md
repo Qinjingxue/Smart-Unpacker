@@ -2,11 +2,12 @@
 
 Run `.venv\\Scripts\\python.exe tests/performance/extract_format_benchmark.py --runs 3 --json-out build/extraction-benchmark.json`.
 
-The generated corpus covers ZIP, 7z, split 7z, TAR, gzip, bzip2, xz, and their
-tar aliases for both many-small-file and few-large-file workloads. Supply formats that 7-Zip cannot create:
-`--sample rar=C:\corpus\sample.rar --sample zst=C:\corpus\sample.zst`.
-Missing `.rar`, `.Z`, `.zst`, and `.tzst` inputs are reported as skipped rather
-than silently reducing coverage. Run outputs are deleted between samples.
+The generated corpus covers ZIP, 7z, split 7z, RAR, split RAR, TAR, gzip,
+bzip2, xz, zstd, and their tar aliases for both many-small-file and
+few-large-file workloads. Supply Unix compress samples, which the bundled tools
+cannot create, with `--sample Z=C:\corpus\sample.Z`. Missing `.Z` input is
+reported as skipped rather than silently reducing coverage. Run outputs are
+deleted between samples.
 
 Detection is warmed up and timed in-process, so Python startup and CLI rendering
 are not counted as detection work. Raw 7-Zip time is reported as the backend
@@ -25,4 +26,5 @@ git worktree add ..\sunpack-before-refactor 0bb6d15
 Use at least five runs for regression decisions. Close CPU-heavy applications,
 keep the corpus on the same disk, and compare the aggregate detection delta as
 well as individual formats. A one-run invocation with smaller payloads is only
-a compatibility smoke test.
+a compatibility smoke test. Per-format detection exceptions are recorded in the
+JSON row instead of aborting the remaining extraction and detection matrix.

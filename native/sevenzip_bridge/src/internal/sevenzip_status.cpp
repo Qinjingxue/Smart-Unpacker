@@ -10,9 +10,13 @@ namespace sunpack::sevenzip {
 
 
 
-bool looks_wrong_password(HRESULT hr, Int32 op_res) {
+bool looks_wrong_password(HRESULT hr, Int32 op_res, bool encryption_evidence) {
 
-    return op_res == kOpWrongPassword || op_res == kOpDataError || op_res == kOpCrcError || hr == S_FALSE;
+    if (op_res == kOpWrongPassword) {
+        return true;
+    }
+    return encryption_evidence &&
+        (op_res == kOpDataError || op_res == kOpCrcError || hr == S_FALSE);
 
 }
 

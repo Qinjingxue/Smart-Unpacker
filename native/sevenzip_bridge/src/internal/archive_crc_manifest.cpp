@@ -33,6 +33,7 @@ CrcManifestResult read_archive_crc_manifest_internal(
     HRESULT last_hr = E_FAIL;
 
     Int32 last_op_res = kOpOk;
+    bool last_encryption_evidence = false;
 
 
 
@@ -70,9 +71,11 @@ CrcManifestResult read_archive_crc_manifest_internal(
 
 
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        last_encryption_evidence = raw_open_callback->password_requested();
 
         if (hr != S_OK) {
 
@@ -195,6 +198,8 @@ CrcManifestResult read_archive_crc_manifest_internal(
         last_hr = hr;
 
         last_op_res = raw_extract_callback->operation_result();
+        last_encryption_evidence = last_encryption_evidence ||
+            raw_extract_callback->password_requested() || result.encrypted;
 
         archive->Close();
 
@@ -212,7 +217,7 @@ CrcManifestResult read_archive_crc_manifest_internal(
 
         result.checksum_error = last_op_res == kOpCrcError;
 
-        if (looks_wrong_password(hr, last_op_res)) {
+        if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
             result.status = PasswordTestStatus::WrongPassword;
 
@@ -246,7 +251,7 @@ CrcManifestResult read_archive_crc_manifest_internal(
 
         result.message = "7z.dll did not create a supported archive handler";
 
-    } else if (looks_wrong_password(last_hr, last_op_res)) {
+    } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
         result.status = PasswordTestStatus::WrongPassword;
 

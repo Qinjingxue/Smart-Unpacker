@@ -14,7 +14,7 @@ namespace sunpack::sevenzip {
 
 
 
-bool looks_wrong_password(HRESULT hr, Int32 op_res);
+bool looks_wrong_password(HRESULT hr, Int32 op_res, bool encryption_evidence);
 
 bool looks_damaged(Int32 op_res);
 

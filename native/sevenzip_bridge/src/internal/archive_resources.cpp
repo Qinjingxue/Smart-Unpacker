@@ -31,6 +31,7 @@ ResourceAnalysisResult analyze_archive_resources_internal(
     bool any_format_created = false;
 
     HRESULT last_hr = E_FAIL;
+    bool last_encryption_evidence = false;
 
 
 
@@ -68,9 +69,11 @@ ResourceAnalysisResult analyze_archive_resources_internal(
 
 
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        last_encryption_evidence = raw_open_callback->password_requested();
 
         if (hr != S_OK) {
 
@@ -104,7 +107,7 @@ ResourceAnalysisResult analyze_archive_resources_internal(
 
         result.message = "7z.dll did not create a supported archive handler";
 
-    } else if (looks_wrong_password(last_hr, kOpOk)) {
+    } else if (looks_wrong_password(last_hr, kOpOk, last_encryption_evidence)) {
 
         result.status = PasswordTestStatus::WrongPassword;
 

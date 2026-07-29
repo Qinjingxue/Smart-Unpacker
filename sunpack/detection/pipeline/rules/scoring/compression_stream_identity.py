@@ -58,7 +58,7 @@ def _format_evidence(format_name: str, structure: dict[str, Any]) -> tuple[bool,
     if format_name == "gzip":
         method = structure.get("member.header.compression_method")
         header_ok = method == 8 and available(structure.get("member.header.flags"))
-        secondary = available(structure.get("member.deflate.blocks")) or int(structure.get("decoded_bytes") or 0) > 0
+        secondary = available(structure.get("member.deflate.blocks")) or _positive_int(structure.get("decoded_bytes"))
         integrity = bool(structure.get("validation_complete")) or text_contains(
             structure.get("member.trailer.crc32"), "ok=true"
         )
@@ -83,7 +83,16 @@ def _format_evidence(format_name: str, structure: dict[str, Any]) -> tuple[bool,
 
     descriptor = structure.get("frame.header.descriptor")
     header_ok = available(descriptor) and not text_contains(error, "reserved_bit")
-    secondary = available(structure.get("block.header.type")) or int(structure.get("frame.sequence") or 0) > 0
+    secondary = available(structure.get("block.header.type")) or _positive_int(structure.get("frame.sequence"))
     integrity = bool(structure.get("validation_complete")) or available(structure.get("frame.content_checksum"))
     contradiction = "zstd_reserved_bit_set" in damage or text_contains(error, "reserved_bit")
     return header_ok, secondary, integrity, contradiction
+
+
+def _positive_int(value: Any) -> bool:
+    if not available(value):
+        return False
+    try:
+        return int(value) > 0
+    except (TypeError, ValueError):
+        return False

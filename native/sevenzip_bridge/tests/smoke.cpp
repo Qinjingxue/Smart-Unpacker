@@ -1,5 +1,6 @@
 #include "sevenzip_bridge/bridge.hpp"
 #include "internal/sevenzip_paths.hpp"
+#include "internal/sevenzip_status.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -34,6 +35,19 @@ bool check_numbered_volume_paths() {
         std::filesystem::path(seven_zip_sorted[1]).filename() == L"payload.7z.002";
 }
 
+bool check_wrong_password_evidence() {
+    using sunpack::sevenzip::looks_wrong_password;
+    using namespace sunpack::sevenzip;
+    return
+        looks_wrong_password(S_OK, kOpWrongPassword, false) &&
+        !looks_wrong_password(S_FALSE, kOpOk, false) &&
+        !looks_wrong_password(S_OK, kOpDataError, false) &&
+        !looks_wrong_password(S_OK, kOpCrcError, false) &&
+        looks_wrong_password(S_FALSE, kOpOk, true) &&
+        looks_wrong_password(S_OK, kOpDataError, true) &&
+        looks_wrong_password(S_OK, kOpCrcError, true);
+}
+
 }  // namespace
 #endif
 
@@ -42,6 +56,10 @@ int wmain(int argc, wchar_t** argv) {
     if (!check_numbered_volume_paths()) {
         std::cerr << "numbered volume path check failed\n";
         return 2;
+    }
+    if (!check_wrong_password_evidence()) {
+        std::cerr << "wrong password evidence check failed\n";
+        return 3;
     }
 #endif
 

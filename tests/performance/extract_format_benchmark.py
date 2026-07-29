@@ -20,14 +20,19 @@ import time
 from pathlib import Path
 from typing import Any
 
+import zstandard
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
 SEVEN_ZIP = ROOT / "tools" / "7z.exe"
+RAR = ROOT / "tools" / "Rar.exe"
 SUPPORTED = ("zip", "7z", "rar", "gz", "bz2", "xz", "zst", "Z", "tar", "tgz", "tbz2", "txz", "tzst")
-GENERATED_FORMATS = ("zip", "7z", "tar", "gz", "bz2", "xz", "tgz", "tbz2", "txz")
+GENERATED_FORMATS = (
+    "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst",
+)
 
 
 def timed(command: list[str], cwd: Path) -> tuple[float, int]:
@@ -51,6 +56,15 @@ def _run_7z(command: list[str]) -> bool:
     return result.returncode == 0
 
 
+def _run_rar(command: list[str]) -> bool:
+    result = subprocess.run(
+        [str(RAR), *command],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def _write_payloads(root: Path, small_files: int, large_files: int, large_file_mib: int) -> dict[str, Path]:
     small = root / "many-small"
     large = root / "few-large"
@@ -61,18 +75,25 @@ def _write_payloads(root: Path, small_files: int, large_files: int, large_file_m
 
     chunk_size = 1024 * 1024
     rng = random.Random(20260729)
-    random_chunk = rng.randbytes(chunk_size)
     compressible_chunk = (b"sunpack-benchmark\n" * ((chunk_size // 18) + 1))[:chunk_size]
     for index in range(large_files):
-        chunk = compressible_chunk if index % 2 == 0 else random_chunk
         with (large / f"large-{index:02d}.bin").open("wb") as stream:
             for _ in range(large_file_mib):
-                stream.write(chunk)
+                stream.write(compressible_chunk if index % 2 == 0 else rng.randbytes(chunk_size))
     return {"many_small": small, "few_large": large}
 
 
 def _create_archive(target: Path, archive_type: str, source: Path) -> bool:
     return _run_7z(["a", "-y", f"-t{archive_type}", str(target), str(source)]) and target.exists()
+
+
+def _create_zstd_archive(target: Path, source: Path) -> bool:
+    try:
+        with source.open("rb") as input_stream, target.open("wb") as output_stream:
+            zstandard.ZstdCompressor(level=3).copy_stream(input_stream, output_stream)
+    except (OSError, zstandard.ZstdError):
+        return False
+    return target.exists()
 
 
 def create_corpus(
@@ -101,16 +122,41 @@ def create_corpus(
             else:
                 skipped[f"{workload}:{archive_type}"] = "bundled 7-Zip cannot create this format"
 
+        split_size = "4k" if workload == "many_small" else "8m"
         split_target = root / f"{workload}.split.7z"
         split_first = root / f"{workload}.split.7z.001"
-        if _run_7z(["a", "-y", "-t7z", "-v8m", str(split_target), str(source)]) and split_first.exists():
+        split_created = _run_7z(["a", "-y", "-t7z", f"-v{split_size}", str(split_target), str(source)])
+        split_volumes = sorted(root.glob(f"{workload}.split.7z.*")) if split_created else []
+        if len(split_volumes) > 1 and split_first.exists():
             corpus[f"{workload}:7z-split"] = {
                 "workload": workload,
                 "format": "7z-split",
                 "path": split_first,
             }
         else:
-            skipped[f"{workload}:7z-split"] = "bundled 7-Zip cannot create split 7z archives"
+            skipped[f"{workload}:7z-split"] = "workload did not produce multiple 7z volumes"
+
+        rar_target = root / f"{workload}.rar"
+        if _run_rar(["a", "-idq", "-r", "-ep1", str(rar_target), str(source)]) and rar_target.exists():
+            corpus[f"{workload}:rar"] = {"workload": workload, "format": "rar", "path": rar_target}
+        else:
+            skipped[f"{workload}:rar"] = "bundled RAR cannot create this format"
+
+        rar_split_target = root / f"{workload}.split.rar"
+        if _run_rar(["a", "-idq", "-r", "-ep1", f"-v{split_size}", str(rar_split_target), str(source)]):
+            rar_volumes = sorted(root.glob(f"{workload}.split.part*.rar"))
+            if not rar_volumes and rar_split_target.exists():
+                rar_volumes = [rar_split_target]
+        else:
+            rar_volumes = []
+        if len(rar_volumes) > 1:
+            corpus[f"{workload}:rar-split"] = {
+                "workload": workload,
+                "format": "rar-split",
+                "path": rar_volumes[0],
+            }
+        else:
+            skipped[f"{workload}:rar-split"] = "workload did not produce multiple RAR volumes"
 
         tar_source = base_archives.get("tar")
         for ext, archive_type in {"gz": "gzip", "bz2": "bzip2", "xz": "xz"}.items():
@@ -123,6 +169,15 @@ def create_corpus(
                 corpus[f"{workload}:{alias}"] = {"workload": workload, "format": alias, "path": alias_target}
             else:
                 skipped[f"{workload}:{ext}"] = "bundled 7-Zip cannot create this format"
+
+        zstd_target = root / f"{workload}.tar.zst"
+        if tar_source is not None and _create_zstd_archive(zstd_target, tar_source):
+            corpus[f"{workload}:zst"] = {"workload": workload, "format": "zst", "path": zstd_target}
+            tzst_target = root / f"{workload}.tzst"
+            shutil.copy2(zstd_target, tzst_target)
+            corpus[f"{workload}:tzst"] = {"workload": workload, "format": "tzst", "path": tzst_target}
+        else:
+            skipped[f"{workload}:zst"] = "zstandard runtime cannot create this format"
 
     for name, source in extra.items():
         key = f"external:{name}"
@@ -146,19 +201,29 @@ def _worker_detection(archives: list[tuple[str, Path]], runs: int, warmups: int)
     config = load_config()
     rows: dict[str, dict[str, Any]] = {}
     for name, archive in archives:
-        for _ in range(warmups):
-            ScanOrchestrator(config).scan_targets([str(archive)])
         samples: list[float] = []
         result_count = 0
-        for _ in range(runs):
-            started = time.perf_counter()
-            results = ScanOrchestrator(config).scan_targets([str(archive)])
-            samples.append(time.perf_counter() - started)
-            result_count = len(results)
+        try:
+            for _ in range(warmups):
+                ScanOrchestrator(config).scan_targets([str(archive)])
+            for _ in range(runs):
+                started = time.perf_counter()
+                results = ScanOrchestrator(config).scan_targets([str(archive)])
+                samples.append(time.perf_counter() - started)
+                result_count = len(results)
+        except Exception as exc:  # Keep a single unsupported/broken format from aborting the matrix.
+            rows[name] = {
+                "samples_seconds": [],
+                "median_seconds": None,
+                "result_count": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            continue
         rows[name] = {
             "samples_seconds": samples,
             "median_seconds": statistics.median(samples),
             "result_count": result_count,
+            "error": None,
         }
     print(json.dumps(rows, ensure_ascii=False))
     return 0
@@ -188,6 +253,9 @@ def _merge_detection_passes(
     merged: dict[str, dict[str, Any]] = {}
     for name, first_row in first.items():
         second_row = second[name]
+        if first_row.get("error") or second_row.get("error"):
+            merged[name] = first_row if first_row.get("error") else second_row
+            continue
         if first_row["result_count"] != second_row["result_count"]:
             raise RuntimeError(f"detection result count changed between passes for {name}")
         samples = [*first_row["samples_seconds"], *second_row["samples_seconds"]]
@@ -195,6 +263,7 @@ def _merge_detection_passes(
             "samples_seconds": samples,
             "median_seconds": statistics.median(samples),
             "result_count": first_row["result_count"],
+            "error": None,
         }
     return merged
 
@@ -244,7 +313,7 @@ def benchmark(
         comparison = comparison_detection.get(name)
         delta = None
         delta_percent = None
-        if comparison and comparison["median_seconds"]:
+        if current["median_seconds"] is not None and comparison and comparison["median_seconds"]:
             delta = current["median_seconds"] - comparison["median_seconds"]
             delta_percent = delta / comparison["median_seconds"] * 100.0
         rows.append({
@@ -267,13 +336,24 @@ def benchmark(
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    current = [row["detection"]["current"]["median_seconds"] for row in rows]
-    comparable = [row for row in rows if row["detection"]["comparison"] is not None]
+    current = [
+        row["detection"]["current"]["median_seconds"]
+        for row in rows
+        if row["detection"]["current"]["median_seconds"] is not None
+    ]
+    comparable = [
+        row for row in rows
+        if row["detection"]["current"]["median_seconds"] is not None
+        and row["detection"]["comparison"] is not None
+        and row["detection"]["comparison"]["median_seconds"] is not None
+    ]
     summary: dict[str, Any] = {
         "case_count": len(rows),
         "detection_current_total_seconds": sum(current),
         "detection_current_median_seconds": statistics.median(current) if current else None,
         "successful_extraction_cases": sum(row["sunpack_seconds"] is not None for row in rows),
+        "successful_detection_cases": len(current),
+        "detection_error_cases": len(rows) - len(current),
     }
     if comparable:
         current_total = sum(row["detection"]["current"]["median_seconds"] for row in comparable)
@@ -324,6 +404,8 @@ def main() -> int:
         return _worker_detection(_parse_archive_args(args.worker_archive), max(1, args.runs), max(0, args.warmups))
     if not SEVEN_ZIP.is_file():
         parser.error(f"bundled 7-Zip does not exist: {SEVEN_ZIP}")
+    if not RAR.is_file():
+        parser.error(f"bundled RAR does not exist: {RAR}")
     compare_root = args.compare_root.resolve() if args.compare_root else None
     if compare_root is not None and not (compare_root / "sunpack").is_dir():
         parser.error(f"comparison root does not contain sunpack package: {compare_root}")

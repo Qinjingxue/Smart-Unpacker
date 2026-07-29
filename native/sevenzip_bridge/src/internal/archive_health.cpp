@@ -57,6 +57,7 @@ HealthProbeResult check_archive_health_internal(
     HRESULT last_hr = E_FAIL;
 
     Int32 last_op_res = kOpOk;
+    bool last_encryption_evidence = false;
 
 
 
@@ -112,6 +113,7 @@ HealthProbeResult check_archive_health_internal(
         ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        last_encryption_evidence = raw_open_callback->password_requested();
 
         if (raw_open_callback->missing_volume_requested()) {
             result.status = PasswordTestStatus::Damaged;
@@ -135,6 +137,7 @@ HealthProbeResult check_archive_health_internal(
 
 
         const bool opened_as_encrypted = archive_has_encrypted_items(archive.get());
+        last_encryption_evidence = last_encryption_evidence || opened_as_encrypted;
 
         archive->Close();
 
@@ -188,7 +191,7 @@ HealthProbeResult check_archive_health_internal(
 
         result.message = "archive appears damaged";
 
-    } else if (looks_wrong_password(last_hr, last_op_res)) {
+    } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
         result.status = PasswordTestStatus::WrongPassword;
 

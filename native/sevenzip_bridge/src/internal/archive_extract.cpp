@@ -163,6 +163,17 @@ std::string kind_for_operation_result(Int32 op_res) {
 
 }
 
+std::string output_trace_damage_kind(const ExtractOutputTrace& trace) {
+    for (const auto& item : trace.items) {
+        if (!item.failed && item.operation_result == kOpOk) {
+            continue;
+        }
+        const std::string kind = kind_for_operation_result(item.operation_result);
+        return kind == "unknown" ? "corrupted_data" : kind;
+    }
+    return "";
+}
+
 unsigned int password_crc_proven_items(const ExtractOutputTrace& trace) {
     unsigned int count = 0;
     for (const auto& item : trace.items) {
@@ -247,6 +258,7 @@ ExtractArchiveResult extract_archive_internal(
     HRESULT last_hr = E_FAIL;
 
     Int32 last_op_res = kOpOk;
+    bool last_encryption_evidence = false;
 
 
 
@@ -373,6 +385,7 @@ ExtractArchiveResult extract_archive_internal(
         ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        last_encryption_evidence = raw_open_callback->password_requested();
 
         if (raw_open_callback->missing_volume_requested()) {
             set_missing_volume_failure(
@@ -480,6 +493,8 @@ ExtractArchiveResult extract_archive_internal(
             result.output_trace.items.begin(),
             result.output_trace.items.end(),
             [](const ExtractOutputItemTrace& item) { return item.encrypted; });
+        last_encryption_evidence = last_encryption_evidence ||
+            raw_extract_callback->password_requested() || result.encrypted;
 
         result.hresult = static_cast<int>(hr);
 
@@ -534,7 +549,17 @@ ExtractArchiveResult extract_archive_internal(
 
         }
 
-        if (looks_wrong_password(hr, last_op_res)) {
+        const std::string trace_damage_kind = output_trace_damage_kind(result.output_trace);
+        if (!trace_damage_kind.empty() && (!last_encryption_evidence || result.password_crc_proven)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.checksum_error = trace_damage_kind == "checksum_error";
+            set_failure(result, "item_extract", trace_damage_kind, hr);
+            result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
+            return result;
+        }
+
+        if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
             if (password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError || last_op_res == kOpHeadersError || last_op_res == kOpUnexpectedEnd)) {
 
@@ -639,7 +664,7 @@ ExtractArchiveResult extract_archive_internal(
 
         }
 
-        result.status = looks_wrong_password(last_hr, last_op_res) ? PasswordTestStatus::WrongPassword : PasswordTestStatus::Unsupported;
+        result.status = looks_wrong_password(last_hr, last_op_res, last_encryption_evidence) ? PasswordTestStatus::WrongPassword : PasswordTestStatus::Unsupported;
 
         result.wrong_password = result.status == PasswordTestStatus::WrongPassword;
 
