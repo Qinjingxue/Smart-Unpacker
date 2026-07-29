@@ -100,22 +100,98 @@ def test_second_round_root_child_has_no_special_privilege(tmp_path):
     assert result.skipped[0]["reason"] == "archive_byte_ratio_below_floor"
 
 
-def test_nested_archive_mixed_with_game_payload_is_skipped(tmp_path):
-    wrapper = tmp_path / "dlc003_rocket_launcher_unit_pack"
-    archive = wrapper / "dlc003.zip"
-    entries = [FileEntry(wrapper, True)]
-    entries.extend(FileEntry(wrapper / f"asset_{index}.bin", False, 270_000) for index in range(28))
-    entries.extend(FileEntry(wrapper / f"dir_{index}", True) for index in range(9))
-    entries.append(FileEntry(archive, False, 2_461_198))
+def test_recursive_policy_rejects_game_dlc_payload_shape(tmp_path):
+    """Metadata-only regression for the private DLC archive fixture."""
+    wrapper = tmp_path / "dlc_pack"
+    gfx = wrapper / "gfx"
+    sound = wrapper / "sound"
+    archive = wrapper / "payload.zip"
+    other_file_sizes = [
+        315,
+        275,
+        27_178,
+        1_574,
+        2_036_265,
+        59_247,
+        11_834,
+        8_755,
+        1_074_194,
+        39_223,
+        6_349,
+        10_722,
+        1_901_566,
+        53_815,
+        9_459,
+        7_392,
+        467_889,
+        21_133,
+        11_163,
+        8_008,
+        1_455,
+        3_267,
+        3_288,
+        659_760,
+        687_840,
+        414_904,
+        1_328,
+        43_510,
+    ]
+    entries = [
+        FileEntry(wrapper, True),
+        FileEntry(gfx, True),
+        FileEntry(sound, True),
+        FileEntry(archive, False, 2_461_198),
+    ]
+    entries.extend(
+        FileEntry(
+            (gfx if index < 21 else sound) / f"resource_{index}.bin",
+            False,
+            size,
+        )
+        for index, size in enumerate(other_file_sizes)
+    )
 
     result = _authorize(tmp_path, entries, [archive])
 
     assert result.allowed_tasks == []
     assert result.skipped[0]["reason"] == "authorization_score_below_threshold"
-    assert result.skipped[0]["local_other_project_count"] == 37
-    assert result.skipped[0]["local_candidate_byte_ratio"] < 0.5
-    assert result.skipped[0]["local_candidate_project_ratio"] == pytest.approx(1 / 38)
-    assert result.skipped[0]["authorization_score"] < 0.01
+    assert result.skipped[0]["local_other_file_count"] == 28
+    assert result.skipped[0]["local_foreign_branch_count"] == 2
+    assert result.skipped[0]["local_other_project_count"] == 30
+    assert result.skipped[0]["local_candidate_byte_ratio"] == pytest.approx(
+        0.24531257444253937
+    )
+    assert result.skipped[0]["local_candidate_project_ratio"] == pytest.approx(1 / 31)
+    assert result.skipped[0]["authorization_score"] == pytest.approx(
+        0.010718922813754538
+    )
+
+
+def test_recursive_policy_allows_dominant_release_archive_shape(tmp_path):
+    """Metadata-only regression for the private encrypted release fixture."""
+    notes = tmp_path / "release_notes"
+    archive = tmp_path / "inner.zip"
+    archive_size = 988_855_997
+    note_sizes = [1_664, 245, 1_653, 614, 39]
+    entries = [
+        FileEntry(notes, True),
+        FileEntry(notes / "note_0.txt", False, note_sizes[0]),
+        FileEntry(notes / "note_1.txt", False, note_sizes[1]),
+        FileEntry(notes / "note_2.txt", False, note_sizes[2]),
+        FileEntry(notes / "note_3.txt", False, note_sizes[3]),
+        FileEntry(tmp_path / "note_4.txt", False, note_sizes[4]),
+        FileEntry(archive, False, archive_size),
+    ]
+
+    assert archive_size / (archive_size + sum(note_sizes)) == pytest.approx(
+        0.9999957375168412
+    )
+    assert 1 / (1 + len(note_sizes) + 1) == pytest.approx(1 / 7)
+
+    result = _authorize(tmp_path, entries, [archive])
+
+    assert [task.main_path for task in result.allowed_tasks] == [str(archive)]
+    assert result.skipped == []
 
 
 def test_nested_archive_dominating_its_semantic_subtree_is_allowed(tmp_path):
