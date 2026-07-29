@@ -15,8 +15,9 @@ from sunpack.contracts.verification import (
     DECISION_ACCEPT,
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
-    SOURCE_INTEGRITY_COMPLETE,
-    SOURCE_INTEGRITY_DAMAGED,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    VERIFICATION_STRENGTH_ORACLE,
     VerificationIssue,
     VerificationStepResult,
 )
@@ -48,7 +49,15 @@ class OracleExpectedOutputMatchMethod:
             status=status,
             issues=[issue],
             completeness_hint=coverage.completeness,
-            source_integrity_hint=SOURCE_INTEGRITY_COMPLETE if coverage.completeness >= 0.999 else SOURCE_INTEGRITY_DAMAGED,
+            content_integrity_hint=(
+                CONTENT_INTEGRITY_VERIFIED_COMPLETE
+                if coverage.completeness >= 0.999
+                else CONTENT_INTEGRITY_VERIFIED_PARTIAL
+            ),
+            verification_strength=VERIFICATION_STRENGTH_ORACLE,
+            total_item_count=len(expected),
+            verified_item_count=coverage.complete_files,
+            archive_walk_complete=True,
             decision_hint=decision,
             file_observations=coverage.observations,
         )

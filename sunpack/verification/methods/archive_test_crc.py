@@ -9,15 +9,18 @@ from sunpack.support.sevenzip_bridge import (
 )
 from sunpack.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
+from sunpack.verification.error_classification import classify_verification_error
 from sunpack.verification.methods._archive_output_match import ArchiveOutputCoverage, coverage_details, coverage_from_archive_and_output
 from sunpack.verification.methods._output_stats import output_file_index_for_evidence, output_inventory_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
 from sunpack.contracts.verification import (
     DECISION_REPAIR,
     FileVerificationObservation,
-    SOURCE_INTEGRITY_COMPLETE,
-    SOURCE_INTEGRITY_DAMAGED,
-    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    VERIFICATION_STRENGTH_CRC,
     VerificationIssue,
     VerificationStepResult,
 )
@@ -38,10 +41,12 @@ class ArchiveTestCrcMethod:
             return archive_status_result
 
         archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
-        if not archive_files:
-            return VerificationStepResult(method=self.name, status="skipped")
         inventory = output_inventory_for_evidence(evidence)
         output_files = inventory.materialize_files()
+        if not archive_files:
+            if archive_manifest.archive_walk_complete and inventory.worker_inventory_complete:
+                return _verified_manifest_result(self.name, archive_manifest, inventory)
+            return VerificationStepResult(method=self.name, status="skipped")
         if (
             inventory.worker_inventory_complete
             and inventory.identity_paths
@@ -74,10 +79,11 @@ class ArchiveTestCrcMethod:
         if status != "ok":
             return VerificationStepResult(method=self.name, status="skipped")
 
-        source_integrity = _manifest_source_integrity(archive_manifest)
         mismatches = list(match_result.get("mismatches") or [])
         missing = list(match_result.get("missing") or [])
         coverage = dict(match_result.get("coverage") or {})
+        if not mismatches and not missing:
+            coverage = _promote_verified_manifest_coverage(coverage, archive_manifest, inventory)
         issue_by_path: dict[str, list[VerificationIssue]] = {}
 
         issues: list[VerificationIssue] = []
@@ -111,13 +117,31 @@ class ArchiveTestCrcMethod:
             match_result.get("observations") or [], issue_by_path, self.name
         )
         completeness = _coverage_float(coverage, "completeness", 1.0)
+        content_integrity = _content_integrity(
+            archive_manifest,
+            mismatches=mismatches,
+            missing=missing,
+            completeness=completeness,
+        )
+        summary = {
+            "verification_strength": VERIFICATION_STRENGTH_CRC,
+            "total_item_count": int(archive_manifest.item_count or 0),
+            "verified_item_count": int(archive_manifest.verified_item_count or 0),
+            "archive_walk_complete": bool(archive_manifest.archive_walk_complete),
+            "manifest_entries_retained": len(archive_manifest.files),
+            "manifest_entries_truncated": bool(archive_manifest.entries_truncated),
+        }
 
         if not issues:
             return VerificationStepResult(
                 method=self.name,
                 status="passed",
                 completeness_hint=completeness,
-                source_integrity_hint=source_integrity,
+                content_integrity_hint=content_integrity,
+                verification_strength=VERIFICATION_STRENGTH_CRC,
+                total_item_count=summary["total_item_count"],
+                verified_item_count=summary["verified_item_count"],
+                archive_walk_complete=summary["archive_walk_complete"],
                 file_observations=observations,
                 issues=[VerificationIssue(
                     method=self.name,
@@ -125,7 +149,7 @@ class ArchiveTestCrcMethod:
                     message="Archive-state files were matched against extraction output",
                     path=evidence.output_dir,
                     expected=int(coverage.get("expected_files", len(archive_files)) or 0),
-                    actual=_coverage_actual(coverage, archive_manifest, evidence),
+                    actual={**_coverage_actual(coverage, archive_manifest, evidence), **summary},
                 )],
             )
         issues.append(VerificationIssue(
@@ -134,16 +158,20 @@ class ArchiveTestCrcMethod:
             message="Archive-state files were matched against extraction output",
             path=evidence.output_dir,
             expected=int(coverage.get("expected_files", len(archive_files)) or 0),
-            actual=_coverage_actual(coverage, archive_manifest, evidence),
+            actual={**_coverage_actual(coverage, archive_manifest, evidence), **summary},
         ))
         return VerificationStepResult(
             method=self.name,
             status="failed",
             issues=issues,
             completeness_hint=completeness,
-            source_integrity_hint=source_integrity,
-            recoverable_upper_bound_hint=completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
-            decision_hint=DECISION_REPAIR if source_integrity == SOURCE_INTEGRITY_COMPLETE else "none",
+            content_integrity_hint=content_integrity,
+            verification_strength=VERIFICATION_STRENGTH_CRC,
+            total_item_count=summary["total_item_count"],
+            verified_item_count=summary["verified_item_count"],
+            archive_walk_complete=summary["archive_walk_complete"],
+            recoverable_upper_bound_hint=completeness,
+            decision_hint=DECISION_REPAIR,
             file_observations=observations,
         )
 
@@ -184,7 +212,12 @@ class ArchiveTestCrcMethod:
                 method=self.name,
                 status="failed",
                 completeness_hint=None,
-                source_integrity_hint=SOURCE_INTEGRITY_PAYLOAD_DAMAGED if archive_manifest.checksum_error else SOURCE_INTEGRITY_DAMAGED,
+                content_integrity_hint=(
+                    CONTENT_INTEGRITY_PAYLOAD_DAMAGED
+                    if archive_manifest.checksum_error
+                    else classify_verification_error(archive_manifest.failure_kind).content_integrity
+                ),
+                container_integrity_hint=classify_verification_error(archive_manifest.failure_kind).container_integrity,
                 decision_hint=DECISION_REPAIR,
                 issues=[VerificationIssue(
                     method=self.name,
@@ -225,9 +258,77 @@ def _coverage_actual(coverage: dict[str, Any], archive_manifest, evidence: Verif
         "state_aware": True,
         "patch_digest": evidence.patch_digest,
         "archive_type": getattr(archive_manifest, "archive_type", ""),
-        "source_integrity": _manifest_source_integrity(archive_manifest),
+        "content_integrity": _content_integrity(archive_manifest),
     })
     return actual
+
+
+def _verified_manifest_result(method: str, archive_manifest, inventory) -> VerificationStepResult:
+    file_count = int(archive_manifest.file_count or inventory.stats.file_count or 0)
+    total_items = int(archive_manifest.item_count or file_count)
+    return VerificationStepResult(
+        method=method,
+        status="passed",
+        completeness_hint=1.0,
+        content_integrity_hint=CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+        verification_strength=VERIFICATION_STRENGTH_CRC,
+        total_item_count=total_items,
+        verified_item_count=int(archive_manifest.verified_item_count or total_items),
+        archive_walk_complete=True,
+        issues=[VerificationIssue(
+            method=method,
+            code="info.archive_output_coverage",
+            message="The extraction worker verified the complete archive payload",
+            expected=file_count,
+            actual={
+                "coverage": {
+                    "completeness": 1.0,
+                    "file_coverage": 1.0,
+                    "byte_coverage": 1.0,
+                    "expected_files": file_count,
+                    "matched_files": file_count,
+                    "complete_files": file_count,
+                    "failed_files": 0,
+                    "missing_files": 0,
+                    "matched_bytes": int(inventory.stats.total_size or 0),
+                    "complete_bytes": int(inventory.stats.total_size or 0),
+                    "confidence": 1.0,
+                },
+                "archive_walk_complete": True,
+                "total_item_count": total_items,
+                "verified_item_count": int(archive_manifest.verified_item_count or total_items),
+                "manifest_entries_retained": 0,
+                "manifest_entries_truncated": bool(archive_manifest.entries_truncated),
+            },
+        )],
+    )
+
+
+def _promote_verified_manifest_coverage(coverage: dict[str, Any], archive_manifest, inventory) -> dict[str, Any]:
+    if not (
+        archive_manifest.archive_walk_complete
+        and archive_manifest.verified_item_count >= archive_manifest.item_count
+        and inventory.worker_inventory_complete
+    ):
+        return coverage
+    promoted = dict(coverage)
+    file_count = int(archive_manifest.file_count or inventory.stats.file_count or 0)
+    total_bytes = int(inventory.stats.total_size or promoted.get("matched_bytes", 0) or 0)
+    promoted.update({
+        "completeness": 1.0,
+        "file_coverage": 1.0,
+        "byte_coverage": 1.0,
+        "expected_files": file_count,
+        "matched_files": file_count,
+        "complete_files": file_count,
+        "partial_files": 0,
+        "failed_files": 0,
+        "missing_files": 0,
+        "matched_bytes": total_bytes,
+        "complete_bytes": total_bytes,
+        "confidence": 1.0,
+    })
+    return promoted
 
 
 def _native_observations(
@@ -256,12 +357,24 @@ def _native_observations(
     return observations
 
 
-def _manifest_source_integrity(archive_manifest) -> str:
-    if getattr(archive_manifest, "checksum_error", False):
-        return SOURCE_INTEGRITY_PAYLOAD_DAMAGED
-    if getattr(archive_manifest, "damaged", False) or getattr(archive_manifest, "status", STATUS_OK) == STATUS_DAMAGED:
-        return SOURCE_INTEGRITY_DAMAGED
-    return SOURCE_INTEGRITY_COMPLETE
+def _content_integrity(
+    archive_manifest,
+    *,
+    mismatches: list[Any] | None = None,
+    missing: list[Any] | None = None,
+    completeness: float = 1.0,
+) -> str:
+    if getattr(archive_manifest, "checksum_error", False) or mismatches:
+        return CONTENT_INTEGRITY_PAYLOAD_DAMAGED
+    if missing or completeness < 0.999:
+        return CONTENT_INTEGRITY_VERIFIED_PARTIAL
+    if (
+        getattr(archive_manifest, "archive_walk_complete", False)
+        and int(getattr(archive_manifest, "verified_item_count", 0) or 0)
+        >= int(getattr(archive_manifest, "item_count", 0) or 0)
+    ):
+        return CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    return CONTENT_INTEGRITY_UNKNOWN
 
 
 def _coverage_float(coverage: dict[str, Any], key: str, default: float) -> float:

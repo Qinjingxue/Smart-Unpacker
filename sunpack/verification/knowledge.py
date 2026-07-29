@@ -33,7 +33,12 @@ def write_verification_result(
             "completeness": float(result.completeness),
             "recoverable_upper_bound": float(result.recoverable_upper_bound),
             "assessment_status": result.assessment_status,
-            "source_integrity": result.source_integrity,
+            "content_integrity": result.content_integrity,
+            "container_integrity": result.container_integrity,
+            "verification_strength": result.verification_strength,
+            "total_item_count": int(result.total_item_count),
+            "verified_item_count": int(result.verified_item_count),
+            "archive_walk_complete": bool(result.archive_walk_complete),
             "decision_hint": result.decision_hint,
             "complete_files": int(result.complete_files),
             "partial_files": int(result.partial_files),
@@ -83,6 +88,14 @@ def _residual_flags(result: VerificationResult) -> list[str]:
         flags.append("partial_entries_remaining")
     if result.failed_files or result.partial_files:
         flags.append("content_integrity_bad_or_unknown")
+    if result.content_integrity == "payload_damaged":
+        flags.extend(["content_integrity_bad_or_unknown", "checksum_error", "crc_error"])
+    elif result.content_integrity == "verified_partial":
+        flags.extend(["content_integrity_bad_or_unknown", "partial_entries_remaining"])
+    if result.container_integrity == "noncanonical":
+        flags.append("container_noncanonical")
+    elif result.container_integrity == "structurally_damaged":
+        flags.append("container_structurally_damaged")
     if result.missing_files:
         flags.append("missing_entries")
     for issue in result.issues:

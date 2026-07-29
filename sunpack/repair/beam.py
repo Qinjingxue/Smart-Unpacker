@@ -26,7 +26,8 @@ from sunpack.contracts.verification import (
     ASSESSMENT_UNUSABLE,
     DECISION_ACCEPT,
     DECISION_NONE,
-    SOURCE_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTAINER_INTEGRITY_UNKNOWN,
     VerificationResult,
 )
 AnalyzeFn = Callable[[RepairCandidate], dict[str, Any]]
@@ -49,7 +50,8 @@ class RepairBeamState:
     completeness: float = 0.0
     recoverable_upper_bound: float = 1.0
     assessment_status: str = ""
-    source_integrity: str = SOURCE_INTEGRITY_UNKNOWN
+    content_integrity: str = CONTENT_INTEGRITY_UNKNOWN
+    container_integrity: str = CONTAINER_INTEGRITY_UNKNOWN
     decision_hint: str = DECISION_NONE
     verification: dict[str, Any] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
@@ -72,7 +74,8 @@ class RepairBeamState:
             extraction_failure = {
                 "failure_stage": "repair_beam",
                 "assessment_status": self.assessment_status,
-                "source_integrity": self.source_integrity,
+                "content_integrity": self.content_integrity,
+                "container_integrity": self.container_integrity,
                 "decision_hint": self.decision_hint,
                 "completeness": self.completeness,
                 "recoverable_upper_bound": self.recoverable_upper_bound,
@@ -354,7 +357,8 @@ class RepairBeamLoop:
                 completeness=float(item.assessment.get("completeness", item.state.completeness) or 0.0),
                 recoverable_upper_bound=float(item.assessment.get("recoverable_upper_bound", item.state.recoverable_upper_bound) or 1.0),
                 assessment_status=str(item.assessment.get("assessment_status") or item.state.assessment_status or ""),
-                source_integrity=str(item.assessment.get("source_integrity") or item.state.source_integrity or SOURCE_INTEGRITY_UNKNOWN),
+                content_integrity=str(item.assessment.get("content_integrity") or item.state.content_integrity or CONTENT_INTEGRITY_UNKNOWN),
+                container_integrity=str(item.assessment.get("container_integrity") or item.state.container_integrity or CONTAINER_INTEGRITY_UNKNOWN),
                 decision_hint=str(item.assessment.get("decision_hint") or item.state.decision_hint or DECISION_NONE),
                 verification=dict(item.assessment),
                 job_template=item.state.job_template,
@@ -624,7 +628,8 @@ def _assessment_payload(assessment: VerificationResult | dict[str, Any] | None) 
             "completeness": assessment.completeness,
             "recoverable_upper_bound": assessment.recoverable_upper_bound,
             "assessment_status": assessment.assessment_status,
-            "source_integrity": assessment.source_integrity,
+            "content_integrity": assessment.content_integrity,
+            "container_integrity": assessment.container_integrity,
             "decision_hint": assessment.decision_hint,
             "archive_coverage": {
                 "completeness": assessment.archive_coverage.completeness,

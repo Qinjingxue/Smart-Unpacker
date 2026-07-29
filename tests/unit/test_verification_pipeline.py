@@ -10,6 +10,11 @@ from sunpack.verification import (
     register_verification_method,
 )
 from sunpack.contracts.verification import VerificationIssue
+from sunpack.contracts.verification import (
+    CONTAINER_INTEGRITY_NONCANONICAL,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    VERIFICATION_STRENGTH_CRC,
+)
 
 
 CALLS = []
@@ -22,7 +27,7 @@ class UnitCompleteObservationMethod:
         return VerificationStepResult(
             method=config["name"],
             completeness_hint=float(config.get("completeness", 1.0)),
-            source_integrity_hint=config.get("source_integrity", "complete"),
+            content_integrity_hint=config.get("content_integrity", "verified_complete"),
             decision_hint=config.get("decision_hint", "none"),
             file_observations=[
                 FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0)
@@ -76,7 +81,7 @@ class UnitRepairWarningCompleteMethod:
             method=config["name"],
             status="warning",
             completeness_hint=1.0,
-            source_integrity_hint="complete",
+            content_integrity_hint="verified_complete",
             decision_hint="repair",
             issues=[
                 VerificationIssue(
@@ -85,6 +90,24 @@ class UnitRepairWarningCompleteMethod:
                     message="non-fatal shape mismatch",
                 )
             ],
+            file_observations=[
+                FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0)
+            ],
+        )
+
+
+@register_verification_method("unit_verified_carrier")
+class UnitVerifiedCarrierMethod:
+    def verify(self, evidence, config):
+        return VerificationStepResult(
+            method=config["name"],
+            completeness_hint=1.0,
+            content_integrity_hint=CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+            container_integrity_hint=CONTAINER_INTEGRITY_NONCANONICAL,
+            verification_strength=VERIFICATION_STRENGTH_CRC,
+            total_item_count=310,
+            verified_item_count=310,
+            archive_walk_complete=True,
             file_observations=[
                 FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0)
             ],
@@ -173,6 +196,27 @@ def test_complete_assessment_accepts_despite_repair_warning_hint(tmp_path):
     assert verification.assessment_status == "complete"
     assert verification.completeness == 1.0
     assert verification.decision_hint == "accept"
+
+
+def test_noncanonical_container_does_not_downgrade_verified_content(tmp_path):
+    task, result = _task_and_result(tmp_path)
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [{"name": "unit_verified_carrier", "enabled": True}],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.assessment_status == "complete"
+    assert verification.decision_hint == "accept"
+    assert verification.content_integrity == "verified_complete"
+    assert verification.container_integrity == "noncanonical"
+    assert verification.verification_strength == "crc"
+    assert verification.total_item_count == 310
+    assert verification.verified_item_count == 310
+    assert verification.archive_walk_complete is True
 
 
 def test_verification_evidence_uses_password_session_when_result_has_no_password(tmp_path):

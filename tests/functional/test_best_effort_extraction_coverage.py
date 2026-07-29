@@ -56,7 +56,7 @@ class _TestWorkerThreeOfFourCoverage:
             method=self.name,
             status="partial",
             completeness_hint=0.75,
-            source_integrity_hint="payload_damaged",
+            content_integrity_hint="payload_damaged",
             decision_hint="accept_partial",
             file_observations=observations,
             issues=[VerificationIssue(
@@ -86,7 +86,7 @@ class _TestNativeTwoOfFourCoverage:
             method=self.name,
             status="failed",
             completeness_hint=0.5,
-            source_integrity_hint="payload_damaged",
+            content_integrity_hint="payload_damaged",
             issues=[VerificationIssue(
                 method=self.name,
                 code="info.archive_output_coverage",
@@ -120,7 +120,7 @@ class _TestWeakExpectedNameScan:
             method=self.name,
             status="warning",
             completeness_hint=0.75,
-            source_integrity_hint="damaged",
+            content_integrity_hint="unknown",
             decision_hint="none",
             file_observations=observations,
             issues=[VerificationIssue(
@@ -194,7 +194,7 @@ def test_verification_scores_best_effort_payload_damage_coverage_from_worker_out
 
     assert verification.assessment_status == "partial"
     assert verification.decision_hint == "accept_partial"
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 4
     assert verification.archive_coverage.complete_files == 3
     assert verification.archive_coverage.failed_files == 1
@@ -362,7 +362,7 @@ def test_verification_scores_deflated_zip_payload_crc_damage_as_partial_payload(
     assert items["partial.bin"]["failed"] is True
     assert items["partial.bin"]["bytes_written"] == (out_dir / "partial.bin").stat().st_size
     assert verification.assessment_status == "partial"
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 2
     assert verification.archive_coverage.complete_files == 1
     assert verification.archive_coverage.failed_files == 1
@@ -402,7 +402,7 @@ def test_verification_uses_expected_names_for_truncated_tar_member_coverage(tmp_
     assert (out_dir / "f2.txt").is_file()
     assert not (out_dir / "f3.txt").exists()
     assert verification.assessment_status == "partial"
-    assert verification.source_integrity in {"payload_damaged", "damaged", "truncated"}
+    assert verification.content_integrity in {"payload_damaged", "verified_partial"}
     assert verification.archive_coverage.expected_files == 5
     assert verification.archive_coverage.complete_files == 2
     assert verification.archive_coverage.partial_files >= 1
@@ -436,7 +436,7 @@ def test_encrypted_zip_payload_damage_without_prior_crc_proof_is_inconclusive(tm
     assert (out_dir / "good.txt").read_text(encoding="utf-8") == "good"
     assert (out_dir / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert verification.assessment_status == "partial"
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 3
     assert verification.archive_coverage.complete_files == 2
     assert verification.archive_coverage.failed_files == 1
@@ -746,7 +746,7 @@ def test_sfx_crop_patch_payload_damage_coverage_uses_virtual_zip_not_carrier(tmp
 
     assert worker_result["status"] == "failed"
     assert worker_result["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 4
     assert verification.archive_coverage.complete_files == 3
     assert verification.archive_coverage.failed_files == 1
@@ -779,7 +779,7 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
     assert [patch.id for patch in task.archive_state().patches] == ["crop-sfx-prefix", "rebuild-central-directory"]
     assert worker_result["status"] == "failed"
     assert worker_result["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 4
     assert verification.archive_coverage.complete_files == 3
     assert verification.archive_coverage.failed_files == 1
@@ -981,7 +981,7 @@ def test_encrypted_sfx_patch_partial_preserves_password_priority(tmp_path):
     assert ok["wrong_password"] is False
     assert ok["failure_kind"] in {"checksum_error", "corrupted_data", "data_error"}
     assert ok["files_written"] == 2
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 3
     assert verification.archive_coverage.complete_files == 2
     assert verification.archive_coverage.failed_files == 1

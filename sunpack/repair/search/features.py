@@ -94,7 +94,8 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
         "verification_summary": {
             "decision_hint": str(failure.get("decision_hint") or verification.get("decision_hint") or ""),
             "assessment_status": str(failure.get("assessment_status") or verification.get("assessment_status") or ""),
-            "source_integrity": str(failure.get("source_integrity") or verification.get("source_integrity") or ""),
+            "content_integrity": str(failure.get("content_integrity") or verification.get("content_integrity") or ""),
+            "container_integrity": str(failure.get("container_integrity") or verification.get("container_integrity") or ""),
             "completeness": _float(failure.get("completeness", verification.get("completeness"))),
             "recoverable_upper_bound": _float(failure.get("recoverable_upper_bound", verification.get("recoverable_upper_bound")), default=1.0),
             "archive_coverage": {

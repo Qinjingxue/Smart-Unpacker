@@ -19,7 +19,7 @@ from sunpack.support.sevenzip_bridge import (
     STATUS_WRONG_PASSWORD,
 )
 from sunpack.verification import VerificationScheduler
-from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, SOURCE_INTEGRITY_UNKNOWN
+from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, CONTENT_INTEGRITY_UNKNOWN
 
 
 @pytest.mark.parametrize(
@@ -118,7 +118,7 @@ def test_password_failure_bypasses_repair_verification(tmp_path):
     }).verify(_task(archive), result)
 
     assert verification.decision_hint == DECISION_REQUEST_PASSWORD
-    assert verification.source_integrity == SOURCE_INTEGRITY_UNKNOWN
+    assert verification.content_integrity == CONTENT_INTEGRITY_UNKNOWN
     assert verification.failures[0].code == "fail.password_required"
 
 

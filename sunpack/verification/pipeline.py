@@ -20,11 +20,16 @@ from sunpack.contracts.verification import (
     DECISION_REPAIR,
     DECISION_REQUEST_PASSWORD,
     DECISION_RETRY_EXTRACT,
-    SOURCE_INTEGRITY_COMPLETE,
-    SOURCE_INTEGRITY_DAMAGED,
-    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-    SOURCE_INTEGRITY_TRUNCATED,
-    SOURCE_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    CONTAINER_INTEGRITY_CANONICAL,
+    CONTAINER_INTEGRITY_NONCANONICAL,
+    CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED,
+    CONTAINER_INTEGRITY_UNKNOWN,
+    VERIFICATION_STRENGTH_EXTRACTION,
+    VERIFICATION_STRENGTH_NONE,
     ArchiveCoverageSummary,
     FileVerificationObservation,
     VerificationIssue,
@@ -53,7 +58,9 @@ class VerificationPipeline:
         file_observations: list[FileVerificationObservation] = []
         completeness_hints: list[float] = []
         upper_bound_hints: list[float] = []
-        source_hints: list[str] = []
+        content_hints: list[str] = []
+        container_hints: list[str] = []
+        verification_strengths: list[str] = []
         decision_hints: list[str] = []
 
         observation_owner = _configured_observation_owner(self.methods, evidence)
@@ -69,7 +76,9 @@ class VerificationPipeline:
                 completeness=1.0,
                 recoverable_upper_bound=1.0,
                 assessment_status=ASSESSMENT_UNKNOWN,
-                source_integrity=SOURCE_INTEGRITY_UNKNOWN,
+                content_integrity=CONTENT_INTEGRITY_UNKNOWN,
+                container_integrity=_container_integrity_from_evidence(evidence),
+                verification_strength=VERIFICATION_STRENGTH_NONE,
                 decision_hint=DECISION_ACCEPT,
             )
 
@@ -97,8 +106,12 @@ class VerificationPipeline:
                 completeness_hints.append(_clamp01(float(step.completeness_hint)))
             if step.recoverable_upper_bound_hint is not None:
                 upper_bound_hints.append(_clamp01(float(step.recoverable_upper_bound_hint)))
-            if step.source_integrity_hint != SOURCE_INTEGRITY_UNKNOWN:
-                source_hints.append(step.source_integrity_hint)
+            if step.content_integrity_hint != CONTENT_INTEGRITY_UNKNOWN:
+                content_hints.append(step.content_integrity_hint)
+            if step.container_integrity_hint != CONTAINER_INTEGRITY_UNKNOWN:
+                container_hints.append(step.container_integrity_hint)
+            if step.verification_strength != VERIFICATION_STRENGTH_NONE:
+                verification_strengths.append(step.verification_strength)
             if step.decision_hint != DECISION_NONE:
                 decision_hints.append(step.decision_hint)
             steps.append(VerificationStepRecord(
@@ -107,7 +120,12 @@ class VerificationPipeline:
                 issues=list(step.issues),
                 completeness_hint=step.completeness_hint,
                 recoverable_upper_bound_hint=step.recoverable_upper_bound_hint,
-                source_integrity_hint=step.source_integrity_hint,
+                content_integrity_hint=step.content_integrity_hint,
+                container_integrity_hint=step.container_integrity_hint,
+                verification_strength=step.verification_strength,
+                total_item_count=step.total_item_count,
+                verified_item_count=step.verified_item_count,
+                archive_walk_complete=step.archive_walk_complete,
                 decision_hint=step.decision_hint,
                 file_observations=list(step.file_observations),
             ))
@@ -120,7 +138,9 @@ class VerificationPipeline:
                 file_observations=file_observations,
                 completeness_hints=completeness_hints,
                 upper_bound_hints=upper_bound_hints,
-                source_hints=source_hints,
+                content_hints=content_hints,
+                container_hints=container_hints,
+                verification_strengths=verification_strengths,
                 decision_hints=decision_hints,
                 repair_hints=evidence.repair_hints,
                 evidence=evidence,
@@ -134,7 +154,9 @@ class VerificationPipeline:
         file_observations: list[FileVerificationObservation],
         completeness_hints: list[float],
         upper_bound_hints: list[float],
-        source_hints: list[str],
+        content_hints: list[str],
+        container_hints: list[str],
+        verification_strengths: list[str],
         decision_hints: list[str],
         repair_hints: dict | None = None,
         evidence: VerificationEvidence,
@@ -149,7 +171,7 @@ class VerificationPipeline:
         direct_verification_signal = _has_direct_verification_signal(
             file_observations=file_observations,
             completeness_hints=completeness_hints,
-            source_hints=source_hints,
+            content_hints=content_hints,
             decision_hints=decision_hints,
             archive_coverage=archive_coverage,
         )
@@ -157,24 +179,32 @@ class VerificationPipeline:
         completeness = _aggregate_completeness(file_observations, completeness_hints)
         if archive_coverage.confidence > 0:
             completeness = archive_coverage.completeness
-        source_integrity = _aggregate_source_integrity(source_hints)
+        content_integrity = _aggregate_content_integrity(steps)
+        container_integrity = _aggregate_container_integrity([
+            *container_hints,
+            _container_integrity_from_evidence(evidence),
+        ])
+        verification_strength = _aggregate_verification_strength(verification_strengths)
         extraction_failed = not bool(getattr(evidence.extraction_result, "success", False))
         if not evidence_sufficient:
             completeness = 0.0
-            if extraction_failed and source_integrity == SOURCE_INTEGRITY_UNKNOWN:
-                source_integrity = SOURCE_INTEGRITY_DAMAGED
-        recoverable_upper_bound = _aggregate_upper_bound(source_integrity, upper_bound_hints)
+        elif content_integrity == CONTENT_INTEGRITY_UNKNOWN and not extraction_failed and not output_quality.empty:
+            verification_strength = _aggregate_verification_strength([verification_strength, VERIFICATION_STRENGTH_EXTRACTION])
+        recoverable_upper_bound = _aggregate_upper_bound(content_integrity, upper_bound_hints)
         counts = _file_counts(file_observations)
+        total_item_count = max((step.total_item_count for step in steps), default=0)
+        verified_item_count = max((step.verified_item_count for step in steps), default=0)
+        archive_walk_complete = any(step.archive_walk_complete for step in steps)
         assessment_status = _assessment_status(
             completeness=completeness,
-            source_integrity=source_integrity,
+            content_integrity=content_integrity,
             counts=counts,
             issues=issues,
             evidence_sufficient=evidence_sufficient,
         )
         decision_hint = _decision_hint(
             assessment_status=assessment_status,
-            source_integrity=source_integrity,
+            content_integrity=content_integrity,
             completeness=completeness,
             recoverable_upper_bound=recoverable_upper_bound,
             decision_hints=decision_hints,
@@ -191,7 +221,12 @@ class VerificationPipeline:
             completeness=completeness,
             recoverable_upper_bound=recoverable_upper_bound,
             assessment_status=assessment_status,
-            source_integrity=source_integrity,
+            content_integrity=content_integrity,
+            container_integrity=container_integrity,
+            verification_strength=verification_strength,
+            total_item_count=total_item_count,
+            verified_item_count=verified_item_count,
+            archive_walk_complete=archive_walk_complete,
             decision_hint=decision_hint,
             complete_files=counts["complete"],
             partial_files=counts["partial"],
@@ -263,11 +298,11 @@ def _has_direct_verification_signal(
     *,
     file_observations: list[FileVerificationObservation],
     completeness_hints: list[float],
-    source_hints: list[str],
+    content_hints: list[str],
     decision_hints: list[str],
     archive_coverage: ArchiveCoverageSummary,
 ) -> bool:
-    if file_observations or completeness_hints or source_hints or decision_hints:
+    if file_observations or completeness_hints or content_hints or decision_hints:
         return True
     return bool(archive_coverage.confidence > 0)
 
@@ -289,25 +324,131 @@ def _file_completeness(file_observations: list[FileVerificationObservation]) -> 
     return total / max(1, len(file_observations))
 
 
-def _aggregate_upper_bound(source_integrity: str, hints: list[float]) -> float:
+def _aggregate_upper_bound(content_integrity: str, hints: list[float]) -> float:
     if hints:
         return _clamp01(min(hints))
-    if source_integrity in {SOURCE_INTEGRITY_TRUNCATED, SOURCE_INTEGRITY_PAYLOAD_DAMAGED, SOURCE_INTEGRITY_DAMAGED}:
+    if content_integrity in {CONTENT_INTEGRITY_VERIFIED_PARTIAL, CONTENT_INTEGRITY_PAYLOAD_DAMAGED}:
         return 0.99
     return 1.0
 
 
-def _aggregate_source_integrity(hints: list[str]) -> str:
+def _aggregate_content_integrity(steps: list[VerificationStepRecord]) -> str:
+    relevant = [step for step in steps if step.content_integrity_hint != CONTENT_INTEGRITY_UNKNOWN]
+    if not relevant:
+        return CONTENT_INTEGRITY_UNKNOWN
+    if any(step.content_integrity_hint == CONTENT_INTEGRITY_PAYLOAD_DAMAGED for step in relevant):
+        return CONTENT_INTEGRITY_PAYLOAD_DAMAGED
+    strength_order = {
+        "none": 0,
+        "extraction_success": 1,
+        "manifest": 2,
+        "crc": 3,
+        "oracle": 4,
+    }
+    strongest = max(strength_order.get(step.verification_strength, 0) for step in relevant)
+    strongest_hints = {
+        step.content_integrity_hint
+        for step in relevant
+        if strength_order.get(step.verification_strength, 0) == strongest
+    }
+    if CONTENT_INTEGRITY_VERIFIED_PARTIAL in strongest_hints:
+        return CONTENT_INTEGRITY_VERIFIED_PARTIAL
+    if CONTENT_INTEGRITY_VERIFIED_COMPLETE in strongest_hints:
+        return CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    return CONTENT_INTEGRITY_UNKNOWN
+
+
+def _aggregate_container_integrity(hints: list[str]) -> str:
     priority = [
-        SOURCE_INTEGRITY_TRUNCATED,
-        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-        SOURCE_INTEGRITY_DAMAGED,
-        SOURCE_INTEGRITY_COMPLETE,
+        CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED,
+        CONTAINER_INTEGRITY_NONCANONICAL,
+        CONTAINER_INTEGRITY_CANONICAL,
     ]
     for item in priority:
         if item in hints:
             return item
-    return SOURCE_INTEGRITY_UNKNOWN
+    return CONTAINER_INTEGRITY_UNKNOWN
+
+
+def _aggregate_verification_strength(values: list[str]) -> str:
+    order = {
+        "none": 0,
+        "extraction_success": 1,
+        "manifest": 2,
+        "crc": 3,
+        "oracle": 4,
+    }
+    return max(values or [VERIFICATION_STRENGTH_NONE], key=lambda item: order.get(str(item), 0))
+
+
+_NONCANONICAL_CONTAINER_FLAGS = {
+    "carrier_prefix",
+    "carrier_archive",
+    "embedded_archive",
+    "sfx",
+    "trailing_junk",
+    "tail_padding",
+    "format_mismatch",
+    "extension_mismatch",
+}
+
+_STRUCTURAL_DAMAGE_FLAGS = {
+    "boundary_unreliable",
+    "central_directory_bad",
+    "central_directory_count_bad",
+    "central_directory_missing",
+    "central_directory_offset_bad",
+    "directory_unreadable",
+    "eocd_missing",
+    "header_crc_bad",
+    "input_truncated",
+    "local_header_bad",
+    "missing_end_block",
+    "missing_volume",
+    "middle_volume_missing",
+    "next_header_crc_bad",
+    "next_header_out_of_range",
+    "probably_truncated",
+    "start_header_crc_bad",
+    "stream_truncated",
+    "tail_volume_truncated",
+    "truncated_stream",
+    "unexpected_end",
+}
+
+
+def _container_integrity_from_evidence(evidence: VerificationEvidence) -> str:
+    flags = _collect_container_flags(
+        evidence.analysis_facts,
+        evidence.archive_state_analysis,
+        evidence.repair_hints,
+    )
+    if flags & _STRUCTURAL_DAMAGE_FLAGS:
+        return CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED
+    if flags & _NONCANONICAL_CONTAINER_FLAGS:
+        return CONTAINER_INTEGRITY_NONCANONICAL
+    return CONTAINER_INTEGRITY_UNKNOWN
+
+
+def _collect_container_flags(*values: Any) -> set[str]:
+    found: set[str] = set()
+    stack = list(values)
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_text = str(key).lower()
+                if isinstance(child, bool) and child:
+                    found.add(key_text)
+                elif key_text in {"damage_flags", "flags", "warnings", "failure_kind"}:
+                    stack.append(child)
+                elif isinstance(child, (dict, list, tuple, set)):
+                    stack.append(child)
+        elif isinstance(value, (list, tuple, set)):
+            stack.extend(value)
+        elif isinstance(value, str):
+            found.add(value.lower())
+    return found
 
 
 def _file_counts(file_observations: list[FileVerificationObservation]) -> dict[str, int]:
@@ -552,13 +693,13 @@ def _as_float(value, default: float | None = 0.0) -> float | None:
 def _assessment_status(
     *,
     completeness: float,
-    source_integrity: str,
+    content_integrity: str,
     counts: dict[str, int],
     issues: list[VerificationIssue],
     evidence_sufficient: bool = True,
 ) -> str:
     if counts["failed"] or counts["missing"]:
-        return ASSESSMENT_INCONSISTENT if source_integrity == SOURCE_INTEGRITY_COMPLETE else ASSESSMENT_PARTIAL
+        return ASSESSMENT_INCONSISTENT if content_integrity == CONTENT_INTEGRITY_VERIFIED_COMPLETE else ASSESSMENT_PARTIAL
     if counts["partial"]:
         return ASSESSMENT_PARTIAL
     if not evidence_sufficient:
@@ -577,7 +718,7 @@ def _assessment_status(
 def _decision_hint(
     *,
     assessment_status: str,
-    source_integrity: str,
+    content_integrity: str,
     completeness: float,
     recoverable_upper_bound: float,
     decision_hints: list[str],
@@ -592,11 +733,7 @@ def _decision_hint(
     if DECISION_FAIL in decision_hints:
         return DECISION_FAIL
     if not evidence_sufficient:
-        if source_integrity in {
-            SOURCE_INTEGRITY_TRUNCATED,
-            SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-            SOURCE_INTEGRITY_DAMAGED,
-        }:
+        if content_integrity in {CONTENT_INTEGRITY_VERIFIED_PARTIAL, CONTENT_INTEGRITY_PAYLOAD_DAMAGED}:
             return DECISION_REPAIR
         return DECISION_FAIL
     high_output_quality = (
@@ -605,10 +742,9 @@ def _decision_hint(
         and completeness >= complete_accept_threshold
     )
     output_partial_acceptable = output_quality_score >= partial_accept_threshold and output_confidence >= 0.35
-    if DECISION_ACCEPT_PARTIAL in decision_hints and source_integrity in {
-        SOURCE_INTEGRITY_TRUNCATED,
-        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-        SOURCE_INTEGRITY_DAMAGED,
+    if DECISION_ACCEPT_PARTIAL in decision_hints and content_integrity in {
+        CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+        CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
     } and (
         (completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound))
         or output_partial_acceptable
@@ -617,13 +753,12 @@ def _decision_hint(
     if (
         assessment_status == ASSESSMENT_COMPLETE
         and completeness >= complete_accept_threshold
-        and source_integrity in {SOURCE_INTEGRITY_COMPLETE, SOURCE_INTEGRITY_UNKNOWN}
+        and content_integrity in {CONTENT_INTEGRITY_VERIFIED_COMPLETE, CONTENT_INTEGRITY_UNKNOWN}
     ):
         return DECISION_ACCEPT
-    if assessment_status == ASSESSMENT_COMPLETE and source_integrity in {
-        SOURCE_INTEGRITY_TRUNCATED,
-        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-        SOURCE_INTEGRITY_DAMAGED,
+    if assessment_status == ASSESSMENT_COMPLETE and content_integrity in {
+        CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+        CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
     }:
         if high_output_quality or output_partial_acceptable:
             return DECISION_ACCEPT_PARTIAL
@@ -631,14 +766,15 @@ def _decision_hint(
     for decision in (DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
         if decision in decision_hints:
             return decision
-    if assessment_status == ASSESSMENT_PARTIAL and source_integrity in {
-        SOURCE_INTEGRITY_TRUNCATED,
-        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-        SOURCE_INTEGRITY_DAMAGED,
+    if assessment_status == ASSESSMENT_PARTIAL and content_integrity in {
+        CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+        CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
     } and (
         (completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound))
         or output_partial_acceptable
     ):
+        return DECISION_ACCEPT_PARTIAL
+    if assessment_status == ASSESSMENT_PARTIAL and output_partial_acceptable:
         return DECISION_ACCEPT_PARTIAL
     if assessment_status in {ASSESSMENT_PARTIAL, ASSESSMENT_INCONSISTENT}:
         return DECISION_REPAIR

@@ -148,7 +148,7 @@ def _verification(decision: str, completeness: float) -> VerificationResult:
         completeness=completeness,
         recoverable_upper_bound=1.0,
         assessment_status="partial",
-        source_integrity="damaged",
+        content_integrity="verified_partial",
         decision_hint=decision,
         archive_coverage=ArchiveCoverageSummary(
             completeness=completeness,

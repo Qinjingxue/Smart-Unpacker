@@ -6,9 +6,10 @@ from sunpack.verification.output_quality import compute_output_quality
 from sunpack.verification.pipeline import _decision_hint
 from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
+    DECISION_ACCEPT,
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
-    SOURCE_INTEGRITY_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
     ArchiveCoverageSummary,
     FileVerificationObservation,
 )
@@ -79,10 +80,10 @@ def test_output_quality_keeps_value_for_large_failed_output(tmp_path):
     assert quality.file_count == 1
 
 
-def test_complete_but_damaged_source_with_high_output_quality_accepts_partial():
+def test_complete_unverified_content_with_high_output_quality_accepts():
     decision = _decision_hint(
         assessment_status=ASSESSMENT_COMPLETE,
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         completeness=1.0,
         recoverable_upper_bound=1.0,
         decision_hints=[],
@@ -92,13 +93,13 @@ def test_complete_but_damaged_source_with_high_output_quality_accepts_partial():
         output_confidence=0.8,
     )
 
-    assert decision == DECISION_ACCEPT_PARTIAL
+    assert decision == DECISION_ACCEPT
 
 
-def test_complete_but_damaged_source_with_low_output_quality_still_repairs():
+def test_complete_unverified_content_with_low_output_quality_still_accepts():
     decision = _decision_hint(
         assessment_status=ASSESSMENT_COMPLETE,
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         completeness=1.0,
         recoverable_upper_bound=1.0,
         decision_hints=[],
@@ -108,13 +109,13 @@ def test_complete_but_damaged_source_with_low_output_quality_still_repairs():
         output_confidence=0.0,
     )
 
-    assert decision == DECISION_REPAIR
+    assert decision == DECISION_ACCEPT
 
 
-def test_partial_damaged_source_with_output_quality_accepts_partial():
+def test_partial_unverified_content_with_output_quality_accepts_partial():
     decision = _decision_hint(
         assessment_status="partial",
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         completeness=0.0,
         recoverable_upper_bound=1.0,
         decision_hints=[],
@@ -127,10 +128,10 @@ def test_partial_damaged_source_with_output_quality_accepts_partial():
     assert decision == DECISION_ACCEPT_PARTIAL
 
 
-def test_complete_damaged_source_with_partial_output_quality_accepts_partial():
+def test_complete_unverified_content_with_partial_output_quality_accepts():
     decision = _decision_hint(
         assessment_status=ASSESSMENT_COMPLETE,
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         completeness=1.0,
         recoverable_upper_bound=0.99,
         decision_hints=[],
@@ -140,4 +141,4 @@ def test_complete_damaged_source_with_partial_output_quality_accepts_partial():
         output_confidence=0.35,
     )
 
-    assert decision == DECISION_ACCEPT_PARTIAL
+    assert decision == DECISION_ACCEPT

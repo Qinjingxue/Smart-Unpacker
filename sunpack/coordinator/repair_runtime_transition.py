@@ -20,7 +20,7 @@ from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.knowledge import write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
-from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, SOURCE_INTEGRITY_DAMAGED
+from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, CONTENT_INTEGRITY_UNKNOWN
 
 
 @dataclass
@@ -230,7 +230,7 @@ class RepairRuntimeTransitionEvaluator:
         return replace(
             verification,
             decision_hint=DECISION_REPAIR,
-            source_integrity=SOURCE_INTEGRITY_DAMAGED,
+            content_integrity=CONTENT_INTEGRITY_UNKNOWN,
             recoverable_upper_bound=min(float(verification.recoverable_upper_bound or 1.0), 0.99),
         )
 

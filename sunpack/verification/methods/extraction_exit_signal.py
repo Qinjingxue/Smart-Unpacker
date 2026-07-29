@@ -1,12 +1,14 @@
 from sunpack.verification.evidence import VerificationEvidence
+from sunpack.verification.error_classification import classify_verification_error
 from sunpack.verification.registry import register_verification_method
 from sunpack.contracts.verification import (
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
     DECISION_REQUEST_PASSWORD,
-    SOURCE_INTEGRITY_DAMAGED,
-    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-    SOURCE_INTEGRITY_TRUNCATED,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    VERIFICATION_STRENGTH_EXTRACTION,
     FileVerificationObservation,
     VerificationIssue,
     VerificationStepResult,
@@ -25,7 +27,7 @@ class ExtractionExitSignalMethod:
                     method=self.name,
                     status="failed",
                     completeness_hint=0.0,
-                    source_integrity_hint="unknown",
+                    content_integrity_hint=CONTENT_INTEGRITY_UNKNOWN,
                     decision_hint=DECISION_REQUEST_PASSWORD,
                     issues=[
                         VerificationIssue(
@@ -39,18 +41,20 @@ class ExtractionExitSignalMethod:
                 )
             observations = _observations_from_manifest(evidence)
             partial_outputs = bool(result.partial_outputs or observations)
-            source_integrity = _source_integrity_hint(result.diagnostics, evidence.progress_manifest)
+            error_class = _error_class(result.diagnostics, evidence.progress_manifest)
+            content_integrity = error_class.content_integrity
             if partial_outputs:
                 return VerificationStepResult(
                     method=self.name,
                     status="partial",
                     completeness_hint=_manifest_completeness(evidence.progress_manifest, observations),
                     recoverable_upper_bound_hint=_recoverable_upper_bound(evidence.progress_manifest, observations),
-                    source_integrity_hint=source_integrity,
-                    decision_hint=DECISION_ACCEPT_PARTIAL if source_integrity in {
-                        SOURCE_INTEGRITY_TRUNCATED,
-                        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
-                        SOURCE_INTEGRITY_DAMAGED,
+                    content_integrity_hint=content_integrity,
+                    container_integrity_hint=error_class.container_integrity,
+                    verification_strength=VERIFICATION_STRENGTH_EXTRACTION,
+                    decision_hint=DECISION_ACCEPT_PARTIAL if content_integrity in {
+                        CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+                        CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
                     } else DECISION_REPAIR,
                     file_observations=observations,
                     issues=[
@@ -70,7 +74,8 @@ class ExtractionExitSignalMethod:
                 method=self.name,
                 status="failed",
                 completeness_hint=0.0,
-                source_integrity_hint=source_integrity,
+                content_integrity_hint=content_integrity,
+                container_integrity_hint=error_class.container_integrity,
                 decision_hint=DECISION_REPAIR,
                 issues=[
                     VerificationIssue(
@@ -98,7 +103,7 @@ class ExtractionExitSignalMethod:
                 method=self.name,
                 status="failed",
                 completeness_hint=0.0,
-                source_integrity_hint=SOURCE_INTEGRITY_DAMAGED,
+                content_integrity_hint=CONTENT_INTEGRITY_UNKNOWN,
                 decision_hint=DECISION_REPAIR,
                 issues=[
                     *issues,
@@ -117,10 +122,12 @@ class ExtractionExitSignalMethod:
             status="warning" if issues else "passed",
             issues=issues,
             completeness_hint=1.0,
+            content_integrity_hint=CONTENT_INTEGRITY_UNKNOWN,
+            verification_strength=VERIFICATION_STRENGTH_EXTRACTION,
         )
 
 
-def _source_integrity_hint(diagnostics: dict, manifest: dict | None) -> str:
+def _error_class(diagnostics: dict, manifest: dict | None):
     payload = manifest or {}
     result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     failure_kind = str(
@@ -135,14 +142,7 @@ def _source_integrity_hint(diagnostics: dict, manifest: dict | None) -> str:
         or payload.get("failure_stage")
         or ""
     )
-    native_status = str(result.get("native_status") or payload.get("native_status") or "")
-    if failure_kind in {"unexpected_end", "input_truncated", "stream_truncated"}:
-        return SOURCE_INTEGRITY_TRUNCATED
-    if failure_kind in {"checksum_error", "corrupted_data", "data_error"} or failure_stage == "item_extract":
-        return SOURCE_INTEGRITY_PAYLOAD_DAMAGED
-    if native_status == "damaged" or failure_kind or failure_stage:
-        return SOURCE_INTEGRITY_DAMAGED
-    return SOURCE_INTEGRITY_DAMAGED
+    return classify_verification_error(failure_kind, failure_stage)
 
 
 def _observations_from_manifest(evidence: VerificationEvidence) -> list[FileVerificationObservation]:

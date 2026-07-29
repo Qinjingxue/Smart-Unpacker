@@ -72,7 +72,7 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
     status_rank = _status_rank(effective_status)
     decision_rank = _decision_rank(effective_decision)
     source_quality = _coverage_source_quality(coverage.sources)
-    source_integrity_rank = _source_integrity_rank(verification.source_integrity)
+    content_integrity_rank = _content_integrity_rank(verification.content_integrity)
     complete_files = int(coverage.complete_files or verification.complete_files or 0)
     failed_missing = int(coverage.failed_files or verification.failed_files or 0) + int(
         coverage.missing_files or verification.missing_files or 0
@@ -91,7 +91,7 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         completeness = min(completeness, self_contained_output_bound)
         file_coverage = min(file_coverage, self_contained_output_bound)
         byte_coverage = min(byte_coverage, self_contained_output_bound)
-        source_integrity_rank = min(source_integrity_rank, 0.3)
+        content_integrity_rank = min(content_integrity_rank, 0.3)
     complete_bonus = 1.0 if effective_status == ASSESSMENT_COMPLETE else 0.0
     terminal_penalty = 1.0 if terminal else 0.0
     patch_cost = max(0.0, float(attempt.patch_cost or 0.0))
@@ -105,7 +105,7 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         + byte_coverage * 0.35
         + output_quality_score * 1.1
         + output_confidence * 0.12
-        + source_integrity_rank * 0.08
+        + content_integrity_rank * 0.08
         + source_quality * 0.3
         + min(1.0, complete_files / max(1, int(coverage.expected_files or complete_files or 1))) * 0.25
         + partial_files * 0.01
@@ -131,8 +131,13 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         "output_complete_ratio": output_complete_ratio,
         "output_file_count": output_file_count,
         "output_total_bytes": output_total_bytes,
-        "source_integrity": verification.source_integrity,
-        "source_integrity_rank": source_integrity_rank,
+        "content_integrity": verification.content_integrity,
+        "container_integrity": verification.container_integrity,
+        "verification_strength": verification.verification_strength,
+        "content_integrity_rank": content_integrity_rank,
+        "total_item_count": verification.total_item_count,
+        "verified_item_count": verification.verified_item_count,
+        "archive_walk_complete": verification.archive_walk_complete,
         "complete_files": complete_files,
         "partial_files": partial_files,
         "failed_missing_files": failed_missing,
@@ -244,7 +249,12 @@ def _verification_from_payload(payload: dict[str, Any]) -> VerificationResult:
         completeness=_clamp01(float(payload.get("completeness", coverage.completeness) or 0.0)),
         recoverable_upper_bound=_clamp01(float(payload.get("recoverable_upper_bound", 1.0) or 1.0)),
         assessment_status=str(payload.get("assessment_status") or payload.get("status") or ASSESSMENT_UNKNOWN),
-        source_integrity=str(payload.get("source_integrity") or "unknown"),
+        content_integrity=str(payload.get("content_integrity") or "unknown"),
+        container_integrity=str(payload.get("container_integrity") or "unknown"),
+        verification_strength=str(payload.get("verification_strength") or "none"),
+        total_item_count=_as_int(payload.get("total_item_count")),
+        verified_item_count=_as_int(payload.get("verified_item_count")),
+        archive_walk_complete=bool(payload.get("archive_walk_complete", False)),
         decision_hint=str(payload.get("decision_hint") or "none"),
         complete_files=_as_int(payload.get("complete_files", coverage.complete_files)),
         partial_files=_as_int(payload.get("partial_files", coverage.partial_files)),
@@ -279,7 +289,7 @@ def _sort_key(attempt: RecoveryAttempt, rank: RecoveryRank) -> tuple:
         -int(vector["failed_missing_files"]),
         round(vector["file_coverage"], 6),
         round(vector["byte_coverage"], 6),
-        round(vector["source_integrity_rank"], 6),
+        round(vector["content_integrity_rank"], 6),
         round(vector["source_quality"], 6),
         -float(vector["patch_cost"]),
         -int(attempt.round_index),
@@ -405,14 +415,13 @@ def _single_source_quality(source: dict[str, Any]) -> float:
     return _clamp01(float(source.get("confidence", 0.5) or 0.5))
 
 
-def _source_integrity_rank(source_integrity: str) -> float:
+def _content_integrity_rank(content_integrity: str) -> float:
     return {
-        "complete": 1.0,
+        "verified_complete": 1.0,
         "unknown": 0.5,
-        "damaged": 0.3,
+        "verified_partial": 0.3,
         "payload_damaged": 0.2,
-        "truncated": 0.1,
-    }.get(str(source_integrity or "unknown"), 0.5)
+    }.get(str(content_integrity or "unknown"), 0.5)
 
 
 def _stable_digest(payload: Any) -> str:

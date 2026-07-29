@@ -96,7 +96,10 @@ def test_expected_name_presence_reports_missing_entries(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     (out_dir / "actual.txt").write_text("hello", encoding="utf-8")
-    task = _task(tmp_path, {"expected_names": ["expected.txt", "missing.bin"]})
+    task = _task(tmp_path, {
+        "expected_names": ["expected.txt", "missing.bin"],
+        "expected_names_source": "manifest",
+    })
     result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
 
     verification = _scheduler([{"name": "expected_name_presence"}]).verify(task, result)
@@ -188,7 +191,7 @@ def test_expected_name_presence_weak_damaged_source_sets_recoverable_upper_bound
 
     verification = _scheduler([{"name": "expected_name_presence"}]).verify(task, result)
 
-    assert verification.source_integrity == "damaged"
+    assert verification.content_integrity == "unknown"
     assert verification.completeness == 0.5
     assert verification.recoverable_upper_bound == 0.5
     assert verification.decision_hint == "accept_partial"

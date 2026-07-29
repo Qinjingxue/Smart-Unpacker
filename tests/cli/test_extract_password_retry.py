@@ -242,7 +242,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
                     "archive": "broken.zip",
                     "out_dir": str(tmp_path / "out"),
                     "assessment_status": "partial",
-                    "source_integrity": "payload_damaged",
+                    "content_integrity": "payload_damaged",
                     "archive_coverage": {
                         "completeness": 0.5,
                         "expected_files": 2,

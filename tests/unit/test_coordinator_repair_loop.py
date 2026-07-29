@@ -184,7 +184,7 @@ def _verification(decision, completeness):
         completeness=completeness,
         recoverable_upper_bound=1.0,
         assessment_status=status,
-        source_integrity="complete",
+        content_integrity="verified_complete",
         decision_hint=decision,
         archive_coverage=ArchiveCoverageSummary(
             completeness=completeness,

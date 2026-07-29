@@ -6,9 +6,9 @@ from sunpack.contracts.verification import (
     DECISION_ACCEPT,
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
-    SOURCE_INTEGRITY_COMPLETE,
-    SOURCE_INTEGRITY_DAMAGED,
-    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
     VerificationResult,
 )
 
@@ -95,7 +95,7 @@ def test_verification_tiebreak_prefers_lower_patch_cost_when_completeness_matche
     assert ranked[0][1].rank_vector["patch_cost"] == 0.1
 
 
-def test_verification_tiebreak_prefers_better_source_integrity_when_completeness_matches():
+def test_verification_tiebreak_prefers_better_content_integrity_when_completeness_matches():
     complete_source = _attempt(
         "complete-source",
         status=ASSESSMENT_PARTIAL,
@@ -103,7 +103,7 @@ def test_verification_tiebreak_prefers_better_source_integrity_when_completeness
         completeness=0.75,
         complete_files=3,
         expected_files=4,
-        source_integrity=SOURCE_INTEGRITY_COMPLETE,
+        content_integrity=CONTENT_INTEGRITY_VERIFIED_COMPLETE,
     )
     damaged_source = _attempt(
         "damaged-source",
@@ -112,14 +112,14 @@ def test_verification_tiebreak_prefers_better_source_integrity_when_completeness
         completeness=0.75,
         complete_files=3,
         expected_files=4,
-        source_integrity=SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
     )
 
     ranked = rank_attempts([damaged_source, complete_source])
 
     assert ranked[0][0].attempt_id == "complete-source"
-    assert ranked[0][1].rank_vector["source_integrity"] == SOURCE_INTEGRITY_COMPLETE
-    assert ranked[0][1].rank_vector["source_integrity_rank"] > ranked[1][1].rank_vector["source_integrity_rank"]
+    assert ranked[0][1].rank_vector["content_integrity"] == CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    assert ranked[0][1].rank_vector["content_integrity_rank"] > ranked[1][1].rank_vector["content_integrity_rank"]
 
 
 def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_archive_health():
@@ -130,7 +130,7 @@ def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_a
         completeness=0.7,
         complete_files=3,
         expected_files=4,
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         output_quality_score=0.95,
         output_file_count=3,
         output_total_bytes=1024,
@@ -142,7 +142,7 @@ def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_a
         completeness=0.7,
         complete_files=3,
         expected_files=4,
-        source_integrity=SOURCE_INTEGRITY_COMPLETE,
+        content_integrity=CONTENT_INTEGRITY_VERIFIED_COMPLETE,
         output_quality_score=0.2,
         output_file_count=1,
         output_total_bytes=128,
@@ -162,7 +162,7 @@ def test_verification_comparator_does_not_treat_partial_salvage_container_as_ful
         completeness=0.85,
         complete_files=17,
         expected_files=20,
-        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_UNKNOWN,
         output_quality_score=0.95,
         output_file_count=17,
         output_total_bytes=200_000,
@@ -174,7 +174,7 @@ def test_verification_comparator_does_not_treat_partial_salvage_container_as_ful
         completeness=1.0,
         complete_files=1,
         expected_files=1,
-        source_integrity=SOURCE_INTEGRITY_COMPLETE,
+        content_integrity=CONTENT_INTEGRITY_VERIFIED_COMPLETE,
         output_quality_score=0.82,
         output_file_count=1,
         output_total_bytes=1_000,
@@ -256,7 +256,7 @@ def _attempt(
     failed_files: int = 0,
     source_code: str = "info.archive_output_coverage",
     patch_cost: float = 0.0,
-    source_integrity: str = SOURCE_INTEGRITY_DAMAGED,
+    content_integrity: str = CONTENT_INTEGRITY_UNKNOWN,
     output_quality_score: float = 0.0,
     output_file_count: int = 0,
     output_total_bytes: int = 0,
@@ -278,7 +278,7 @@ def _attempt(
         verification=VerificationResult(
             completeness=completeness,
             assessment_status=status,
-            source_integrity=source_integrity,
+            content_integrity=content_integrity,
             decision_hint=decision,
             archive_coverage=coverage,
             complete_files=complete_files,

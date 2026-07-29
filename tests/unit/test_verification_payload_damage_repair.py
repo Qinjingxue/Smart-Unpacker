@@ -4,14 +4,14 @@ from sunpack.verification.pipeline import _decision_hint
 from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     DECISION_REPAIR,
-    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
 )
 
 
 def test_payload_damaged_complete_assessment_still_enters_repair():
     assert _decision_hint(
         assessment_status=ASSESSMENT_COMPLETE,
-        source_integrity=SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+        content_integrity=CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
         completeness=1.0,
         recoverable_upper_bound=0.99,
         decision_hints=[],

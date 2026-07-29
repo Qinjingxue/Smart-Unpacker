@@ -12,8 +12,9 @@ from sunpack.contracts.verification import (
     DECISION_ACCEPT,
     DECISION_REPAIR,
     DECISION_REQUEST_PASSWORD,
-    SOURCE_INTEGRITY_DAMAGED,
-    SOURCE_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTAINER_INTEGRITY_UNKNOWN,
+    VERIFICATION_STRENGTH_EXTRACTION,
     VerificationResult,
 )
 
@@ -39,7 +40,8 @@ class VerificationScheduler:
                     completeness=0.0,
                     recoverable_upper_bound=1.0,
                     assessment_status=ASSESSMENT_DISABLED,
-                    source_integrity=SOURCE_INTEGRITY_UNKNOWN if password_failure else SOURCE_INTEGRITY_DAMAGED,
+                    content_integrity=CONTENT_INTEGRITY_UNKNOWN,
+                    container_integrity=CONTAINER_INTEGRITY_UNKNOWN,
                     decision_hint=DECISION_REQUEST_PASSWORD if password_failure else DECISION_REPAIR,
                     repair_hints=dict(evidence.repair_hints),
                 )
@@ -50,7 +52,9 @@ class VerificationScheduler:
                 completeness=1.0,
                 recoverable_upper_bound=1.0,
                 assessment_status=ASSESSMENT_DISABLED,
-                source_integrity=SOURCE_INTEGRITY_UNKNOWN,
+                content_integrity=CONTENT_INTEGRITY_UNKNOWN,
+                container_integrity=CONTAINER_INTEGRITY_UNKNOWN,
+                verification_strength=VERIFICATION_STRENGTH_EXTRACTION,
                 decision_hint=DECISION_ACCEPT,
                 repair_hints=dict(evidence.repair_hints),
             )

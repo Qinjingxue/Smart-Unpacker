@@ -182,7 +182,8 @@ class ArchiveRepairStage:
                 "status": "verification_failed",
                 "failure_stage": "verification",
                 "assessment_status": verification.assessment_status,
-                "source_integrity": verification.source_integrity,
+                "content_integrity": verification.content_integrity,
+                "container_integrity": verification.container_integrity,
                 "decision_hint": verification.decision_hint,
                 "completeness": verification.completeness,
                 "recoverable_upper_bound": verification.recoverable_upper_bound,
@@ -696,11 +697,11 @@ class ArchiveRepairStage:
 
     def _flags_from_verification(self, verification: VerificationResult) -> list[str]:
         flags = []
-        if verification.source_integrity in {"damaged", "truncated", "payload_damaged"}:
+        if verification.content_integrity in {"verified_partial", "payload_damaged"}:
             flags.append("damaged")
-        if verification.source_integrity == "truncated":
+        if verification.content_integrity == "verified_partial":
             flags.append("probably_truncated")
-        if verification.source_integrity == "payload_damaged":
+        if verification.content_integrity == "payload_damaged":
             flags.append("checksum_error")
             flags.append("crc_error")
         if verification.completeness < 0.999:
@@ -715,8 +716,12 @@ class ArchiveRepairStage:
             flags.append("partial_entries_remaining")
         if failed or missing or partial:
             flags.append("content_integrity_bad_or_unknown")
-        if verification.assessment_status == "complete" and verification.source_integrity not in {"complete", "trusted"}:
-            flags.extend(["content_integrity_bad_or_unknown", "exact_match_failed"])
+        if verification.assessment_status == "complete" and verification.content_integrity == "unknown":
+            flags.append("content_integrity_unverified")
+        if verification.container_integrity == "structurally_damaged":
+            flags.append("container_structurally_damaged")
+        elif verification.container_integrity == "noncanonical":
+            flags.append("container_noncanonical")
         for issue in verification.issues:
             code = issue.code.lower()
             if "crc" in code or "checksum" in code:

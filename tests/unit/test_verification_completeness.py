@@ -48,7 +48,7 @@ def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path
 
     assert verification.decision_hint == "accept_partial"
     assert verification.assessment_status == "partial"
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.completeness == 0.5
     assert verification.complete_files == 1
     assert verification.failed_files == 1

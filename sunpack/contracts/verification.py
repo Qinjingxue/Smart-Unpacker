@@ -2,11 +2,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-SOURCE_INTEGRITY_UNKNOWN = "unknown"
-SOURCE_INTEGRITY_COMPLETE = "complete"
-SOURCE_INTEGRITY_DAMAGED = "damaged"
-SOURCE_INTEGRITY_TRUNCATED = "truncated"
-SOURCE_INTEGRITY_PAYLOAD_DAMAGED = "payload_damaged"
+CONTENT_INTEGRITY_UNKNOWN = "unknown"
+CONTENT_INTEGRITY_VERIFIED_COMPLETE = "verified_complete"
+CONTENT_INTEGRITY_VERIFIED_PARTIAL = "verified_partial"
+CONTENT_INTEGRITY_PAYLOAD_DAMAGED = "payload_damaged"
+
+CONTAINER_INTEGRITY_UNKNOWN = "unknown"
+CONTAINER_INTEGRITY_CANONICAL = "canonical"
+CONTAINER_INTEGRITY_NONCANONICAL = "noncanonical"
+CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED = "structurally_damaged"
+
+VERIFICATION_STRENGTH_NONE = "none"
+VERIFICATION_STRENGTH_EXTRACTION = "extraction_success"
+VERIFICATION_STRENGTH_MANIFEST = "manifest"
+VERIFICATION_STRENGTH_CRC = "crc"
+VERIFICATION_STRENGTH_ORACLE = "oracle"
 
 DECISION_NONE = "none"
 DECISION_ACCEPT = "accept"
@@ -75,7 +85,12 @@ class VerificationStepResult:
     issues: list[VerificationIssue] = field(default_factory=list)
     completeness_hint: float | None = None
     recoverable_upper_bound_hint: float | None = None
-    source_integrity_hint: str = SOURCE_INTEGRITY_UNKNOWN
+    content_integrity_hint: str = CONTENT_INTEGRITY_UNKNOWN
+    container_integrity_hint: str = CONTAINER_INTEGRITY_UNKNOWN
+    verification_strength: str = VERIFICATION_STRENGTH_NONE
+    total_item_count: int = 0
+    verified_item_count: int = 0
+    archive_walk_complete: bool = False
     decision_hint: str = DECISION_NONE
     file_observations: list[FileVerificationObservation] = field(default_factory=list)
 
@@ -87,7 +102,12 @@ class VerificationStepRecord:
     issues: list[VerificationIssue] = field(default_factory=list)
     completeness_hint: float | None = None
     recoverable_upper_bound_hint: float | None = None
-    source_integrity_hint: str = SOURCE_INTEGRITY_UNKNOWN
+    content_integrity_hint: str = CONTENT_INTEGRITY_UNKNOWN
+    container_integrity_hint: str = CONTAINER_INTEGRITY_UNKNOWN
+    verification_strength: str = VERIFICATION_STRENGTH_NONE
+    total_item_count: int = 0
+    verified_item_count: int = 0
+    archive_walk_complete: bool = False
     decision_hint: str = DECISION_NONE
     file_observations: list[FileVerificationObservation] = field(default_factory=list)
 
@@ -100,7 +120,12 @@ class VerificationResult:
     completeness: float = 1.0
     recoverable_upper_bound: float = 1.0
     assessment_status: str = ASSESSMENT_COMPLETE
-    source_integrity: str = SOURCE_INTEGRITY_UNKNOWN
+    content_integrity: str = CONTENT_INTEGRITY_UNKNOWN
+    container_integrity: str = CONTAINER_INTEGRITY_UNKNOWN
+    verification_strength: str = VERIFICATION_STRENGTH_NONE
+    total_item_count: int = 0
+    verified_item_count: int = 0
+    archive_walk_complete: bool = False
     decision_hint: str = DECISION_NONE
     complete_files: int = 0
     partial_files: int = 0

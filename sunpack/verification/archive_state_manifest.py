@@ -25,6 +25,10 @@ class ArchiveStateManifest:
     source: str = "archive_state"
     state_aware: bool = True
     patch_digest: str = ""
+    archive_walk_complete: bool = False
+    verified_item_count: int = 0
+    entries_truncated: bool = False
+    failure_kind: str = ""
 
     @property
     def ok(self) -> bool:
@@ -37,6 +41,10 @@ class ArchiveStateManifest:
     @property
     def total_unpacked_size(self) -> int:
         return sum(max(0, int(item.get("size", 0) or 0)) for item in self.files)
+
+    @property
+    def retained_file_count(self) -> int:
+        return len(self.files)
 
 
 _EVIDENCE_CACHE_ATTRIBUTE = "_archive_state_manifest_full_cache"
@@ -109,6 +117,9 @@ def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
         source=str(payload.get("source") or "sevenzip_worker_extract"),
         state_aware=True,
         patch_digest=evidence.patch_digest,
+        archive_walk_complete=True,
+        verified_item_count=int(payload.get("item_count", len(files)) or 0),
+        entries_truncated=False,
     )
 
 
@@ -128,7 +139,7 @@ def _manifest_view(manifest: ArchiveStateManifest, max_items: int) -> ArchiveSta
     if len(manifest.files) <= limit:
         return manifest
     files = manifest.files[:limit]
-    return replace(manifest, file_count=len(files), files=files)
+    return replace(manifest, files=files, entries_truncated=True)
 
 
 def archive_state_manifest(
@@ -183,19 +194,29 @@ def archive_state_manifest(
             message="Archive-state manifest could not identify a supported archive format",
             patch_digest=patch_digest,
         )
+    files = [dict(item) for item in payload.get("files") or [] if isinstance(item, dict)]
+    file_count = int(payload.get("file_count", 0) or 0)
     return ArchiveStateManifest(
         status=int(payload["status"]) if payload.get("status") is not None else STATUS_DAMAGED,
         is_archive=bool(payload.get("is_archive", False)),
         damaged=bool(payload.get("damaged", False)),
         checksum_error=bool(payload.get("checksum_error", False)),
         item_count=int(payload.get("item_count", 0) or 0),
-        file_count=int(payload.get("file_count", 0) or 0),
-        files=[dict(item) for item in payload.get("files") or [] if isinstance(item, dict)],
+        file_count=file_count,
+        files=files,
         message=str(payload.get("message") or ""),
         archive_type=str(payload.get("archive_type") or "zip"),
         source=str(payload.get("source") or "archive_state_native"),
         state_aware=bool(payload.get("state_aware", True)),
         patch_digest=patch_digest,
+        archive_walk_complete=(int(payload["status"]) if payload.get("status") is not None else STATUS_DAMAGED) == STATUS_OK,
+        verified_item_count=(
+            int(payload.get("item_count", 0) or 0)
+            if (int(payload["status"]) if payload.get("status") is not None else STATUS_DAMAGED) == STATUS_OK
+            else 0
+        ),
+        entries_truncated=len(files) < file_count,
+        failure_kind=str(payload.get("failure_kind") or ""),
     )
 
 

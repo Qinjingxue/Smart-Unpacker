@@ -17,8 +17,11 @@ from sunpack.verification.methods._output_stats import (
 from sunpack.verification.registry import register_verification_method
 from sunpack.contracts.verification import (
     DECISION_REPAIR,
-    SOURCE_INTEGRITY_COMPLETE,
-    SOURCE_INTEGRITY_DAMAGED,
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    VERIFICATION_STRENGTH_MANIFEST,
     VerificationIssue,
     VerificationStepResult,
 )
@@ -45,7 +48,7 @@ class ManifestSizeMatchMethod:
             return VerificationStepResult(method=self.name, status="skipped")
 
         issues: list[VerificationIssue] = []
-        source_integrity = _source_integrity_hint(evidence, state_manifest)
+        content_integrity = _content_integrity_hint(state_manifest)
         name_coverage = None
         if expected_names:
             emit_observations = should_emit_file_observations(evidence, self.name)
@@ -132,7 +135,11 @@ class ManifestSizeMatchMethod:
                 method=self.name,
                 status="passed",
                 completeness_hint=name_coverage.completeness if name_coverage is not None else 1.0,
-                source_integrity_hint=source_integrity,
+                content_integrity_hint=content_integrity,
+                verification_strength=VERIFICATION_STRENGTH_MANIFEST,
+                total_item_count=int(getattr(state_manifest, "item_count", 0) or 0),
+                verified_item_count=int(getattr(state_manifest, "verified_item_count", 0) or 0),
+                archive_walk_complete=bool(getattr(state_manifest, "archive_walk_complete", False)),
                 file_observations=name_coverage.observations if name_coverage is not None else [],
             )
         completeness = _manifest_completeness(stats.file_count, stats.total_size, expected_files, expected_size)
@@ -143,9 +150,17 @@ class ManifestSizeMatchMethod:
             status="warning",
             issues=issues,
             completeness_hint=completeness,
-            source_integrity_hint=source_integrity,
-            recoverable_upper_bound_hint=completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
-            decision_hint=DECISION_REPAIR if source_integrity == SOURCE_INTEGRITY_COMPLETE else "none",
+            content_integrity_hint=(
+                CONTENT_INTEGRITY_VERIFIED_PARTIAL
+                if content_integrity == CONTENT_INTEGRITY_VERIFIED_COMPLETE and completeness < 0.999
+                else content_integrity
+            ),
+            verification_strength=VERIFICATION_STRENGTH_MANIFEST,
+            total_item_count=int(getattr(state_manifest, "item_count", 0) or 0),
+            verified_item_count=int(getattr(state_manifest, "verified_item_count", 0) or 0),
+            archive_walk_complete=bool(getattr(state_manifest, "archive_walk_complete", False)),
+            recoverable_upper_bound_hint=completeness,
+            decision_hint=DECISION_REPAIR,
             file_observations=name_coverage.observations if name_coverage is not None else [],
         )
 
@@ -180,20 +195,17 @@ def _manifest_completeness(actual_files: int, actual_size: int, expected_files: 
     return min(ratios) if ratios else 1.0
 
 
-def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> str:
-    if state_manifest is not None:
-        if state_manifest.status == STATUS_OK and state_manifest.ok:
-            return SOURCE_INTEGRITY_COMPLETE
-        if state_manifest.status == STATUS_DAMAGED or state_manifest.damaged:
-            return SOURCE_INTEGRITY_DAMAGED
-    health = evidence.health or {}
-    analysis = _merged_analysis(evidence)
-    status = str(analysis.get("status") or health.get("status") or "")
-    if status in {"extractable", "ok", "complete"}:
-        return SOURCE_INTEGRITY_COMPLETE
-    if status in {"damaged", "weak"}:
-        return SOURCE_INTEGRITY_DAMAGED
-    return SOURCE_INTEGRITY_COMPLETE
+def _content_integrity_hint(state_manifest: ArchiveStateManifest | None = None) -> str:
+    if state_manifest is None:
+        return CONTENT_INTEGRITY_UNKNOWN
+    if state_manifest.checksum_error:
+        return CONTENT_INTEGRITY_PAYLOAD_DAMAGED
+    if (
+        state_manifest.archive_walk_complete
+        and state_manifest.verified_item_count >= state_manifest.item_count
+    ):
+        return CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    return CONTENT_INTEGRITY_UNKNOWN
 
 
 def _expected_names(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> list[str]:

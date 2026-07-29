@@ -7,6 +7,8 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.verification import VerificationScheduler
+from sunpack.verification.archive_state_manifest import ArchiveStateManifest, _manifest_view
+from sunpack.support.sevenzip_bridge import STATUS_OK
 
 
 def test_archive_crc_reads_patched_state_not_raw_archive_path(tmp_path):
@@ -73,10 +75,34 @@ def test_archive_crc_keeps_file_coverage_when_source_payload_is_damaged(tmp_path
 
     verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
 
-    assert verification.source_integrity == "payload_damaged"
+    assert verification.content_integrity == "payload_damaged"
     assert verification.archive_coverage.expected_files == 2
     assert verification.archive_coverage.complete_files == 2
     assert not [issue for issue in verification.issues if issue.code == "fail.archive_crc_test_failed"]
+
+
+def test_manifest_view_retains_full_archive_totals_when_details_are_limited():
+    files = [{"path": f"f{index}.bin", "size": index + 1} for index in range(289)]
+    manifest = ArchiveStateManifest(
+        status=STATUS_OK,
+        is_archive=True,
+        damaged=False,
+        checksum_error=False,
+        item_count=310,
+        file_count=289,
+        files=files,
+        archive_walk_complete=True,
+        verified_item_count=310,
+    )
+
+    limited = _manifest_view(manifest, 64)
+
+    assert limited.item_count == 310
+    assert limited.file_count == 289
+    assert limited.verified_item_count == 310
+    assert limited.archive_walk_complete is True
+    assert limited.entries_truncated is True
+    assert limited.retained_file_count == 64
 
 
 def _patched_task(archive, patched_bytes: bytes) -> ArchiveTask:

@@ -146,10 +146,17 @@ std::string kind_for_operation_result(Int32 op_res) {
 
     }
 
-    if (op_res == kOpUnexpectedEnd || op_res == kOpHeadersError || op_res == kOpIsNotArc || op_res == kOpDataError) {
-
-        return "corrupted_data";
-
+    if (op_res == kOpUnexpectedEnd) {
+        return "unexpected_end";
+    }
+    if (op_res == kOpHeadersError) {
+        return "headers_error";
+    }
+    if (op_res == kOpIsNotArc) {
+        return "not_archive";
+    }
+    if (op_res == kOpDataError) {
+        return "data_error";
     }
 
     return "unknown";
