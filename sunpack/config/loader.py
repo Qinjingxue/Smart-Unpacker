@@ -165,6 +165,21 @@ def _validate_pipeline(config: dict[str, Any]):
     if shortcut_errors:
         raise ConfigError("; ".join(shortcut_errors))
 
+    analysis = config.get("analysis")
+    prepass = analysis.get("prepass") if isinstance(analysis, dict) else None
+    removed_prepass_fields = {
+        "deep_scan",
+        "full_scan_max_bytes",
+        "full_scan_chunk_bytes",
+        "full_scan_max_hits",
+    }
+    obsolete = sorted(removed_prepass_fields & set(prepass or {}))
+    if obsolete:
+        raise ConfigError(
+            "Removed analysis.prepass fields: " + ", ".join(obsolete)
+            + "; use embedded_scan.enabled"
+        )
+
     filesystem = config.get("filesystem")
     if not isinstance(filesystem, dict):
         raise ConfigError("Missing required config object: filesystem")

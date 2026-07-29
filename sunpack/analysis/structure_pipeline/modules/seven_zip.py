@@ -20,7 +20,7 @@ class SevenZipAnalysisModule:
                 max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
             )
             candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
-        return combine_format_candidates("7z", candidates, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
+        return combine_format_candidates("7z", candidates, preserve_multiple=prepass.get("source") == "embedded_scan")
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):

@@ -42,7 +42,7 @@ class _CompressionModule:
                 confidence=confidence if complete else min(confidence, 0.80),
                 status="extractable" if complete else "damaged",
                 segments=segments,
-                details={"source": "detection_embedded_scan", "candidates": embedded,
+                details={"source": "embedded_scan", "candidates": embedded,
                          "boundary_confidence": "high" if complete else "low"},
             )
         result = view.probe_compression_stream(format=self.fmt)

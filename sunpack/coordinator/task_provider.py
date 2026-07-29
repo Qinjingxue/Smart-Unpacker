@@ -117,6 +117,9 @@ class ArchiveTaskProvider:
         return [rescanned.get(result.fact_bag, result) for result in initial]
 
     def _embedded_deep_scan_single_candidate_ratio(self) -> float:
+        embedded_config = self.config.get("embedded_scan")
+        if isinstance(embedded_config, dict) and not bool(embedded_config.get("enabled", True)):
+            return 0.0
         pipeline = rule_pipeline_config(self.config)
         precheck = pipeline.get("precheck") if isinstance(pipeline.get("precheck"), list) else []
         for item in precheck:

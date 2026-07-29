@@ -4,18 +4,22 @@ from typing import Any
 
 from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs
 from sunpack.analysis.fuzzy_pipeline.registry import discover_fuzzy_analysis_modules, get_fuzzy_analysis_module_registry
-from sunpack.analysis.structure_pipeline.prepass import extend_signature_prepass_full, run_signature_prepass
+from sunpack.analysis.structure_pipeline.prepass import run_signature_prepass
 from sunpack.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.analysis.view import MultiVolumeBinaryView, PatchedBinaryView, SharedBinaryView
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.embedded import scan_embedded_archives
 from sunpack.support.module_config import enabled_module_configs
 
 
 class ArchiveAnalysisScheduler:
     def __init__(self, config: dict[str, Any] | None = None, *, executor_pool=None):
-        self.config = analysis_config(config or {})
+        root_config = config or {}
+        self.config = analysis_config(root_config)
+        embedded_config = root_config.get("embedded_scan")
+        self.embedded_scan_enabled = not isinstance(embedded_config, dict) or bool(embedded_config.get("enabled", True))
         self.executor_pool = executor_pool
         discover_fuzzy_analysis_modules()
         discover_analysis_modules()
@@ -99,14 +103,20 @@ class ArchiveAnalysisScheduler:
         modules = self._selected_structure_modules(structure_context)
         evidences = self._run_structure_modules(view, structure_context, modules)
         selected = self._selected_evidences(evidences)
-        if not selected and prepass_config.get("enabled", True):
-            extended_prepass = extend_signature_prepass_full(view, prepass, prepass_config)
-            if extended_prepass is not prepass:
-                prepass = extended_prepass
+        if not selected and self._embedded_scan_enabled() and isinstance(view, SharedBinaryView):
+            embedded = scan_embedded_archives(
+                view.path,
+                expected_size=int(view.size),
+            )
+            embedded_prepass = embedded.to_prepass()
+            if embedded.candidates:
+                prepass = embedded_prepass
                 structure_context = {**prepass, "fuzzy": fuzzy}
                 modules = self._selected_structure_modules(structure_context)
                 evidences = self._run_structure_modules(view, structure_context, modules)
                 selected = self._selected_evidences(evidences)
+            else:
+                prepass = {**prepass, "embedded_scan": embedded_prepass}
         stats = view.stats()
         return ArchiveAnalysisReport(
             path=report_path or view.path,
@@ -118,6 +128,10 @@ class ArchiveAnalysisScheduler:
             read_bytes=stats.read_bytes,
             cache_hits=stats.cache_hits,
         )
+
+    def _embedded_scan_enabled(self) -> bool:
+        return self.embedded_scan_enabled
+
     def _build_single_view(self, path: str) -> SharedBinaryView:
         cache_bytes = int(self.config.get("shared_cache_mb", 64) or 0) * 1024 * 1024
         max_read_mb = self.config.get("max_read_mb_per_archive", 256)

@@ -80,6 +80,18 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(result.fact_bag.get("file.embedded_archive_found"))
             self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
+    def test_shared_embedded_scan_switch_disables_detection_and_analysis_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carrier = Path(tmp) / "movie.mp4"
+            carrier.write_bytes(b"video-prefix" + zip_bytes())
+            config = embedded_config()
+            config["embedded_scan"] = {"enabled": False}
+
+            results = ArchiveTaskProvider(config).detect_targets([str(carrier)])
+
+            self.assertFalse(results[0].decision.should_extract)
+            self.assertFalse(results[0].fact_bag.has("candidate.embedded_payload_precheck_enabled"))
+
     def test_single_candidate_ratio_selects_every_candidate_at_or_above_threshold(self):
         bags = []
         for name, size in (("large", 40), ("medium", 30), ("small", 30)):

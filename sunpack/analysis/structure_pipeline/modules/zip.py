@@ -10,12 +10,18 @@ class ZipAnalysisModule:
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
         hits = [hit for hit in prepass.get("hits", []) if str(hit.get("name", "")).startswith("zip_")]
-        if not hits:
+        embedded = [
+            item for item in prepass.get("embedded_candidates", [])
+            if item.get("format") == "zip"
+        ]
+        if not hits and not embedded:
             return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
 
+        evidences = [self._from_embedded_candidate(view, item, embedded) for item in embedded]
+        if evidences:
+            return combine_format_candidates("zip", evidences, preserve_multiple=True)
         max_entries = int(config.get("max_cd_entries_to_walk", 64) or 64)
         eocd_hits = [int(hit["offset"]) for hit in hits if hit.get("name") == "zip_eocd"]
-        evidences = []
         for eocd_offset in sorted(eocd_hits, reverse=True):
             native = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
             if not native or not (native.get("magic_matched") or native.get("plausible")):
@@ -27,7 +33,7 @@ class ZipAnalysisModule:
             else:
                 evidences.append(self._from_native(view, native, hits, prepass))
         known_starts = {segment.start_offset for evidence in evidences for segment in evidence.segments}
-        for item in prepass.get("embedded_candidates", []):
+        for item in embedded:
             if item.get("format") == "zip" and "local_header" in str(item.get("validation") or ""):
                 start = int(item.get("offset") or 0)
                 if start in known_starts:
@@ -39,7 +45,37 @@ class ZipAnalysisModule:
                                              evidence=["zip:validated_local_header"])],
                     details={"recovery_strategy": "validated_local_header", "boundary_confidence": "low"},
                 ))
-        return combine_format_candidates("zip", evidences, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
+        return combine_format_candidates("zip", evidences, preserve_multiple=prepass.get("source") == "embedded_scan")
+
+    def _from_embedded_candidate(self, view, item: dict, candidates: list[dict]) -> ArchiveFormatEvidence:
+        start = int(item.get("offset") or 0)
+        explicit_end = item.get("end_offset")
+        later_starts = (
+            int(candidate.get("offset") or 0)
+            for candidate in candidates
+            if int(candidate.get("offset") or 0) > start
+        )
+        next_start = min(later_starts, default=int(view.size))
+        end = int(explicit_end) if explicit_end is not None else next_start
+        confidence = float(item.get("confidence") or 0.0)
+        validation = str(item.get("validation") or "validated_structure")
+        status = "extractable" if confidence >= 0.85 and end > start else "damaged"
+        return ArchiveFormatEvidence(
+            format="zip",
+            confidence=confidence,
+            status=status,
+            segments=[ArchiveSegment(
+                start_offset=start,
+                end_offset=end if end > start else None,
+                confidence=confidence,
+                evidence=[f"zip:{validation}", "embedded_scan:validated_candidate"],
+            )],
+            details={
+                "source": "embedded_scan",
+                "validation": validation,
+                "boundary_confidence": "high" if explicit_end is not None else "inferred_to_next_candidate_or_eof",
+            },
+        )
 
     def _from_native(self, view, native: dict, hits: list[dict], prepass: dict) -> ArchiveFormatEvidence:
         if not native.get("magic_matched") and not hits:

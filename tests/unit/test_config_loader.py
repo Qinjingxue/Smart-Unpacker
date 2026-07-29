@@ -120,3 +120,21 @@ def test_obsolete_embedded_scan_configuration_is_rejected():
     }])
     with pytest.raises(ValueError, match="embedded_payload_scan_level"):
         _prepared_precheck_config(config, "embedded_payload_identity")
+
+
+def test_removed_analysis_full_scan_configuration_is_rejected(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    payload = _advanced_payload()
+    payload.setdefault("analysis", {})["prepass"] = {
+        "enabled": True,
+        "head_bytes": 1024,
+        "tail_bytes": 1024,
+        "deep_scan": True,
+    }
+    _write_json(advanced, payload)
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+
+    with pytest.raises(loader.ConfigError, match="Removed analysis.prepass fields: deep_scan"):
+        loader.load_config()

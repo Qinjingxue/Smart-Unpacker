@@ -47,5 +47,5 @@ class TarAnalysisModule:
                                              damage_flags=damage_flags, evidence=list(result.get("evidence") or ["tar:header"]))],
                     details={**details, "route_evidence_flags": damage_flags},
                 ))
-        return combine_format_candidates("tar", evidences, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
+        return combine_format_candidates("tar", evidences, preserve_multiple=prepass.get("source") == "embedded_scan")
 register_analysis_module(TarAnalysisModule())

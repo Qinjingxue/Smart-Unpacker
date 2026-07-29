@@ -113,6 +113,48 @@ def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     assert {item.format for item in report.selected} == {"zip", "rar"}
 
 
+def test_analysis_defaults_to_shared_full_scan_when_head_and_tail_are_unresolved(tmp_path):
+    prefix = b"v" * (2 * 1024 * 1024)
+    zip_data = _zip_bytes(tmp_path)
+    suffix = b"v" * (2 * 1024 * 1024)
+    path = tmp_path / "middle_payload.mp4"
+    path.write_bytes(prefix + zip_data + suffix)
+
+    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+
+    zip_evidence = next(item for item in report.selected if item.format == "zip")
+    assert report.prepass["source"] == "embedded_scan"
+    assert report.prepass["full_scan_complete"] is True
+    assert zip_evidence.segments[0].start_offset == len(prefix)
+
+
+def test_analysis_respects_shared_embedded_scan_switch(tmp_path):
+    prefix = b"v" * (2 * 1024 * 1024)
+    path = tmp_path / "middle_payload.mp4"
+    path.write_bytes(prefix + _zip_bytes(tmp_path) + prefix)
+
+    report = ArchiveAnalysisScheduler({"embedded_scan": {"enabled": False}}).analyze_path(str(path))
+
+    assert report.selected == []
+    assert report.prepass.get("source") != "embedded_scan"
+
+
+def test_analysis_reuses_complete_detection_prepass_without_shared_rescan(tmp_path, monkeypatch):
+    path = tmp_path / "payload.bin"
+    payload = b"p" * (2 * 1024 * 1024) + _zip_bytes(tmp_path) + b"s" * (2 * 1024 * 1024)
+    path.write_bytes(payload)
+    scheduler = ArchiveAnalysisScheduler()
+    first = scheduler.analyze_path(str(path))
+    assert first.prepass["source"] == "embedded_scan"
+
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("complete detection prepass must bypass the shared scanner")
+
+    monkeypatch.setattr("sunpack.analysis.scheduler.scan_embedded_archives", unexpected_scan)
+    reused = scheduler.analyze_path(str(path), initial_prepass=first.prepass)
+    assert reused.prepass == first.prepass
+
+
 def test_analysis_reuses_detection_hit_map_and_preserves_same_format_segments(tmp_path):
     first = _zip_bytes(tmp_path)
     second_path = tmp_path / "second.zip"
@@ -129,21 +171,21 @@ def test_analysis_reuses_detection_hit_map_and_preserves_same_format_segments(tm
     for name, signature in (("zip_local", b"PK\x03\x04"), ("zip_eocd", b"PK\x05\x06")):
         cursor = 0
         while (offset := payload.find(signature, cursor)) >= 0:
-            hits.append({"name": name, "offset": offset, "source": "detection_embedded_scan"})
+            hits.append({"name": name, "offset": offset, "source": "embedded_scan"})
             cursor = offset + 1
     prepass = {
         "hits": sorted(hits, key=lambda item: item["offset"]),
         "formats": ["zip"],
         "full_scan_complete": True,
         "full_scan_bytes": len(payload),
-        "source": "detection_embedded_scan",
+        "source": "embedded_scan",
     }
     report = ArchiveAnalysisScheduler().analyze_path(str(path), initial_prepass=prepass)
     zip_evidence = next(item for item in report.evidences if item.format == "zip")
     assert [segment.start_offset for segment in zip_evidence.segments] == [
         len(prefix), len(prefix) + len(first) + len(gap),
     ]
-    assert report.prepass["source"] == "detection_embedded_scan"
+    assert report.prepass["source"] == "embedded_scan"
 
 
 def test_analysis_scheduler_runs_fuzzy_binary_profile_before_structure(tmp_path):

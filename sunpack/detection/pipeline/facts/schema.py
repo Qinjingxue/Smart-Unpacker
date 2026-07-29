@@ -215,7 +215,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     "analysis.signature_prepass": {
         "type": "dict",
         "producer": "rules.precheck.embedded_payload_identity",
-        "description": "Reusable full-stream signature hit map produced by reliable embedded detection.",
+        "description": "Reusable full-stream candidate and signature map produced by the shared embedded scanner.",
     },
     "7z.structure": {
         "type": "dict",

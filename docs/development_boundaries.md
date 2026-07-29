@@ -153,7 +153,11 @@ contracts
 
 ### analysis
 
-`analysis` 是压缩包结构分析层。输入应是 detection 已筛出的候选或 relation 分卷组；输出格式证据、片段边界、置信度和损坏标记。分析层使用 Rust `AnalysisBinaryView`、signature prepass 和格式 probe；不保留 Python 文件读取/结构解析 fallback。
+`analysis` 是压缩包结构分析层。输入应是 detection 已筛出的候选或 relation 分卷组；输出格式证据、片段边界、置信度和损坏标记。分析层使用 Rust `AnalysisBinaryView`、signature prepass 和格式 probe；头尾未选出可解压结构时调用中立的 `sunpack.embedded` 完整扫描能力。Detection 已写入完整 prepass 时必须复用，不得重复扫描；不保留 Python 文件读取/结构解析 fallback。
+
+### embedded
+
+`embedded` 是 Detection 和 Analysis 共享的完整嵌入归档扫描能力层。它独占 native `scan_embedded_archives` 调用、返回值归一化、文件身份缓存以及 `EmbeddedScanResult -> prepass` 转换；不拥有候选授权、Detection decision 或 Analysis selected 策略。
 
 ### passwords
 
@@ -193,7 +197,7 @@ contracts
 
 `coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection→analysis→extraction→verification→postprocess 主流程，以及 analysis→extraction→verification→repair→analysis 循环。它还负责递归轮次、批量调度、资源 token、结构救援、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
 
-八个流程领域包禁止互相导入，也禁止反向导入 `coordinator`。跨阶段数据只能通过 `contracts` 传递。
+流程领域包禁止互相导入，也禁止反向导入 `coordinator`。`detection` 和 `analysis` 只允许依赖中立的 `embedded` 公共入口；跨阶段数据通过共享结果契约或 `contracts` 传递。
 
 ### support
 

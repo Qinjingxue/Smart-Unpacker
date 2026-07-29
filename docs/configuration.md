@@ -244,6 +244,16 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 | `thresholds.repair_confidence` | `float` | 保留给损坏/修复倾向判断的置信度参考。 |
 | `modules` | `list[dict]` | ZIP/RAR/7z/TAR/压缩流等结构模块开关和参数。 |
 
+完整 embedded 深扫由顶层共享配置控制：
+
+```json
+"embedded_scan": {
+  "enabled": true
+}
+```
+
+`embedded_scan.enabled` 默认为 `true`。Analysis 先执行低成本头尾 prepass；只有没有选出可解压结构时，才调用共享 Rust 全流 scanner。Detection 已经完成扫描时，Analysis 直接复用任务中的完整 prepass，不重复读取文件。完整深扫没有 Python fallback、扫描窗口或最大命中数配置。
+
 重要行为：
 
 - analysis 的中等置信度不再直接触发 repair。流程会先尝试 extraction，再由 verification 判断是否需要 repair。
@@ -391,7 +401,7 @@ print(sorted(get_repair_module_registry().all()))
 
 | 名称 | 作用 |
 | --- | --- |
-| `embedded_archive` | 对普通归档检测尚未解决且入选大小覆盖集的文件执行无扩展名嵌入归档深扫。 |
+| `embedded_archive` | 对普通归档检测尚未解决且入选大小覆盖集的文件调用共享 embedded scanner。 |
 | `scene_facts` | 识别游戏、程序、资源目录等场景。 |
 | `zip_structure` | 检查 ZIP local header。 |
 | `zip_eocd_structure` | 检查 ZIP EOCD 和 central directory。 |
@@ -407,11 +417,11 @@ print(sorted(get_repair_module_registry().all()))
 | --- | --- |
 | `deep_scan_single_candidate_ratio` | 单个未解决逻辑候选达到未解决候选总字节数的最低占比；默认 `0.3`。达到阈值的候选均执行可靠完整扫描。 |
 
-单候选占比决定“哪些逻辑候选获准执行整个 embedded payload precheck 模块”，不限制单个候选的读取范围。未获准的候选不会解析 PE、识别安装器或扫描嵌入归档。分卷只作为一个逻辑候选参与总大小计算，成员卷不会重复计数。获准后先识别 executable carrier；命中已知安装器会立即拒绝且不启动完整嵌入扫描。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位。一次 Rust 顺序读取同时查找所有支持格式；结构校验得到的命中图会传给 analysis，避免再次执行全流签名扫描。
+单候选占比决定“哪些逻辑候选获准执行整个 embedded payload precheck 模块”，不限制单个候选的读取范围。未获准的候选不会解析 PE、识别安装器或扫描嵌入归档。分卷只作为一个逻辑候选参与总大小计算，成员卷不会重复计数。获准后先识别 executable carrier；命中已知安装器会立即拒绝且不启动完整嵌入扫描。Detection 和 Analysis 共用 `sunpack.embedded` 的 Rust scanner、文件身份缓存和结果契约。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位；结构校验得到的候选和命中图会传给 Analysis，避免再次执行全流扫描。
 
 ## detection.rule_pipeline
 
-Detection 不调用完整 analysis scheduler 做确认。任意位置 embedding 只由递归控制器授权后的 `embedded_payload_identity` 执行；其他格式事实均由有界 Rust probe 产生。大文件压缩流只读取头尾窗口，ZIP 读取 EOCD 尾窗和有限目录项，7z/RAR/TAR 读取受配置上限约束的头部或条目。
+Detection 不调用完整 analysis scheduler 做确认。Detection 中的任意位置 embedding 由递归控制器授权后的 `embedded_payload_identity` 执行；绕过 Detection 的任务则由 Analysis 在头尾分析未解决时调用同一个 scanner。其他格式事实均由有界 Rust probe 产生。大文件压缩流只读取头尾窗口，ZIP 读取 EOCD 尾窗和有限目录项，7z/RAR/TAR 读取受配置上限约束的头部或条目。
 
 检测规则分两层：
 

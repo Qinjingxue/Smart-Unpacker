@@ -127,6 +127,9 @@
   "extraction": {
     "write_progress_manifest": false
   },
+  "embedded_scan": {
+    "enabled": true
+  },
   "analysis": {
     "enabled": true,
     "task_parallel": true,
@@ -140,11 +143,7 @@
     "prepass": {
       "enabled": true,
       "head_bytes": 1048576,
-      "tail_bytes": 1048576,
-      "full_scan_max_bytes": 0,
-      "deep_scan": false,
-      "full_scan_chunk_bytes": 4194304,
-      "full_scan_max_hits": 256
+      "tail_bytes": 1048576
     },
     "fuzzy": {
       "enabled": true,

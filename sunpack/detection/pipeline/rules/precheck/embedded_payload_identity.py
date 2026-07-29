@@ -6,6 +6,7 @@ from sunpack.contracts.rules import RuleEffect
 from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement
 from sunpack.detection.pipeline.rules.registry import register_rule
+from sunpack.embedded import embedded_result_from_dict
 
 
 DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO = 0.3
@@ -102,43 +103,7 @@ class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", offset)
         facts.set("file.embedded_archive_found", True)
-        facts.set("analysis.signature_prepass", _prepass_from_scan(analysis))
+        facts.set("analysis.signature_prepass", embedded_result_from_dict(analysis).to_prepass())
         return RuleEffect.accept(
             f"Validated embedded {primary.get('format') or 'archive'} payload at offset {offset}"
         )
-
-
-def _prepass_from_scan(analysis: dict[str, Any]) -> dict[str, Any]:
-    candidates = list(analysis.get("candidates") or [])
-    validated_formats = {str(item.get("format") or "") for item in candidates}
-    hit_format = {
-        "zip_local": "zip",
-        "zip_eocd": "zip",
-        "rar4": "rar",
-        "rar5": "rar",
-        "7z": "7z",
-        "gzip": "gzip",
-        "bzip2": "bzip2",
-        "xz": "xz",
-        "zstd": "zstd",
-        "tar_ustar": "tar",
-    }
-    hits = [
-        hit
-        for hit in list(analysis.get("hits") or [])
-        if hit_format.get(str(hit.get("name") or "")) in validated_formats
-    ]
-    return {
-        "hits": hits,
-        "formats": sorted(
-            {
-                str(item.get("format") or "")
-                for item in candidates
-                if item.get("format")
-            }
-        ),
-        "full_scan_bytes": int(analysis.get("read_bytes") or 0),
-        "full_scan_complete": bool(analysis.get("complete")),
-        "source": "detection_embedded_scan",
-        "embedded_candidates": candidates,
-    }

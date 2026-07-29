@@ -23,6 +23,7 @@ CONFIG_FIELD_PROVIDER_MODULES = (
     "sunpack.config.fields.cli",
     "sunpack.config.fields.coordinator",
     "sunpack.config.fields.detection",
+    "sunpack.config.fields.embedded",
     "sunpack.config.fields.extraction",
     "sunpack.config.fields.filesystem",
     "sunpack.config.fields.passwords",

@@ -19,6 +19,9 @@
   "pipeline": {
     "batch_window_seconds": 0
   },
+  "embedded_scan": {
+    "enabled": true
+  },
   "post_extract": {
     "archive_cleanup_mode": "r",
     "flatten_single_directory": true
