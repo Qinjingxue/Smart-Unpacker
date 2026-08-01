@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from sunpack.detection.input_planning import ArchiveInputPlanningStage
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse, PipelineTarget
 from sunpack.contracts.results import OutcomeKind, RunSummary
 from sunpack.contracts.run_context import RunContext
@@ -340,7 +340,10 @@ class _PipelineRuntime:
             module_executor_pool=self.analysis_capability_pool,
             workload_executor=self._execute_input_planning_workload,
         )
-        self.inspector = ArchiveInspector(config, executor_pool=self.analysis_capability_pool)
+        self.repair_inspection_service = RepairInspectionService(
+            config,
+            executor_pool=self.analysis_capability_pool,
+        )
         self.executor_pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="sunpack-task",
@@ -370,7 +373,7 @@ class _PipelineRuntime:
             self.resource_scheduler,
             self.rename_scheduler,
             config,
-            inspector=self.inspector,
+            repair_inspection_service=self.repair_inspection_service,
             progress_reporter=initial_reporter,
             executor_pool=self.executor_pool,
         )

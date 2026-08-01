@@ -13,7 +13,7 @@ from sunpack.config.loader import load_config
 from sunpack.analysis import ArchiveAnalyzer
 from sunpack.analysis.request import AnalysisRequest
 from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
-from sunpack.coordinator.detection_inspector import DetectionInspectOrchestrator
+from sunpack.coordinator.detection_diagnostics import DetectionDiagnostics
 from sunpack.support.json_format import to_json_text
 from sunpack.detection.options import DetectionOptions
 
@@ -44,10 +44,10 @@ def handle(args, ctx):
     config = load_config()
     effective_config = build_effective_config(config)
     detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
-    results = DetectionInspectOrchestrator(config, detection_options).inspect(target_paths)
+    results = DetectionDiagnostics(config, detection_options).collect(target_paths)
     all_items = [inspect_result_to_item(res) for res in results]
     if args.analyze:
-        analyses = _analysis_by_path(results, config)
+        analyses = _analysis_preview_by_path(results, config)
         for item in all_items:
             item["analysis"] = analyses.get(item["path"])
     all_items.sort(key=lambda item: item["path"].lower())
@@ -132,7 +132,7 @@ def handle(args, ctx):
     )
 
 
-def _analysis_by_path(results, config: dict) -> dict[str, dict]:
+def _analysis_preview_by_path(results, config: dict) -> dict[str, dict]:
     analyzer = ArchiveAnalyzer(config)
     output = {}
     for result in results:

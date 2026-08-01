@@ -14,7 +14,7 @@ SunPack主要功能是批量处理大量混乱压缩包，可以实现右键菜�
 | `extract`   | 扫描、解压、验证、修复循环、后处理。 |
 | `watch`     | 监控目录，发现稳定归档后自动解压                          |
 | `scan`      | 只生成候选任务，不修改文件。                              |
-| `inspect`   | 输出检测、analysis 和规则判定细节。                       |
+| `inspect`   | 输出 detection diagnostics、analysis preview 和规则判定细节。 |
 | `passwords` | 查看本次会参与尝试的密码列表。                            |
 
 详细参数见 [CLI 参数说明](docs/cli_parameters.md)。
@@ -59,7 +59,7 @@ app/config
                              ^                            |
                              |                            v
                             +---------- repair -----------+
-                                inspect ──> analysis
+                          repair_inspection ──> analysis
      -> postprocess
 ```
 

@@ -25,7 +25,7 @@ coordinator
   -> filesystem
   -> relations
   -> detection
-  -> inspect
+  -> repair_inspection
   -> extraction
   -> verification
   -> repair
@@ -42,7 +42,7 @@ analysis
   -> native binary view/probes and embedded scanner
   -> neutral contracts/result objects
 
-inspect
+repair_inspection
   -> analysis public capabilities
   -> contracts.ArchiveTask / ArchiveState
 
@@ -102,7 +102,7 @@ contracts
 | 候选编排 | `coordinator.task_provider.ArchiveTaskProvider` | 串联 filesystem、relations、detection 和结构救援。 |
 | 递归策略 | `coordinator.output_scan_policy.NestedOutputScanPolicy` | 判断输出目录是否进入下一轮扫描。 |
 | 通用归档分析 | `analysis.ArchiveAnalyzer` | 提供无业务调度的格式、结构、边界、fuzzy 和 embedded 分析能力。 |
-| 修复检查反馈 | `inspect.ArchiveInspector` | 在 repair loop 中分析当前/patch 后状态并投影 inspection feedback。 |
+| 修复检查反馈 | `repair_inspection.RepairInspectionService` | 在 repair loop 中分析当前/patch 后状态并投影 inspection feedback。 |
 | 输入规划 | `detection.input_planning.ArchiveInputPlanningStage` | 把中立分析报告转换为主流程归档输入和 embedded 子任务。 |
 | 密码 | `sunpack.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档输出目录、密码解析、worker 解压。 |
@@ -160,11 +160,11 @@ contracts
 
 ### analysis
 
-`analysis` 是无业务策略的通用归档分析能力层。公共入口 `ArchiveAnalyzer` 接收 file、multi-volume、range 或 patched source 和 `AnalysisRequest`，输出格式证据、片段边界、置信度与损坏标记。它内部可以执行 signature prepass、fuzzy、格式 probe 和 embedded fallback，但不得依赖 `ArchiveTask`、Detection、Inspect、Repair 或 Coordinator，也不得写业务 knowledge。
+`analysis` 是无业务策略的通用归档分析能力层。公共入口 `ArchiveAnalyzer` 接收 file、multi-volume、range 或 patched source 和 `AnalysisRequest`，输出格式证据、片段边界、置信度与损坏标记。它内部可以执行 signature prepass、fuzzy、格式 probe 和 embedded fallback，但不得依赖 `ArchiveTask`、Detection、Repair Inspection、Repair 或 Coordinator，也不得写业务 knowledge。
 
-### inspect
+### repair_inspection
 
-`inspect` 只服务 repair loop。它把当前 `ArchiveTask`/`ArchiveState`（包括 patch stack）转换为 Analysis source，管理 repair 状态缓存，并把中立报告投影为 `inspection.*`、格式 evidence 和 `InspectionFeedback`。正常主流程不进入 Inspect；首次 repair diagnosis/job 构造前以及修复状态变化后必须刷新 Inspect。embedded scanner 已合并进 Analysis，不再存在独立领域层。
+`repair_inspection` 只服务 repair loop。它把当前 `ArchiveTask`/`ArchiveState`（包括 patch stack）转换为 Analysis source，管理 repair 状态缓存，并把中立报告投影为 `inspection.*`、格式 evidence 和 `RepairInspectionFeedback`。正常主流程不进入 Repair Inspection；首次 repair diagnosis/job 构造前以及修复状态变化后必须刷新 Repair Inspection。embedded scanner 已合并进 Analysis，不再存在独立领域层。
 
 ### passwords
 
@@ -202,9 +202,9 @@ contracts
 
 ### coordinator
 
-`coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection/input planning→extraction→verification→postprocess 主流程，以及 verification→inspect→repair→inspect 的反馈循环。它还负责递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
+`coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection/input planning→extraction→verification→postprocess 主流程，以及 verification→repair_inspection→repair→repair_inspection 的反馈循环。它还负责递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
 
-流程领域包禁止反向导入 `coordinator`。Detection 与 Inspect 只能调用 Analysis 公共能力；Analysis 不得反向依赖它们。跨阶段数据通过共享结果契约或 `contracts` 传递。
+流程领域包禁止反向导入 `coordinator`。Detection 与 Repair Inspection 只能调用 Analysis 公共能力；Analysis 不得反向依赖它们。跨阶段数据通过共享结果契约或 `contracts` 传递。
 
 ### support
 
@@ -264,8 +264,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 - app 是否仍只是 CLI 适配？
 - coordinator 是否仍只是编排？
 - relation 能力是否通过 `RelationsScheduler` 暴露？
-- analysis 是否仍是无业务调度的通用能力，detection/inspect 是否只通过公共入口调用？
-- 正常主流程是否不进入 inspect，repair 首轮是否先获得 inspection feedback？
+- analysis 是否仍是无业务调度的通用能力，detection/repair_inspection 是否只通过公共入口调用？
+- 正常主流程是否不进入 repair_inspection，repair 首轮是否先获得 inspection feedback？
 - verification 是否先于 repair 给出完整度、source integrity 和 repair 决策？
 - repair 是否通过 native I/O 处理二进制？
 - repair 候选是否重新进入 extraction + verification，而不是直接标记成功？
@@ -283,7 +283,7 @@ sunpack/
   detection/    候选检测、fact pipeline、规则判断、scene 策略
   extraction/   worker 解压黑盒和解压结果
   filesystem/   通用目录扫描、过滤和 watcher 监控能力
-  inspect/      repair loop 的归档状态检查与反馈投影
+  repair_inspection/  repair loop 的归档状态检查与反馈投影
   passwords/    密码候选、调度和 verifier
   postprocess/  解压成功后的清理和扁平化
   relations/    文件关系、分卷和候选组

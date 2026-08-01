@@ -9,7 +9,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
 from sunpack.postprocess.recovery_outputs import (
     cleanup_beam_evaluations,
@@ -127,7 +127,7 @@ class ExtractionBatchRunner:
         runtime_scheduler: ConcurrencyScheduler,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
-        inspector: ArchiveInspector | None = None,
+        repair_inspection_service: RepairInspectionService | None = None,
         progress_reporter: Any | None = None,
         executor_pool=None,
     ):
@@ -141,7 +141,7 @@ class ExtractionBatchRunner:
         self.i18n = I18nContext(cli_config.get("language"))
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
-        self.inspector = inspector or ArchiveInspector(self.config)
+        self.repair_inspection_service = repair_inspection_service or RepairInspectionService(self.config)
         self.progress_reporter = progress_reporter
         self.executor_pool = executor_pool
         self.progress_round_index = 1
@@ -607,7 +607,7 @@ class ExtractionBatchRunner:
 
     def _refresh_inspection_after_repair(self, task: ArchiveTask) -> None:
         try:
-            self.inspector.refresh_task(task)
+            self.repair_inspection_service.refresh_task(task)
         except Exception as exc:
             _append_repair_candidate_log(task, {
                 "phase": "inspection_refresh_failed",
@@ -617,7 +617,7 @@ class ExtractionBatchRunner:
     def _inspect_before_repair(self, task: ArchiveTask) -> None:
         """Populate repair evidence immediately before the first repair decision."""
         try:
-            feedback = self.inspector.refresh_task(task)
+            feedback = self.repair_inspection_service.refresh_task(task)
             _append_repair_candidate_log(task, {
                 "phase": "inspection_before_repair",
                 "feedback": feedback.to_score_payload(),
@@ -1264,7 +1264,7 @@ class ExtractionBatchRunner:
             extractor=self.extractor,
             verifier=self.verifier,
             repair_stage=self.repair_stage,
-            inspector=self.inspector,
+            repair_inspection_service=self.repair_inspection_service,
             runtime_scheduler=runtime_scheduler,
             light_verify=self._verify_beam_candidate_light,
             needs_full_verification=lambda candidate, light: self._beam_candidate_needs_full_verification(

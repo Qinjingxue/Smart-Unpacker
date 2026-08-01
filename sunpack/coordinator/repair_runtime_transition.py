@@ -12,7 +12,7 @@ from typing import Any, Callable
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 from sunpack.coordinator.verification_stage import verify_and_project
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
@@ -54,7 +54,7 @@ class RepairRuntimeTransitionEvaluator:
         extractor: ExtractionScheduler,
         verifier: VerificationScheduler,
         repair_stage: Any,
-        inspector: ArchiveInspector | None = None,
+        repair_inspection_service: RepairInspectionService | None = None,
         runtime_scheduler: Any = None,
         light_verify: Callable[[ArchiveTask, ExtractionResult], VerificationResult] | None = None,
         needs_full_verification: Callable[[RepairCandidate, VerificationResult], bool] | None = None,
@@ -63,7 +63,7 @@ class RepairRuntimeTransitionEvaluator:
         self.extractor = extractor
         self.verifier = verifier
         self.repair_stage = repair_stage
-        self.inspector = inspector
+        self.repair_inspection_service = repair_inspection_service
         self.runtime_scheduler = runtime_scheduler
         self.light_verify = light_verify
         self.needs_full_verification = needs_full_verification
@@ -97,10 +97,10 @@ class RepairRuntimeTransitionEvaluator:
                     self.record_candidate_repair(task, candidate, phase_timer=phase_timer)
             with _phase(phase_timer, "transition_apply_candidate", state_id=state_id, candidate_id=candidate_id):
                 self.apply_candidate_to_task(task, candidate, phase_timer=phase_timer)
-            if inspect_candidate and self.inspector is not None:
+            if inspect_candidate and self.repair_inspection_service is not None:
                 with _phase(phase_timer, "transition_inspect_candidate", state_id=state_id, candidate_id=candidate_id):
                     try:
-                        inspection_feedback = self.inspector.inspect_task(
+                        inspection_feedback = self.repair_inspection_service.feedback_for_task(
                             task,
                             use_cache=True,
                         ).to_score_payload()
@@ -109,9 +109,9 @@ class RepairRuntimeTransitionEvaluator:
                             "status": "error",
                             "error": str(exc),
                         }
-            if refresh_analysis and self.inspector is not None:
+            if refresh_analysis and self.repair_inspection_service is not None:
                 with _phase(phase_timer, "transition_inspection_refresh", state_id=state_id, candidate_id=candidate_id):
-                    self.inspector.refresh_task(
+                    self.repair_inspection_service.refresh_task(
                         task,
                         phase_timer=phase_timer,
                         phase_prefix="transition_inspection_refresh",

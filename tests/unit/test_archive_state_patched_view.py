@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange, ArchiveInputSegment
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
@@ -201,7 +201,7 @@ def test_analysis_reads_non_empty_patch_state(tmp_path):
     task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive), all_parts=[str(archive)], detected_ext="zip")
     task.set_archive_state(state)
 
-    report = ArchiveInspector({"analysis": {"fuzzy": {"enabled": False}}}).analyze_task(task)
+    report = RepairInspectionService({"analysis": {"fuzzy": {"enabled": False}}}).analyze_task(task)
 
     assert report.selected
     assert report.selected[0].format == "zip"

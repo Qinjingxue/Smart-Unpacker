@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 
 from sunpack.contracts.detection import FactBag
-from sunpack.coordinator.detection_inspector import DetectionInspectOrchestrator
+from sunpack.coordinator.detection_diagnostics import DetectionDiagnostics
 from sunpack.coordinator.task_provider import ArchiveTaskProvider, _select_single_candidate_ratio
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection import DetectionScheduler
@@ -63,7 +63,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             second = root / "game.part2.rar"
             first.write_bytes(b"one")
             second.write_bytes(b"two")
-            results = DetectionInspectOrchestrator(config_with_rules([])).inspect([str(root)])
+            results = DetectionDiagnostics(config_with_rules([])).collect([str(root)])
             split_result = next(result for result in results if result.fact_bag.get("file.logical_name") == "game")
             self.assertEqual(split_result.path, str(first))
             self.assertEqual(split_result.fact_bag.get("file.split_members"), [str(second)])

@@ -223,9 +223,9 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 | --- | --- | --- |
 | `write_progress_manifest` | `bool` | 是否把内部 progress manifest 写成输出目录中的 `.sunpack/extraction_manifest.json`；默认只保留在内存里供 verification/repair 使用。 |
 
-## input_planning / inspect / analysis
+## input_planning / repair_inspection / analysis
 
-三组配置分别对应业务输入规划、repair 检查缓存和通用分析能力。正常主流程由 Detection/input planner 调用 Analysis 形成 worker 输入；只有 repair loop 进入 Inspect。
+三组配置分别对应业务输入规划、repair 检查缓存和通用分析能力。正常主流程由 Detection/input planner 调用 Analysis 形成 worker 输入；只有 repair loop 进入 Repair Inspection。
 
 `input_planning` 字段：
 
@@ -236,7 +236,7 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 | `task_max_workers` | `int` | 批量 input planning worker 上限。 |
 | `cache_size` | `int` | request 级中立 Analysis report 缓存数量。 |
 
-`inspect.cache_size` 控制 repair 状态报告缓存数量。cache identity 包含 source identity、分卷、patch digest 和 inspection request，避免不同修复状态互相污染。
+`repair_inspection.cache_size` 控制 repair 状态报告缓存数量。cache identity 包含 source identity、分卷、patch digest 和 repair inspection request，避免不同修复状态互相污染。
 
 `analysis` 只配置单次通用能力调用：
 

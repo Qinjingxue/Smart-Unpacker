@@ -136,7 +136,7 @@
     "task_max_workers": 4,
     "cache_size": 512
   },
-  "inspect": {
+  "repair_inspection": {
     "cache_size": 512
   },
   "analysis": {

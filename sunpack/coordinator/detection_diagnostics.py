@@ -1,16 +1,19 @@
-from typing import List, Dict, Any
+"""Read-only detection diagnostics for the CLI inspect command."""
+
 from dataclasses import dataclass
+from typing import Any
 
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.detection.options import DetectionOptions
 
+
 @dataclass
-class DetectionInspectResult:
+class DetectionDiagnostic:
     path: str
     should_extract: bool
     score: int
     stop_reason: str
-    matched_rules: List[str]
+    matched_rules: list[str]
     detected_ext: str
     split_role: str
     fact_bag: object
@@ -20,11 +23,12 @@ class DetectionInspectResult:
     deciding_rule: str
     score_breakdown: list
 
-class DetectionInspectOrchestrator:
-    def __init__(self, config: Dict[str, Any], detection_options: DetectionOptions | None = None):
+
+class DetectionDiagnostics:
+    def __init__(self, config: dict[str, Any], detection_options: DetectionOptions | None = None):
         self.detector = ArchiveTaskProvider(config, detection_options=detection_options)
 
-    def inspect(self, paths: List[str]) -> List[DetectionInspectResult]:
+    def collect(self, paths: list[str]) -> list[DetectionDiagnostic]:
         results = []
 
         for detection in self.detector.detect_targets(paths):
@@ -36,7 +40,7 @@ class DetectionInspectOrchestrator:
 
             decision = detection.decision
 
-            results.append(DetectionInspectResult(
+            results.append(DetectionDiagnostic(
                 path=file_path_str,
                 should_extract=decision.should_extract,
                 score=decision.total_score,
@@ -51,5 +55,5 @@ class DetectionInspectOrchestrator:
                 deciding_rule=decision.deciding_rule or "",
                 score_breakdown=list(decision.score_breakdown or []),
             ))
-                
+
         return results

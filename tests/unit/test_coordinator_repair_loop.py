@@ -13,10 +13,10 @@ from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitio
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
-from sunpack.inspect import ArchiveInspector, InspectionFeedback
+from sunpack.repair_inspection import RepairInspectionFeedback, RepairInspectionService
 
 
-def test_inspector_reanalyzes_repaired_archive_input_file(tmp_path):
+def test_repair_inspection_reanalyzes_repaired_archive_input_file(tmp_path):
     source = tmp_path / "original.zip"
     repaired = tmp_path / "repaired.zip"
     source.write_bytes(b"broken")
@@ -30,7 +30,7 @@ def test_inspector_reanalyzes_repaired_archive_input_file(tmp_path):
     })
     engine = _RecordingAnalysisEngine()
 
-    ArchiveInspector(analyzer=ArchiveAnalyzer(engine=engine)).analyze_task(task)
+    RepairInspectionService(analyzer=ArchiveAnalyzer(engine=engine)).analyze_task(task)
 
     assert engine.paths == [str(repaired)]
 
@@ -184,11 +184,11 @@ class _FakeAnalysisStage:
         return [task]
 
 
-class _FakeInspector:
+class _FakeRepairInspectionService:
     def __init__(self):
         self.calls = 0
 
-    def inspect_task(self, task, use_cache=True):
+    def feedback_for_task(self, task, use_cache=True):
         self.calls += 1
         return type("Feedback", (), {
             "to_score_payload": lambda self: {
@@ -201,7 +201,7 @@ class _FakeInspector:
     def refresh_task(self, task):
         self.calls += 1
         task.fact_bag.set("inspection.status", "damaged")
-        return InspectionFeedback(status="damaged", format="zip", confidence=0.8)
+        return RepairInspectionFeedback(status="damaged", format="zip", confidence=0.8)
 
 
 class _FakeRepairStage:
@@ -219,12 +219,12 @@ def test_runtime_transition_can_shadow_inspect_candidate(tmp_path):
     source.write_bytes(b"broken")
     repaired.write_bytes(b"fixed")
     task = _task(source)
-    inspector = _FakeInspector()
+    repair_inspection_service = _FakeRepairInspectionService()
     evaluator = RepairRuntimeTransitionEvaluator(
         extractor=_ArchiveInputExtractor(),
         verifier=_FakeVerifier(),
         repair_stage=_FakeRepairStage(),
-        inspector=inspector,
+        repair_inspection_service=repair_inspection_service,
     )
     candidate = RepairCandidate(
         module_name="test_repair",
@@ -240,7 +240,7 @@ def test_runtime_transition_can_shadow_inspect_candidate(tmp_path):
         inspect_candidate=True,
     )
 
-    assert inspector.calls == 1
+    assert repair_inspection_service.calls == 1
     assert transition.inspection_feedback == {
         "status": "damaged",
         "format": "zip",
@@ -252,13 +252,13 @@ def test_repair_entry_refreshes_inspection_feedback(tmp_path):
     source = tmp_path / "broken.zip"
     source.write_bytes(b"broken")
     task = _task(source)
-    inspector = _FakeInspector()
+    repair_inspection_service = _FakeRepairInspectionService()
     runner = ExtractionBatchRunner.__new__(ExtractionBatchRunner)
-    runner.inspector = inspector
+    runner.repair_inspection_service = repair_inspection_service
 
     runner._inspect_before_repair(task)
 
-    assert inspector.calls == 1
+    assert repair_inspection_service.calls == 1
     assert task.fact_bag.get("inspection.status") == "damaged"
     assert task.knowledge().get("repair.candidate_log")[-1]["phase"] == "inspection_before_repair"
 

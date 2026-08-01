@@ -6,17 +6,17 @@ from collections import OrderedDict
 
 from sunpack.analysis.result import ArchiveAnalysisReport
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.inspect.request import InspectionRequest
+from sunpack.repair_inspection.request import RepairInspectionRequest
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
-class InspectionReportCache:
+class RepairInspectionCache:
     def __init__(self, max_entries: int = 512):
         self.max_entries = max(0, int(max_entries or 0))
         self._items: OrderedDict[tuple, ArchiveAnalysisReport] = OrderedDict()
         self._lock = threading.Lock()
 
-    def key(self, task: ArchiveTask, request: InspectionRequest) -> tuple:
+    def key(self, task: ArchiveTask, request: RepairInspectionRequest) -> tuple:
         state = task.archive_state()
         source = knowledge_view.source_fingerprint(task)
         return (

@@ -8,7 +8,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.detection.input_planning import ArchiveInputPlanningStage
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
@@ -333,7 +333,7 @@ def test_input_planner_understands_rar_patch_state_without_reading_carrier_prefi
     )
     task.set_archive_state(state)
 
-    report = ArchiveInspector().analyze_task(task)
+    report = RepairInspectionService().analyze_task(task)
 
     assert task.archive_state().effective_patch_digest() == state.effective_patch_digest()
     assert any(evidence.format == "rar" for evidence in report.evidences)

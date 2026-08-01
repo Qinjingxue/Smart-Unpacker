@@ -114,7 +114,7 @@ python sunpack.py scan D:\Downloads -v
 python sunpack.py inspect [options] <paths...>
 ```
 
-`inspect` 面向诊断：它会列出候选文件的判定结果、分数、决策阶段、停止原因、确认层结果和 fact 错误。
+`inspect` 是 CLI 的只读 detection diagnostics 命令：它会列出候选文件的判定结果、分数、决策阶段、停止原因、确认层结果和 fact 错误。它不同于 repair loop 内部的 `sunpack.repair_inspection` 层；后者不作为 CLI 命令暴露。
 
 使用 `-v` 时，文本输出会额外打印生效配置、命中规则、打分明细、确认层结果和 fact 错误；JSON 输出会保留这些结构化字段，便于对误判做回归用例。
 

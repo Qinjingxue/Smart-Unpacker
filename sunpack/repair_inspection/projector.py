@@ -9,7 +9,7 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 
 
-class InspectionProjector:
+class RepairStateProjector:
     """Project neutral Analysis reports into repair-facing task state."""
 
     def project(

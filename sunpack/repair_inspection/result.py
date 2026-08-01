@@ -6,7 +6,7 @@ from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 
 
 @dataclass(frozen=True, slots=True)
-class InspectionFeedback:
+class RepairInspectionFeedback:
     """Stable repair feedback derived from a neutral Analysis report."""
 
     status: str
@@ -18,7 +18,7 @@ class InspectionFeedback:
     report: ArchiveAnalysisReport | None = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def from_report(cls, report: ArchiveAnalysisReport) -> "InspectionFeedback":
+    def from_report(cls, report: ArchiveAnalysisReport) -> "RepairInspectionFeedback":
         selected = _best_selected(report)
         evidence = selected or _best_evidence(report)
         segments = list(getattr(evidence, "segments", None) or []) if evidence is not None else []

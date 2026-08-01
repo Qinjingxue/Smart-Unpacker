@@ -7,7 +7,7 @@ from pathlib import Path
 FORBIDDEN_PREFIXES = (
     "sunpack.coordinator",
     "sunpack.detection",
-    "sunpack.inspect",
+    "sunpack.repair_inspection",
     "sunpack.repair",
     "sunpack.contracts.tasks",
 )

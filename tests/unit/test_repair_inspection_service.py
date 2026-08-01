@@ -4,7 +4,7 @@ from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.inspect import ArchiveInspector
+from sunpack.repair_inspection import RepairInspectionService
 
 
 class _Analyzer:
@@ -17,7 +17,7 @@ class _Analyzer:
         return self.report
 
 
-def test_inspector_translates_report_to_repair_feedback_and_caches(tmp_path):
+def test_repair_inspection_translates_report_to_feedback_and_caches(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"PK")
     report = ArchiveAnalysisReport(
@@ -32,7 +32,7 @@ def test_inspector_translates_report_to_repair_feedback_and_caches(tmp_path):
         selected=[],
     )
     analyzer = _Analyzer(report)
-    inspector = ArchiveInspector(analyzer=analyzer)
+    service = RepairInspectionService(analyzer=analyzer)
     task = ArchiveTask(
         fact_bag=FactBag(),
         score=10,
@@ -41,8 +41,8 @@ def test_inspector_translates_report_to_repair_feedback_and_caches(tmp_path):
         detected_ext="zip",
     )
 
-    first = inspector.inspect_task(task)
-    second = inspector.inspect_task(task)
+    first = service.feedback_for_task(task)
+    second = service.feedback_for_task(task)
 
     assert first.format == "zip"
     assert first.status == "damaged"
@@ -58,7 +58,7 @@ def test_inspection_cache_distinguishes_patch_state(tmp_path):
     archive.write_bytes(b"PK")
     report = ArchiveAnalysisReport(path=str(archive), size=2, evidences=[], selected=[])
     analyzer = _Analyzer(report)
-    inspector = ArchiveInspector(analyzer=analyzer)
+    service = RepairInspectionService(analyzer=analyzer)
     task = ArchiveTask(
         fact_bag=FactBag(),
         score=10,
@@ -75,7 +75,7 @@ def test_inspection_cache_distinguishes_patch_state(tmp_path):
         format_hint=original.format_hint,
         knowledge=original.knowledge,
     ))
-    inspector.analyze_task(task)
+    service.analyze_task(task)
     first_digest = task.archive_state().effective_patch_digest()
     task.set_archive_state(ArchiveState(
         source=original.source,
@@ -84,7 +84,7 @@ def test_inspection_cache_distinguishes_patch_state(tmp_path):
         format_hint=original.format_hint,
         knowledge=original.knowledge,
     ))
-    inspector.analyze_task(task)
+    service.analyze_task(task)
 
     assert first_digest != task.archive_state().effective_patch_digest()
     assert len(analyzer.calls) == 2
@@ -114,7 +114,7 @@ def test_refresh_projects_feedback_into_task_and_archive_state(tmp_path):
         detected_ext="zip",
     )
 
-    feedback = ArchiveInspector(analyzer=_Analyzer(report)).refresh_task(task)
+    feedback = RepairInspectionService(analyzer=_Analyzer(report)).refresh_task(task)
 
     assert feedback.format == "zip"
     assert task.fact_bag.get("inspection.selected_format") == "zip"

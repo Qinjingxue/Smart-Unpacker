@@ -129,7 +129,7 @@ def main(argv=None):
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)
     # Extract is the latency-sensitive shell/context-menu path. Other commands
-    # retain full discovery because some inspection registrations are imported
+    # retain full discovery because some command registrations are imported
     # by companion command modules today.
     selected_command = "extract" if argv and argv[0] == "extract" else None
     parser = cached_cli_parser(ctx, command=selected_command)

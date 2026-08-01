@@ -6,7 +6,7 @@ from sunpack.analysis.request import AnalysisCapability, DEFAULT_ANALYSIS_CAPABI
 
 
 @dataclass(frozen=True, slots=True)
-class InspectionRequest:
+class RepairInspectionRequest:
     """Repair-owned request for feedback about one archive state."""
 
     capabilities: frozenset[AnalysisCapability] = field(
