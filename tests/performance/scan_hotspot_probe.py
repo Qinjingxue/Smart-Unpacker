@@ -226,6 +226,13 @@ def result_count(result: Any) -> int | None:
         return len(result)
     if isinstance(result, (list, set)):
         return len(result)
+    try:
+        return len(result)
+    except TypeError:
+        pass
+    iter_columns = getattr(result, "iter_columns", None)
+    if callable(iter_columns):
+        return sum(1 for _ in iter_columns())
     entries = getattr(result, "entries", None)
     if entries is not None:
         return len(entries)
@@ -359,7 +366,9 @@ def run_mode(mode: str, target: str, max_depth: int | None, config: dict) -> tup
         orchestrator = ScanOrchestrator(config)
         result = orchestrator.scan_targets([target_path])
         provider = orchestrator.task_scanner.provider
-        session = getattr(provider.detector, "_active_scan_session", None)
+        session = getattr(orchestrator.task_scanner, "last_scan_session", None)
+        if session is None:
+            session = getattr(provider.detector, "_active_scan_session", None)
         extra["tasks"] = len(result)
         extra["scan_session"] = summarize_scan_session(session)
         return result, extra

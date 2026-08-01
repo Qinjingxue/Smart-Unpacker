@@ -35,24 +35,33 @@ def rss() -> int:
 
 
 def summarize_snapshot(snapshot) -> dict:
-    entries = list(getattr(snapshot, "entries", []) or [])
     root = Path(getattr(snapshot, "root_path", Path.cwd()))
     top = Counter()
+    entries = 0
     files = dirs = 0
     total_size = 0
-    for entry in entries:
-        if entry.is_dir:
+    iter_columns = getattr(snapshot, "iter_columns", None)
+    if callable(iter_columns):
+        columns = iter_columns()
+    else:
+        columns = (
+            (entry.path, entry.is_dir, entry.size, getattr(entry, "mtime_ns", None))
+            for entry in (getattr(snapshot, "entries", []) or [])
+        )
+    for path, is_dir, size, _mtime_ns in columns:
+        entries += 1
+        if is_dir:
             dirs += 1
         else:
             files += 1
-            total_size += int(entry.size or 0)
+            total_size += int(size or 0)
         try:
-            rel = Path(entry.path).relative_to(root)
+            rel = Path(path).relative_to(root)
             top[rel.parts[0] if rel.parts else "."] += 1
         except ValueError:
             top["<outside>"] += 1
     return {
-        "entries": len(entries),
+        "entries": entries,
         "files": files,
         "dirs": dirs,
         "total_file_size_mib": round(mib(total_size), 1),
@@ -158,7 +167,10 @@ def cmd_evaluate_watch(target: str, rss_stop_mib: float | None) -> None:
         started = time.perf_counter()
         result = original_scan(self)
         elapsed = time.perf_counter() - started
-        entries = len(getattr(result, "entries", []) or [])
+        try:
+            entries = len(result)
+        except TypeError:
+            entries = sum(1 for _ in result.iter_columns())
         root = getattr(result, "root_path", "")
         if counts["DirectoryScanner.scan"] <= 20 or counts["DirectoryScanner.scan"] % 25 == 0:
             print(
