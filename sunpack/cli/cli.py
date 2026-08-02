@@ -128,10 +128,12 @@ def main(argv=None):
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)
-    # Extract is the latency-sensitive shell/context-menu path. Other commands
-    # retain full discovery because some command registrations are imported
-    # by companion command modules today.
-    selected_command = "extract" if argv and argv[0] == "extract" else None
+    # Extract and scan are latency-sensitive paths. Other commands retain full
+    # discovery because some command registrations are imported by companion
+    # command modules today.
+    selected_command = (
+        argv[0] if argv and argv[0] in {"extract", "scan"} else None
+    )
     parser = cached_cli_parser(ctx, command=selected_command)
     if not argv:
         parser.print_help()
