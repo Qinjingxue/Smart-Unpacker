@@ -1,7 +1,7 @@
 from typing import Any
 
 from sunpack.config.fields.cli import DEFAULT_CLI_LANGUAGE
-from sunpack.config.loader import load_effective_config_payload
+from sunpack.config.loader import load_raw_config_payload
 from sunpack.i18n import normalize_language
 
 
@@ -14,7 +14,7 @@ def normalize_cli_language(value: Any) -> str:
 
 def load_cli_language_from_config() -> str:
     try:
-        _config_path, payload = load_effective_config_payload()
+        _config_path, payload = load_raw_config_payload()
     except Exception:
         return DEFAULT_CLI_LANG
     cli_settings = payload.get("cli") if isinstance(payload, dict) else None

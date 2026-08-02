@@ -64,11 +64,12 @@ def normalize_config_value(path: Iterable[str], value: Any) -> Any:
     return field.normalize(field.default if value is None else value)
 
 
-def normalize_config(payload: dict[str, Any]) -> dict[str, Any]:
+def normalize_config(payload: dict[str, Any], *, validate: bool = True) -> dict[str, Any]:
     normalized = deepcopy(payload)
-    errors = validate_external_config(payload)
-    if errors:
-        raise ConfigSchemaError("; ".join(errors))
+    if validate:
+        errors = validate_external_config(payload)
+        if errors:
+            raise ConfigSchemaError("; ".join(errors))
     for field in config_fields().values():
         set_config_value(normalized, field.path, normalize_config_value(field.path, get_config_value(payload, field.path)))
     return normalized

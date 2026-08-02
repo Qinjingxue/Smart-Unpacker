@@ -86,6 +86,31 @@ def test_load_config_requires_external_verification_config(tmp_path, monkeypatch
         loader.load_effective_config_payload()
 
 
+def test_config_loaders_validate_external_schema_once(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+
+    original_validate = loader.validate_external_config
+    calls = []
+
+    def counted_validate(payload):
+        calls.append(payload)
+        return original_validate(payload)
+
+    monkeypatch.setattr(loader, "validate_external_config", counted_validate)
+    try:
+        for load in (loader.load_config, loader.load_effective_config_payload):
+            loader.clear_config_cache()
+            calls.clear()
+            load()
+            assert len(calls) == 1
+    finally:
+        loader.clear_config_cache()
+
+
 def test_effective_config_payload_returns_merged_external_config(tmp_path, monkeypatch):
     simple = tmp_path / "sunpack_config.json"
     advanced = tmp_path / "sunpack_advanced_config.json"
