@@ -30,6 +30,7 @@ from repair_training.formats.zip.source_material import (
 from repair_training.formats.zip.observability import apply_zip_observability
 from repair_training.data.taxonomy import normalize_damage_record
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -231,7 +232,10 @@ def observe_damage_runtime(
     observation = {
         "state_digest": observed_state.effective_patch_digest(),
         "patch_depth": observed_state.patch_depth(),
-        "analysis": _nested(knowledge, "analysis") or {},
+        "inspection": _nested(knowledge, "inspection") or {},
+        # Keep the historical observation key for existing datasets while making
+        # newly collected rows expose the canonical main-program namespace.
+        "analysis": _nested(knowledge, "inspection") or {},
         "format_zip_structure": _nested(knowledge, "format", "zip", "structure") or {},
         "extraction": _nested(knowledge, "extraction") or {},
         "verification": _nested(knowledge, "verification") or {},
@@ -568,20 +572,20 @@ def _apply_training_plugin_context(record: dict[str, Any], format_name: str, kno
     if plugin.collection_record_context is None:
         return knowledge_payload
     context = plugin.collection_record_context(record)
-    merged = dict(knowledge_payload)
+    merged = ArchiveKnowledge.from_any(knowledge_payload)
     for key, value in dict(context.get("payloads") or {}).items():
-        if key.startswith("format."):
-            fmt = key.split(".", 1)[1]
-            formats = dict(merged.get("format") or {})
-            formats[fmt] = value
-            merged["format"] = formats
+        if "." in key:
+            merged.set(key, value, source_layer="training", source_module=f"{format_name}_plugin")
         else:
-            merged[key] = value
-    flags = dict(merged.get("flags") or {})
-    flags.update(dict(context.get("flags") or {}))
-    if flags:
-        merged["flags"] = flags
-    return merged
+            merged.merge({key: value}, source_layer="training", source_module=f"{format_name}_plugin")
+    for namespace, values in dict(context.get("flags") or {}).items():
+        merged.add_flags(
+            str(namespace),
+            [str(item) for item in values or [] if str(item)],
+            source_layer="training",
+            source_module=f"{format_name}_plugin",
+        )
+    return merged.to_dict()
 
 
 def _enforce_single_field_target(record: dict[str, Any], target_payload: dict[str, Any]) -> dict[str, Any]:

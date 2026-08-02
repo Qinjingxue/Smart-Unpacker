@@ -32,13 +32,13 @@ def _task(path, *, parts=None, volumes=None):
     )
 
 
-def _report(path, evidence):
+def _report(path, evidence, *, prepass=None):
     return ArchiveAnalysisReport(
         path=str(path),
         size=100,
         evidences=[evidence],
         selected=[evidence],
-        prepass={"formats": [evidence.format]},
+        prepass=prepass or {"formats": [evidence.format]},
         read_bytes=32,
         cache_hits=1,
     )
@@ -124,6 +124,59 @@ def test_input_planning_stage_keeps_sfx_segment_for_standard_archive_extension(t
     assert segments[0]["archive_input"]["parts"][0]["path"] == str(archive)
     assert segments[0]["archive_input"]["parts"][0]["start"] == 7
     assert task.archive_input().open_mode == "file"
+
+
+def test_input_planning_stage_does_not_treat_native_zip_recovery_fragments_as_embedded(tmp_path):
+    archive = tmp_path / "damaged.zip"
+    archive.write_bytes(b"broken-prefix" + b"PK\x03\x04" + b"x" * 64)
+    evidence = ArchiveFormatEvidence(
+        format="zip",
+        confidence=0.94,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=13, end_offset=81, confidence=0.94)],
+        details={
+            "source": "embedded_scan",
+            "validation": "local_header_and_data_range",
+        },
+    )
+    report = _report(archive, evidence, prepass={
+        "source": "embedded_scan",
+        "formats": ["zip"],
+        "embedded_candidates": [{"format": "zip", "offset": 13}],
+    })
+    task = _task(archive)
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
+    stage.enabled = True
+    stage.analyzer = _FakeAnalyzer(report)
+
+    stage.plan_task(task)
+
+    assert task.fact_bag.get("archive.format_hint") == "zip"
+    assert knowledge_view.source_extractable_segments(task) == []
+
+
+def test_input_planning_stage_keeps_embedded_scan_ranges_for_neutral_carrier(tmp_path):
+    carrier = tmp_path / "carrier.bin"
+    carrier.write_bytes(b"carrier-data" + b"PK\x03\x04" + b"x" * 64)
+    evidence = ArchiveFormatEvidence(
+        format="zip",
+        confidence=0.94,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=12, end_offset=80, confidence=0.94)],
+        details={
+            "source": "embedded_scan",
+            "validation": "local_header_and_data_range",
+        },
+    )
+    report = _report(carrier, evidence, prepass={"source": "embedded_scan", "formats": ["zip"]})
+    task = _task(carrier)
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
+    stage.enabled = True
+    stage.analyzer = _FakeAnalyzer(report)
+
+    stage.plan_task(task)
+
+    assert len(knowledge_view.source_extractable_segments(task)) == 1
 
 
 def test_input_planning_stage_records_multiple_segments_on_original_task(tmp_path):

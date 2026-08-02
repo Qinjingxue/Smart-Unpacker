@@ -187,7 +187,7 @@ class _RuntimeTeacherContext:
                 write_zip_runtime_evidence_facts(task)
             except Exception:
                 pass
-            knowledge = task.knowledge.to_dict()
+            knowledge = task.knowledge().to_dict()
             verification = knowledge.get("verification") if isinstance(knowledge.get("verification"), dict) else {}
             verification["summary"] = dict(recovery.verification or {})
             knowledge["verification"] = verification

@@ -362,6 +362,14 @@ class ArchiveInputPlanningStage:
                 )
 
     def _extractable_segments(self, report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
+        if _is_damaged_native_archive_fallback(report):
+            # The embedded scanner also acts as a last-resort ZIP local-header
+            # scanner.  For a native archive, those ranges are recovery
+            # fragments, not independent embedded archives.  Sending them to
+            # the embedded extractor bypasses verification and the repair
+            # policy, and can incorrectly report a partial salvage as a
+            # complete extraction.
+            return []
         candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]] = []
         index = 1
         for evidence in sorted(report.selected, key=lambda item: item.confidence, reverse=True):
@@ -628,6 +636,27 @@ _COMPOSITE_INNER_FORMATS = {
     "tar.xz": {"tar", "xz"},
     "tar.zst": {"tar", "zstd"},
 }
+
+
+_NATIVE_ARCHIVE_EXTENSIONS = {
+    "zip": {".zip", ".zipx"},
+    "rar": {".rar"},
+    "7z": {".7z"},
+}
+
+
+def _is_damaged_native_archive_fallback(report: ArchiveAnalysisReport) -> bool:
+    prepass = report.prepass if isinstance(report.prepass, dict) else {}
+    if str(prepass.get("source") or "") != "embedded_scan":
+        return False
+    suffix = os.path.splitext(str(report.path or ""))[1].lower()
+    if not suffix:
+        return False
+    return any(
+        suffix in _NATIVE_ARCHIVE_EXTENSIONS.get(str(evidence.format or "").lower(), set())
+        and str((evidence.details or {}).get("source") or "") == "embedded_scan"
+        for evidence in report.selected
+    )
 
 
 def _whole_file_composite_segments(report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment]]:

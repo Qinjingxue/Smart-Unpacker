@@ -6,7 +6,7 @@ from pathlib import Path
 import repair_training.data.collection as collect_damage_rows_module
 from repair_training.data.material import attach_split_volumes
 from sunpack.repair.model.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
-from repair_training.data.collection import collect_damage_row
+from repair_training.data.collection import _apply_training_plugin_context, collect_damage_row
 from repair_training.formats.zip.corruption import build_corpus_corruption_case
 from repair_training.formats.zip.observability import apply_zip_observability
 from repair_training.formats.zip.plugin import damage_feature_spec
@@ -29,6 +29,28 @@ def _write_source_zip(path: Path) -> None:
         archive.writestr("alpha.txt", b"alpha" * 80)
         archive.writestr("beta.txt", b"beta" * 80)
         archive.writestr("gamma.txt", b"gamma" * 80)
+
+
+def test_training_plugin_context_preserves_canonical_source_input():
+    source_input = {"kind": "file", "path": "damaged.zip", "format_hint": "zip"}
+    knowledge = {
+        "source": {"input": source_input},
+        "inspection": {"summary": {"format": "zip", "confidence": 0.9}},
+    }
+    record = {
+        "sample_id": "sample",
+        "damage_profile": "unit",
+        "damaged_input": source_input,
+        "source_derivation": {"method": "deflate"},
+        "runtime_damage_flags": ["central_directory_bad"],
+    }
+
+    merged = _apply_training_plugin_context(record, "zip", knowledge)
+
+    assert merged["source"]["input"] == source_input
+    assert merged["source"]["derivation"] == {"method": "deflate"}
+    assert merged["inspection"]["summary"]["format"] == "zip"
+    assert isinstance(merged["format"]["zip"]["route_evidence_flags"], list)
 
 
 def _profile_case(tmp_path: Path, profile: str):
