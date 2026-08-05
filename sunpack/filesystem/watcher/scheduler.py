@@ -43,6 +43,7 @@ from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonito
 from sunpack.passwords.internal.lists import dedupe_passwords
 from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
 from sunpack.support.output_paths import default_output_dir_for_task
+from sunpack.support.path_keys import path_key
 from sunpack.support.collections import dedupe_normalized_paths
 from sunpack.support.archive_sessions import release_archive_sessions_under
 
@@ -302,13 +303,18 @@ class WatchScheduler:
                 os.path.normcase(os.path.abspath(path))
                 for path in self._pending
             } | self._inflight_path_keys_locked()
-        dispatches, waiting = plan_watch_dispatches(
+        dispatches, waiting, deferred = plan_watch_dispatches(
             ready,
             active_paths=active_paths,
             coordinator=self.group_coordinator,
             state=self.state,
             prepare_candidate=self._prepare_group_head,
         )
+        for candidate in deferred:
+            # A different member of this split group is still pending or in
+            # flight.  Preserve this content event so the changed group
+            # fingerprint is reconsidered after that request is harvested.
+            self.enqueue(candidate.path, force=True, event_type="modified")
         for snapshot in waiting:
             self.log.write(
                 "split_group_suspended",
@@ -990,7 +996,7 @@ class WatchScheduler:
         self._remember_recent_output_roots(generated_output_dirs)
         self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
-            self.state.record_group_done(group)
+            self.state.record_group_done(self._current_group_snapshot(group, candidate.path))
         self.state.mark(
             candidate.path,
             candidate.size,
@@ -1001,6 +1007,19 @@ class WatchScheduler:
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
+
+    def _current_group_snapshot(
+        self,
+        submitted: WatchGroupSnapshot,
+        candidate_path: str,
+    ) -> WatchGroupSnapshot:
+        """Use the latest group fingerprint after a successful async request."""
+
+        resolved = self.group_coordinator.resolve_paths([candidate_path])
+        current = resolved.get(path_key(candidate_path))
+        if current is not None and current.group_id == submitted.group_id:
+            return current
+        return submitted
 
     def _common_root_for(self, path: str) -> str:
         path = os.path.abspath(path)

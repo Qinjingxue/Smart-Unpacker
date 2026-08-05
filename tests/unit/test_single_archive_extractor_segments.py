@@ -6,6 +6,13 @@ from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
+from sunpack.verification.scheduler import VerificationScheduler
+from sunpack.contracts.verification import (
+    ASSESSMENT_COMPLETE,
+    CONTENT_INTEGRITY_VERIFIED_COMPLETE,
+    CONTAINER_INTEGRITY_UNKNOWN,
+    DECISION_ACCEPT,
+)
 from sunpack_native import worker_manifest_from_rows
 
 
@@ -160,6 +167,71 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
 
 
+def test_verifier_accepts_carrier_when_every_embedded_payload_is_complete(tmp_path):
+    carrier = tmp_path / "carrier.exe"
+    carrier.write_bytes(b"arbitrary-stub-and-overlay")
+    task = _task(carrier)
+    write_source_extractable_segments(task, [
+        {
+            "segment_id": "embedded_01_zip",
+            "format": "zip",
+            "logical_name": "payload_zip",
+            "archive_input": {
+                "kind": "archive_input",
+                "entry_path": str(carrier),
+                "open_mode": "file_range",
+                "format_hint": "zip",
+                "logical_name": "payload_zip",
+                "parts": [{"path": str(carrier), "role": "main", "start": 3, "end": 8}],
+            },
+        },
+        {
+            "segment_id": "embedded_02_rar",
+            "format": "rar",
+            "logical_name": "payload_rar",
+            "archive_input": {
+                "kind": "archive_input",
+                "entry_path": str(carrier),
+                "open_mode": "file_range",
+                "format_hint": "rar",
+                "logical_name": "payload_rar",
+                "parts": [{"path": str(carrier), "role": "main", "start": 12, "end": 20}],
+            },
+        },
+    ])
+    extractor = SingleArchiveExtractor(
+        seven_z_path="7z",
+        password_store=_FakePasswordStore(),
+        password_resolver=_FakePasswordResolver(),
+        metadata_scanner=ArchiveMetadataScanner(),
+        rename_scheduler=_FakeRenameScheduler(),
+        ensure_space=lambda _gb: True,
+        retry_policy=_FakeRetryPolicy(),
+        split_entry_resolver=_FakeSplitEntryResolver(),
+        sevenzip_runner=_FakeSevenZipRunner(),
+        best_effort=True,
+    )
+
+    extraction = extractor.extract(task, str(tmp_path / "out"))
+    verification = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [{"name": "archive_test_crc"}],
+        },
+    }).verify(task, extraction)
+
+    assert verification.decision_hint == DECISION_ACCEPT
+    assert verification.assessment_status == ASSESSMENT_COMPLETE
+    assert verification.content_integrity == CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    assert verification.container_integrity == CONTAINER_INTEGRITY_UNKNOWN
+    assert verification.archive_coverage.expected_files == 2
+    assert verification.archive_coverage.complete_files == 2
+    assert [
+        item["decision_hint"]
+        for item in verification.repair_hints["embedded_payload_verifications"]
+    ] == [DECISION_ACCEPT, DECISION_ACCEPT]
+
+
 def test_single_embedded_segment_exposes_logical_input_for_verification(tmp_path):
     carrier = tmp_path / "carrier.exe"
     carrier.write_bytes(b"stub-zip-tail")
@@ -196,8 +268,11 @@ def test_single_embedded_segment_exposes_logical_input_for_verification(tmp_path
     assert result.success is True
     assert (tmp_path / "out" / "zip.txt").exists()
     assert not (tmp_path / "out" / "embedded_01_zip").exists()
-    assert result.diagnostics["verification_archive_input"] == archive_input
-    assert result.diagnostics["result"]["verified_manifest"]["validated"] is True
+    assert len(result.embedded_results) == 1
+    segment, segment_result = result.embedded_results[0]
+    assert segment["archive_input"] == archive_input
+    assert segment_result.diagnostics["verification_archive_input"] == archive_input
+    assert segment_result.diagnostics["result"]["verified_manifest"]["validated"] is True
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
 
 

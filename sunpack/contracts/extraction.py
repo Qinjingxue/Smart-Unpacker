@@ -24,3 +24,7 @@ class ExtractionResult:
     output_inventory_payload: dict[str, Any] | None = None
     files_written: int = 0
     bytes_written: int = 0
+    # In-process child results for carriers containing independent archives.
+    # These retain native output inventories for the normal verifier without
+    # expanding per-file tables into the persisted outer diagnostics.
+    embedded_results: list[tuple[dict[str, Any], "ExtractionResult"]] = field(default_factory=list)

@@ -6,7 +6,7 @@ from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.verification.evidence import build_verification_evidence
 from sunpack.verification.knowledge import write_verification_result
-from sunpack.verification.pipeline import VerificationPipeline
+from sunpack.verification.pipeline import VerificationPipeline, aggregate_payload_verifications
 from sunpack.contracts.verification import (
     ASSESSMENT_DISABLED,
     DECISION_ACCEPT,
@@ -25,6 +25,39 @@ class VerificationScheduler:
         self.password_session = password_session
 
     def verify(self, task: ArchiveTask, extraction_result: ExtractionResult, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "verify") -> VerificationResult:
+        embedded_results = list(extraction_result.embedded_results or [])
+        if embedded_results:
+            payloads = []
+            for index, (segment, segment_result) in enumerate(embedded_results, start=1):
+                payloads.append((
+                    segment,
+                    self._verify_one(
+                        task,
+                        segment_result,
+                        phase_timer=phase_timer,
+                        phase_prefix=f"{phase_prefix}_embedded_{index}",
+                    ),
+                ))
+            result = aggregate_payload_verifications(payloads)
+        else:
+            result = self._verify_one(
+                task,
+                extraction_result,
+                phase_timer=phase_timer,
+                phase_prefix=phase_prefix,
+            )
+        with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
+            write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
+        return result
+
+    def _verify_one(
+        self,
+        task: ArchiveTask,
+        extraction_result: ExtractionResult,
+        *,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "verify",
+    ) -> VerificationResult:
         with _phase(phase_timer, f"{phase_prefix}_build_evidence"):
             evidence = build_verification_evidence(
                 task,
@@ -45,8 +78,6 @@ class VerificationScheduler:
                     decision_hint=DECISION_REQUEST_PASSWORD if password_failure else DECISION_REPAIR,
                     repair_hints=dict(evidence.repair_hints),
                 )
-                with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-                    write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
                 return result
             result = VerificationResult(
                 completeness=1.0,
@@ -58,8 +89,6 @@ class VerificationScheduler:
                 decision_hint=DECISION_ACCEPT,
                 repair_hints=dict(evidence.repair_hints),
             )
-            with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-                write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
             return result
         with _phase(phase_timer, f"{phase_prefix}_pipeline"):
             result = VerificationPipeline(self.config).run(
@@ -67,8 +96,6 @@ class VerificationScheduler:
                 phase_timer=phase_timer,
                 phase_prefix=f"{phase_prefix}_pipeline",
             )
-        with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-            write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
         return result
 
     def _verification_config(self, config: dict[str, Any]) -> dict:

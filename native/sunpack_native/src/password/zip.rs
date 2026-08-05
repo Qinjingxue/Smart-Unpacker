@@ -256,6 +256,11 @@ fn verify_zip_stream<R: Read + Seek>(
     if let Ok(Some(header)) = locate_encrypted_entry_from_central_directory(file, total_len) {
         return verify_zip_header(py, file, candidates, &header);
     }
+    // Central-directory probing leaves the shared/range reader near the end.
+    // Rewind before the bounded local-header fallback; otherwise an
+    // unencrypted ZIP (or an inconclusive central scan) reads from EOF and
+    // leaks `failed to fill whole buffer` into the watch completion path.
+    file.seek(SeekFrom::Start(0))?;
     let scan_len = total_len.min(MAX_PREFIX_SCAN as u64) as usize;
     let mut prefix = vec![0u8; scan_len];
     file.read_exact(&mut prefix)?;

@@ -712,6 +712,7 @@ class SingleArchiveExtractor:
                 if key.startswith("archive.")
             }
         segment_results: list[dict[str, Any]] = []
+        embedded_results: list[tuple[dict[str, Any], ExtractionResult]] = []
         password_used = None
         selected_codepage = None
         any_success = False
@@ -750,6 +751,10 @@ class SingleArchiveExtractor:
                     phase_timer=phase_timer,
                     phase_prefix=f"{phase_prefix}_segment_extract",
                 )
+                result.diagnostics = {
+                    **dict(result.diagnostics or {}),
+                    "verification_archive_input": dict(segment.get("archive_input") or {}),
+                }
             finally:
                 with _phase(phase_timer, f"{phase_prefix}_segment_restore_archive_facts"):
                     self._restore_archive_facts(task, saved_archive_facts)
@@ -769,6 +774,11 @@ class SingleArchiveExtractor:
                 } if segment_inventory is not None else self._directory_stats(segment_dir)
             segment_success = bool(result.success)
             segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
+            embedded_results.append(({
+                **dict(segment),
+                "success": segment_success,
+                "partial_outputs": segment_partial,
+            }, result))
             any_success = any_success or segment_success
             any_partial = any_partial or segment_partial
             if result.failure is not None:
@@ -787,6 +797,8 @@ class SingleArchiveExtractor:
                 "partial_outputs": segment_partial,
                 "error": result.error,
                 "failure": result.failure.to_dict() if result.failure is not None else None,
+                "password_used": result.password_used,
+                "selected_codepage": result.selected_codepage,
                 "diagnostics": dict(result.diagnostics or {}),
                 "progress_manifest": result.progress_manifest,
                 "files_written": stats["file_count"],
@@ -799,9 +811,10 @@ class SingleArchiveExtractor:
                 "file_count": output_inventory.stats.file_count,
                 "total_bytes": output_inventory.stats.total_size,
             }
+        all_success = bool(segment_results) and all(item.get("success") for item in segment_results)
         diagnostics = {
             "result": {
-                "status": "ok" if any_success else ("partial" if any_partial else "failed"),
+                "status": "ok" if all_success else ("partial" if any_success or any_partial else "failed"),
                 "embedded_segment_count": len(segment_results),
                 "embedded_success_count": sum(1 for item in segment_results if item.get("success")),
                 "files_written": totals["file_count"],
@@ -810,31 +823,6 @@ class SingleArchiveExtractor:
             },
             "embedded_segments": segment_results,
         }
-        successful_segments = [item for item in segment_results if item.get("success")]
-        if len(segment_results) == 1 and len(successful_segments) == 1:
-            # Verification must inspect the logical embedded archive rather
-            # than the SFX carrier.  In particular, an executable carrier is
-            # intentionally not extractable as ZIP itself and would otherwise
-            # downgrade a fully verified embedded ZIP to partial success.
-            verification_input = successful_segments[0].get("archive_input")
-            if isinstance(verification_input, dict):
-                diagnostics["verification_archive_input"] = dict(verification_input)
-            segment_diagnostics = successful_segments[0].get("diagnostics")
-            segment_worker_result = (
-                segment_diagnostics.get("result")
-                if isinstance(segment_diagnostics, dict)
-                and isinstance(segment_diagnostics.get("result"), dict)
-                else {}
-            )
-            verified_manifest = segment_worker_result.get("verified_manifest")
-            if isinstance(verified_manifest, dict):
-                # The extraction transaction already verified the encrypted
-                # embedded payload with the selected password.  Preserve that
-                # stronger evidence at the logical task boundary instead of
-                # re-probing the SFX carrier without the segment context.
-                diagnostics["result"]["verified_manifest"] = dict(verified_manifest)
-                if segment_worker_result.get("archive_type"):
-                    diagnostics["result"]["archive_type"] = segment_worker_result["archive_type"]
         if any_success:
             manifest_path = ""
             manifest_payload = None
@@ -858,12 +846,13 @@ class SingleArchiveExtractor:
                 password_used=password_used,
                 selected_codepage=selected_codepage,
                 diagnostics=diagnostics,
-                partial_outputs=any_partial and not all(item.get("success") for item in segment_results),
+                partial_outputs=not all_success,
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
                 output_inventory=output_inventory,
                 files_written=totals["file_count"],
                 bytes_written=totals["total_bytes"],
+                embedded_results=embedded_results,
             )
         self._log(self.i18n.t("extract.log.embedded_failed", archive=archive))
         password_failure = any(failure.is_password_failure for failure in segment_failures)
@@ -878,7 +867,7 @@ class SingleArchiveExtractor:
             causes=tuple(segment_failures),
             details={"segment_count": len(segment_results)},
         )
-        return self._failed(
+        failed_result = self._failed(
             archive,
             out_dir,
             all_parts,
@@ -893,6 +882,8 @@ class SingleArchiveExtractor:
             },
             partial_outputs=any_partial,
         )
+        failed_result.embedded_results = embedded_results
+        return failed_result
 
     @staticmethod
     def _safe_segment_dir_name(segment_id: str, position: int, fmt: str) -> str:

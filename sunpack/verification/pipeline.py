@@ -28,8 +28,11 @@ from sunpack.contracts.verification import (
     CONTAINER_INTEGRITY_NONCANONICAL,
     CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED,
     CONTAINER_INTEGRITY_UNKNOWN,
+    VERIFICATION_STRENGTH_CRC,
     VERIFICATION_STRENGTH_EXTRACTION,
+    VERIFICATION_STRENGTH_MANIFEST,
     VERIFICATION_STRENGTH_NONE,
+    VERIFICATION_STRENGTH_ORACLE,
     ArchiveCoverageSummary,
     FileVerificationObservation,
     VerificationIssue,
@@ -244,6 +247,194 @@ class VerificationPipeline:
             file_observations=file_observations,
             repair_hints=dict(repair_hints or {}),
         )
+
+
+def aggregate_payload_verifications(
+    payloads: list[tuple[dict[str, Any], VerificationResult]],
+) -> VerificationResult:
+    """Aggregate independently verified embedded archives as one logical payload.
+
+    Carrier bytes are deliberately outside this aggregate.  A carrier is fully
+    successful when every planned embedded archive is accepted by the existing
+    verification pipeline; its executable stub or unrelated overlay does not
+    downgrade payload integrity.
+    """
+
+    if not payloads:
+        return VerificationResult(
+            completeness=0.0,
+            recoverable_upper_bound=0.0,
+            assessment_status=ASSESSMENT_UNUSABLE,
+            decision_hint=DECISION_FAIL,
+        )
+
+    results = [verification for _segment, verification in payloads]
+    decisions = [
+        (
+            verification.decision_hint
+            if bool(segment.get("success"))
+            or verification.decision_hint != DECISION_ACCEPT
+            else DECISION_REPAIR
+        )
+        for segment, verification in payloads
+    ]
+    all_complete = all(decision == DECISION_ACCEPT for decision in decisions)
+    any_usable = any(
+        decision == DECISION_ACCEPT
+        or (decision == DECISION_ACCEPT_PARTIAL and bool(segment.get("partial_outputs")))
+        for (segment, _verification), decision in zip(payloads, decisions)
+    )
+    if all_complete:
+        decision_hint = DECISION_ACCEPT
+        assessment_status = ASSESSMENT_COMPLETE
+    elif any_usable:
+        decision_hint = DECISION_ACCEPT_PARTIAL
+        assessment_status = ASSESSMENT_PARTIAL
+    elif DECISION_REQUEST_PASSWORD in decisions:
+        decision_hint = DECISION_REQUEST_PASSWORD
+        assessment_status = ASSESSMENT_UNUSABLE
+    elif DECISION_REPAIR in decisions or DECISION_RETRY_EXTRACT in decisions:
+        decision_hint = DECISION_REPAIR
+        assessment_status = ASSESSMENT_UNUSABLE
+    else:
+        decision_hint = DECISION_FAIL
+        assessment_status = ASSESSMENT_UNUSABLE
+
+    weights = [_payload_verification_weight(result) for result in results]
+    total_weight = sum(weights)
+    completeness = 1.0 if all_complete else sum(
+        _clamp01(result.completeness) * weight
+        for result, weight in zip(results, weights)
+    ) / total_weight
+    recoverable_upper_bound = sum(
+        _clamp01(result.recoverable_upper_bound) * weight
+        for result, weight in zip(results, weights)
+    ) / total_weight
+
+    content_integrities = [result.content_integrity for result in results]
+    if CONTENT_INTEGRITY_PAYLOAD_DAMAGED in content_integrities:
+        content_integrity = CONTENT_INTEGRITY_PAYLOAD_DAMAGED
+    elif CONTENT_INTEGRITY_VERIFIED_PARTIAL in content_integrities or not all_complete:
+        content_integrity = CONTENT_INTEGRITY_VERIFIED_PARTIAL if any_usable else CONTENT_INTEGRITY_UNKNOWN
+    elif all(item == CONTENT_INTEGRITY_VERIFIED_COMPLETE for item in content_integrities):
+        content_integrity = CONTENT_INTEGRITY_VERIFIED_COMPLETE
+    else:
+        content_integrity = CONTENT_INTEGRITY_UNKNOWN
+
+    strength_order = {
+        VERIFICATION_STRENGTH_NONE: 0,
+        VERIFICATION_STRENGTH_EXTRACTION: 1,
+        VERIFICATION_STRENGTH_MANIFEST: 2,
+        VERIFICATION_STRENGTH_CRC: 3,
+        VERIFICATION_STRENGTH_ORACLE: 4,
+    }
+    verification_strength = min(
+        (result.verification_strength for result in results),
+        key=lambda item: strength_order.get(item, 0),
+    )
+    coverage = _aggregate_payload_coverage(payloads, completeness)
+    output_file_count = sum(result.output_file_count for result in results)
+    output_total_bytes = sum(result.output_total_bytes for result in results)
+    output_quality_score = sum(
+        _clamp01(result.output_quality_score) * weight
+        for result, weight in zip(results, weights)
+    ) / total_weight
+    output_confidence = min((result.output_confidence for result in results), default=0.0)
+    segment_summaries = [
+        {
+            "segment_id": str(segment.get("segment_id") or ""),
+            "format": str(segment.get("format") or ""),
+            "logical_name": str(segment.get("logical_name") or ""),
+            "decision_hint": decision,
+            "verification_decision_hint": verification.decision_hint,
+            "assessment_status": verification.assessment_status,
+            "content_integrity": verification.content_integrity,
+            "verification_strength": verification.verification_strength,
+            "completeness": verification.completeness,
+        }
+        for (segment, verification), decision in zip(payloads, decisions)
+    ]
+    repair_hints = next((
+        dict(verification.repair_hints)
+        for (segment, verification), decision in zip(payloads, decisions)
+        if decision != DECISION_ACCEPT and verification.repair_hints
+    ), {})
+    repair_hints["embedded_payload_verifications"] = segment_summaries
+    return VerificationResult(
+        methods_run=list(dict.fromkeys(method for result in results for method in result.methods_run)),
+        issues=[issue for result in results for issue in result.issues],
+        steps=[step for result in results for step in result.steps],
+        completeness=completeness,
+        recoverable_upper_bound=recoverable_upper_bound,
+        assessment_status=assessment_status,
+        content_integrity=content_integrity,
+        # This result describes archive payloads, not the physical carrier.
+        container_integrity=CONTAINER_INTEGRITY_UNKNOWN,
+        verification_strength=verification_strength,
+        total_item_count=sum(result.total_item_count for result in results),
+        verified_item_count=sum(result.verified_item_count for result in results),
+        archive_walk_complete=all(result.archive_walk_complete for result in results),
+        decision_hint=decision_hint,
+        complete_files=sum(result.complete_files for result in results),
+        partial_files=sum(result.partial_files for result in results),
+        failed_files=sum(result.failed_files for result in results),
+        missing_files=sum(result.missing_files for result in results),
+        unverified_files=sum(result.unverified_files for result in results),
+        output_quality_score=output_quality_score,
+        output_file_count=output_file_count,
+        output_total_bytes=output_total_bytes,
+        output_complete_ratio=1.0 if all_complete else completeness,
+        output_failed_ratio=0.0 if all_complete else max(0.0, 1.0 - completeness),
+        output_empty=all(result.output_empty for result in results),
+        output_confidence=output_confidence,
+        archive_coverage=coverage,
+        file_observations=[item for result in results for item in result.file_observations],
+        repair_hints=repair_hints,
+    )
+
+
+def _payload_verification_weight(result: VerificationResult) -> int:
+    coverage = result.archive_coverage
+    return max(
+        int(coverage.expected_files or 0),
+        int(result.total_item_count or 0),
+        int(result.output_file_count or 0),
+        1,
+    )
+
+
+def _aggregate_payload_coverage(
+    payloads: list[tuple[dict[str, Any], VerificationResult]],
+    completeness: float,
+) -> ArchiveCoverageSummary:
+    results = [verification for _segment, verification in payloads]
+    coverages = [result.archive_coverage for result in results]
+    return ArchiveCoverageSummary(
+        completeness=completeness,
+        file_coverage=completeness,
+        byte_coverage=completeness,
+        expected_files=sum(item.expected_files for item in coverages),
+        matched_files=sum(item.matched_files for item in coverages),
+        complete_files=sum(item.complete_files for item in coverages),
+        partial_files=sum(item.partial_files for item in coverages),
+        failed_files=sum(item.failed_files for item in coverages),
+        missing_files=sum(item.missing_files for item in coverages),
+        unverified_files=sum(item.unverified_files for item in coverages),
+        expected_bytes=sum(item.expected_bytes for item in coverages),
+        matched_bytes=sum(item.matched_bytes for item in coverages),
+        complete_bytes=sum(item.complete_bytes for item in coverages),
+        confidence=min((item.confidence for item in coverages), default=0.0),
+        sources=[
+            {
+                "kind": "embedded_payload",
+                "segment_id": str(segment.get("segment_id") or ""),
+                "format": str(segment.get("format") or ""),
+                "completeness": verification.completeness,
+                "decision_hint": verification.decision_hint,
+            }
+            for segment, verification in payloads
+        ],
+    )
 
 
 def _configured_archive_manifest_limit(methods: list[Any]) -> int | None:

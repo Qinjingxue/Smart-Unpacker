@@ -33,13 +33,14 @@ def plan_watch_dispatches(
     coordinator: WatchGroupResolver,
     state: WatchStateStore,
     prepare_candidate: Callable[[str], WatchCandidate | None],
-) -> tuple[list[WatchDispatch], list[WatchGroupSnapshot]]:
+) -> tuple[list[WatchDispatch], list[WatchGroupSnapshot], list[WatchCandidate]]:
     """Collapse quiet part events into one canonical head dispatch per split group."""
     if not ready:
-        return [], []
+        return [], [], []
     resolved = coordinator.resolve_paths([candidate.path for candidate in ready])
     dispatches: list[WatchDispatch] = []
     waiting: list[WatchGroupSnapshot] = []
+    deferred: list[WatchCandidate] = []
     seen_groups: set[str] = set()
 
     for candidate in ready:
@@ -55,6 +56,7 @@ def plan_watch_dispatches(
             continue
         seen_groups.add(snapshot.group_id)
         if any(path_key(member) in active_paths for member in snapshot.member_paths):
+            deferred.append(candidate)
             continue
         if not snapshot.has_head or snapshot.has_confirmed_gap:
             state.record_group_waiting(snapshot)
@@ -85,7 +87,7 @@ def plan_watch_dispatches(
             continue
         state.record_group_attempt(snapshot)
         dispatches.append(WatchDispatch(candidate=selected, group=snapshot))
-    return dispatches, waiting
+    return dispatches, waiting, deferred
 
 
 def _entry_blockers(entry) -> set[str]:
