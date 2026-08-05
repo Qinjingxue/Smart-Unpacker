@@ -900,12 +900,42 @@ fn validate_zstd(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let header = read_at(file, offset, 18)?;
-    if header.len() < 6 || &header[..4] != ZSTD || header[4] & 0x18 != 0 {
+    // RFC 8878 permits a 14-byte Frame_Header after the four-byte magic.
+    // Read the following Block_Header as well so every legal layout can be
+    // validated from one fixed-size prefix.
+    let header = read_at(file, offset, 21)?;
+    let Some((frame_header_size, encoded_block_size, checksum_size)) = parse_zstd_prefix(&header)
+    else {
         return Ok(None);
+    };
+    let Some(frame_prefix_end) = offset
+        .checked_add(frame_header_size as u64)
+        .and_then(|end| end.checked_add(3))
+        .and_then(|end| end.checked_add(encoded_block_size))
+        .and_then(|end| end.checked_add(checksum_size))
+    else {
+        return Ok(None);
+    };
+    if frame_prefix_end > size {
+        return Ok(None);
+    }
+    Ok(Some(candidate(
+        "zstd",
+        ".zst",
+        offset,
+        None,
+        0.98,
+        "rfc8878_frame_and_first_block_bounds",
+    )))
+}
+
+fn parse_zstd_prefix(header: &[u8]) -> Option<(usize, u64, u64)> {
+    if header.len() < 6 || &header[..4] != ZSTD || header[4] & 0x18 != 0 {
+        return None;
     }
     let descriptor = header[4];
     let single_segment = descriptor & 0x20 != 0;
+    let checksum = descriptor & 0x04 != 0;
     let dictionary_size = match descriptor & 0x03 {
         0 => 0,
         1 => 1,
@@ -922,29 +952,62 @@ fn validate_zstd(
     };
     let frame_header_size = 5usize + usize::from(!single_segment) + dictionary_size + content_size;
     if header.len() < frame_header_size + 3 {
-        return Ok(None);
+        return None;
     }
+
+    let mut cursor = 5usize;
+    let window_size = if single_segment {
+        None
+    } else {
+        let descriptor = header[cursor];
+        cursor += 1;
+        let exponent = u32::from(descriptor >> 3);
+        let mantissa = u64::from(descriptor & 0x07);
+        let window_base = 1u64 << (10 + exponent);
+        Some(window_base + (window_base / 8) * mantissa)
+    };
+    cursor += dictionary_size;
+    let frame_content_size = match content_size {
+        0 => None,
+        1 => Some(u64::from(header[cursor])),
+        2 => Some(
+            u64::from(u16::from_le_bytes(
+                header[cursor..cursor + 2].try_into().ok()?,
+            )) + 256,
+        ),
+        4 => Some(u64::from(u32::from_le_bytes(
+            header[cursor..cursor + 4].try_into().ok()?,
+        ))),
+        8 => Some(u64::from_le_bytes(
+            header[cursor..cursor + 8].try_into().ok()?,
+        )),
+        _ => return None,
+    };
+    let window_size = if single_segment {
+        frame_content_size?
+    } else {
+        window_size?
+    };
+
     let block = &header[frame_header_size..frame_header_size + 3];
     let block_header =
         u32::from(block[0]) | (u32::from(block[1]) << 8) | (u32::from(block[2]) << 16);
+    let last_block = block_header & 0x01 != 0;
     let block_type = (block_header >> 1) & 0x03;
     let block_size = (block_header >> 3) as u64;
-    let encoded_block_size = if block_type == 1 {
-        u64::from(block_size > 0)
-    } else {
-        block_size
-    };
-    if block_type == 3 || offset + frame_header_size as u64 + 3 + encoded_block_size > size {
-        return Ok(None);
+    let block_max_size = window_size.min(128 * 1024);
+    if block_type == 3 || block_size > block_max_size {
+        return None;
     }
-    Ok(Some(candidate(
-        "zstd",
-        ".zst",
-        offset,
-        None,
-        0.98,
-        "rfc8878_frame_and_block_header",
-    )))
+    if last_block
+        && block_type <= 1
+        && frame_content_size.is_some_and(|content_size| content_size != block_size)
+    {
+        return None;
+    }
+    let encoded_block_size = if block_type == 1 { 1 } else { block_size };
+    let checksum_size = u64::from(last_block && checksum) * 4;
+    Some((frame_header_size, encoded_block_size, checksum_size))
 }
 
 fn validate_tar(
@@ -1223,6 +1286,81 @@ mod tests {
                 .collect();
             assert_eq!(formats, ["bzip2", "xz", "zstd"]);
         });
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_mp4_zstd_false_positive_prefixes_with_oversized_blocks() {
+        let oversized_raw = [
+            0x28, 0xb5, 0x2f, 0xfd, 0xe2, 0x04, 0xe5, 0xea, 0x82, 0xaa, 0xa3, 0x96, 0x2a, 0x14,
+            0x47, 0x61, 0x9e, 0xa6, 0xbf, 0xea, 0x4b,
+        ];
+        let oversized_rle = [
+            0x28, 0xb5, 0x2f, 0xfd, 0x66, 0xad, 0xef, 0x45, 0xf2, 0x0b, 0x32, 0xcd, 0x37, 0x1d,
+            0x2c, 0xb3, 0xa5, 0xed, 0xc9, 0x47, 0x0c,
+        ];
+
+        assert!(parse_zstd_prefix(&oversized_raw).is_none());
+        assert!(parse_zstd_prefix(&oversized_rle).is_none());
+    }
+
+    #[test]
+    fn zstd_first_block_respects_window_and_rfc_block_limits() {
+        let smaller_than_block_window = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x08, 0x49, 0x00, 0x00];
+        assert!(parse_zstd_prefix(&smaller_than_block_window).is_none());
+
+        let mut maximum_block = ZSTD.to_vec();
+        maximum_block.push(0xe0);
+        maximum_block.extend_from_slice(&(128u64 * 1024).to_le_bytes());
+        maximum_block.extend_from_slice(&0x10_0001u32.to_le_bytes()[..3]);
+        assert!(parse_zstd_prefix(&maximum_block).is_some());
+
+        let mut oversized_block = ZSTD.to_vec();
+        oversized_block.push(0xe0);
+        oversized_block.extend_from_slice(&(128u64 * 1024 + 1).to_le_bytes());
+        oversized_block.extend_from_slice(&0x10_0009u32.to_le_bytes()[..3]);
+        assert!(parse_zstd_prefix(&oversized_block).is_none());
+    }
+
+    #[test]
+    fn validates_zstd_maximum_frame_header_layout() {
+        let mut data = ZSTD.to_vec();
+        data.push(0xc3);
+        data.push(0x00);
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&[0x09, 0x00, 0x00]);
+        data.push(b'x');
+        assert_eq!(data.len(), 22);
+
+        let path = temp_file("embedded_zstd_maximum_header", &data);
+        let reader = ManagedReader::open(&path).unwrap();
+        let candidate = validate_zstd(&reader, data.len() as u64, 0)
+            .unwrap()
+            .expect("the full 14-byte RFC frame header must be accepted");
+        assert_eq!(candidate.validation, "rfc8878_frame_and_first_block_bounds");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn zstd_last_block_requires_declared_checksum_bytes() {
+        let data = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x01, 0x09, 0x00, 0x00, b'x'];
+        let path = temp_file("embedded_zstd_missing_checksum", &data);
+        let reader = ManagedReader::open(&path).unwrap();
+        assert!(validate_zstd(&reader, data.len() as u64, 0)
+            .unwrap()
+            .is_none());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn zstd_zero_length_rle_still_requires_its_content_byte() {
+        let data = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x03, 0x00, 0x00];
+        let path = temp_file("embedded_zstd_empty_rle", &data);
+        let reader = ManagedReader::open(&path).unwrap();
+        assert!(validate_zstd(&reader, data.len() as u64, 0)
+            .unwrap()
+            .is_none());
         let _ = fs::remove_file(path);
     }
 
