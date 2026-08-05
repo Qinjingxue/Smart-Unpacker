@@ -120,6 +120,14 @@ def test_password_probe_tail_failure_maps_to_missing_volume_with_ambiguous_cli_m
     assert "7z 尾部 Next Header" in failure.message
     assert "可能缺少分卷" in failure.message
     assert failure.message_key == "failure.archive_field_read_failed_possible_missing_volume"
+    assert failure.message_params == {
+        "field": "7z 尾部 Next Header",
+        "offset": 4096,
+        "requested": 128,
+        "actual": 0,
+    }
+    assert extractor._localized_failure(failure) == failure.message
+    assert failure.to_dict()["message_params"] == failure.message_params
     assert failure.details["read_error"]["field"] == "7z.next_header"
     assert failure.details["diagnostic"] == "evidence=seven_zip_start_header_length"
 

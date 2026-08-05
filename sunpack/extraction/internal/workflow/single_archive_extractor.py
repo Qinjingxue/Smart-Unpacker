@@ -631,6 +631,7 @@ class SingleArchiveExtractor:
             stage="password_resolution",
             message=self.i18n.t(message_key, **message_params),
             message_key=message_key,
+            message_params=dict(message_params),
             user_action=user_action,
             repairable=repairable,
             details={"diagnostic": resolution.error_text, "read_error": read_error},
