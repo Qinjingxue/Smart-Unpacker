@@ -1,6 +1,7 @@
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
+from sunpack.analysis.structure_pipeline.modules._read_fault import read_fault_damage_flags
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
 from sunpack.analysis.probes.zip import ZipEocdProbeOptions, probe_zip_eocd_view
@@ -112,7 +113,7 @@ class ZipAnalysisModule:
             status = "weak"
             confidence = 0.35 if hits else 0.0
 
-        damage_flags = []
+        damage_flags = read_fault_damage_flags(native)
         error = native.get("error") or ""
         if error:
             damage_flags.append(str(error))

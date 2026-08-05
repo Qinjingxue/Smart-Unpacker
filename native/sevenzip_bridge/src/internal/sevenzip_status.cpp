@@ -122,6 +122,10 @@ const char* status_name(PasswordTestStatus status) {
 
         return "error";
 
+    case PasswordTestStatus::NeedsVolumeOrTailDamaged:
+
+        return "needs_volume_or_tail_damaged";
+
     }
 
     return "unknown";

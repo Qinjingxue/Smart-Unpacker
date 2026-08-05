@@ -45,8 +45,25 @@ fn enrich_tar_semantics(
     let limit = max_entries.max(1);
     while entries < limit && offset + TAR_BLOCK_SIZE as u64 <= file_size {
         let mut header = [0u8; TAR_BLOCK_SIZE];
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut header)?;
+        if let Err(fault) = seek_field(
+            file,
+            offset,
+            file_size,
+            "tar.member.header",
+            FieldLocation::Body,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                file,
+                &mut header,
+                file_size,
+                "tar.member.header",
+                FieldLocation::Body,
+            )
+        }) {
+            set_read_fault(d, &fault, "member_header_read_failed")?;
+            return Ok(());
+        }
         if header.iter().all(|b| *b == 0) {
             zeros += 1;
             offset += TAR_BLOCK_SIZE as u64;
@@ -116,8 +133,25 @@ fn enrich_tar_semantics(
         }
         if matches!(typeflag, b'x' | b'g' | b'L' | b'K' | b'S') && size <= 4 * 1024 * 1024 {
             let mut payload = vec![0u8; size as usize];
-            file.seek(SeekFrom::Start(payload_start))?;
-            file.read_exact(&mut payload)?;
+            if let Err(fault) = seek_field(
+                file,
+                payload_start,
+                file_size,
+                "tar.member.payload",
+                FieldLocation::Body,
+            )
+            .and_then(|_| {
+                read_exact_field(
+                    file,
+                    &mut payload,
+                    file_size,
+                    "tar.member.payload",
+                    FieldLocation::Body,
+                )
+            }) {
+                set_read_fault(d, &fault, "member_payload_read_failed")?;
+                return Ok(());
+            }
             if matches!(typeflag, b'x' | b'g') {
                 let text = String::from_utf8_lossy(&payload);
                 for line in text.lines() {
@@ -200,8 +234,25 @@ fn enrich_tar_semantics(
     let mut buffer = vec![0u8; 64 * 1024];
     while remaining > 0 {
         let length = remaining.min(buffer.len() as u64) as usize;
-        file.seek(SeekFrom::Start(scan_offset))?;
-        file.read_exact(&mut buffer[..length])?;
+        if let Err(fault) = seek_field(
+            file,
+            scan_offset,
+            file_size,
+            "tar.archive.end_zero_blocks",
+            FieldLocation::Tail,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                file,
+                &mut buffer[..length],
+                file_size,
+                "tar.archive.end_zero_blocks",
+                FieldLocation::Tail,
+            )
+        }) {
+            set_read_fault(d, &fault, "archive_tail_read_failed")?;
+            return Ok(());
+        }
         if buffer[..length].iter().any(|byte| *byte != 0) {
             nonzero_tail = true;
             break;
@@ -260,7 +311,7 @@ fn walk_tar(
     file: &mut SourceCursor,
     file_size: u64,
     max_entries: usize,
-) -> PyResult<(usize, bool, bool, &'static str)> {
+) -> Result<(usize, bool, bool, &'static str), ReadFault> {
     if max_entries == 0 {
         return Ok((0, false, false, ""));
     }
@@ -269,8 +320,20 @@ fn walk_tar(
     let mut checked = 0usize;
     while checked < max_entries && offset + TAR_BLOCK_SIZE as u64 <= file_size {
         let mut header = vec![0; TAR_BLOCK_SIZE];
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut header)?;
+        seek_field(
+            file,
+            offset,
+            file_size,
+            "tar.member.header",
+            FieldLocation::Body,
+        )?;
+        read_exact_field(
+            file,
+            &mut header,
+            file_size,
+            "tar.member.header",
+            FieldLocation::Body,
+        )?;
         if header.iter().all(|b| *b == 0) {
             zero_blocks += 1;
             offset += TAR_BLOCK_SIZE as u64;

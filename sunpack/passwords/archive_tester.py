@@ -4,6 +4,7 @@ from sunpack.support.sevenzip_bridge import cached_test_archive, get_native_pass
 from sunpack.support.sevenzip_bridge import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_DAMAGED,
+    STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED,
     STATUS_UNSUPPORTED,
     STATUS_WRONG_PASSWORD,
 )
@@ -90,6 +91,7 @@ def _native_probe_status(status: int, ok: bool):
         STATUS_DAMAGED: "damaged",
         STATUS_UNSUPPORTED: "unsupported_method",
         STATUS_BACKEND_UNAVAILABLE: "backend_unavailable",
+        STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED: "needs_volume_or_tail_damaged",
     }.get(status, "unknown_needs_final_verifier")
 
 PasswordManager = ArchivePasswordTester

@@ -51,7 +51,8 @@ class SevenZipFastVerifier:
             status=status,
             matched_index=matched_index,
             attempts=attempts,
+            test_result=outcome,
             error_text=message.lower(),
-            terminal=status == "damaged",
+            terminal=status in {"damaged", "needs_volume_or_tail_damaged"},
             final_confirmation_required="7z encrypted header opened" not in message.lower(),
         )

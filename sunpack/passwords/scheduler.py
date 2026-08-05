@@ -22,6 +22,7 @@ class PasswordSearchStatus(str, Enum):
     DAMAGED = "damaged"
     UNSUPPORTED = "unsupported"
     BACKEND_UNAVAILABLE = "backend_unavailable"
+    NEEDS_VOLUME_OR_TAIL_DAMAGED = "needs_volume_or_tail_damaged"
     STOPPED = "stopped"
 
 
@@ -240,6 +241,17 @@ class PasswordScheduler:
                 )
                 self._emit_finished(job, result, started_at, len(candidates), skipped)
                 return result
+            if verification.status == "needs_volume_or_tail_damaged":
+                result = PasswordSearchResult(
+                    password=None,
+                    status=PasswordSearchStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED,
+                    test_result=verification.test_result,
+                    error_text=verification.error_text,
+                    attempts=attempts,
+                    stopped_reason="terminal",
+                )
+                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                return result
             if verification.status == "backend_unavailable":
                 # Extraction may still have a usable worker/backend. Preserve the
                 # candidates instead of misclassifying an infrastructure failure.
@@ -308,7 +320,11 @@ class PasswordScheduler:
             archive_input=job.archive_input,
         )
         attempted_in_batch = max(0, min(max(verification.attempts, 0), len(batch)))
-        if not verification.ok and attempted_in_batch == 0:
+        if (
+            not verification.ok
+            and attempted_in_batch == 0
+            and verification.status != "needs_volume_or_tail_damaged"
+        ):
             attempted_in_batch = len(batch)
         total_attempts = previous_attempts + attempted_in_batch
         self._emit_progress(job, PasswordProgressEvent(
@@ -349,6 +365,7 @@ class PasswordScheduler:
             "damaged": PasswordSearchStatus.DAMAGED,
             "unsupported_method": PasswordSearchStatus.UNSUPPORTED,
             "backend_unavailable": PasswordSearchStatus.BACKEND_UNAVAILABLE,
+            "needs_volume_or_tail_damaged": PasswordSearchStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED,
         }
         search_status = status_by_verification.get(verification.status, PasswordSearchStatus.INCONCLUSIVE)
         if search_status == PasswordSearchStatus.EXHAUSTED:

@@ -1,5 +1,9 @@
+use crate::io::read_fault::{FieldLocation, ReadFault};
 use crate::io::reader::ManagedReader;
-use crate::password::input::{parse_ranges, parse_volumes, read_prefix_from_ranges, VolumeSet};
+use crate::password::input::{
+    parse_ranges, parse_volumes, read_prefix_from_ranges_field, VolumeSet,
+};
+use crate::password::password_read_fault_status;
 use aes::cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit};
 use aes::Aes128;
 use cbc::Decryptor;
@@ -40,7 +44,15 @@ pub(crate) fn rar_fast_verify_passwords_with_reader(
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let data = py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN))?;
+    let data = match py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN)) {
+        Ok(data) => data,
+        Err(error) => {
+            let fault =
+                ReadFault::from_io(error, "read_at", 0, MAX_RAR_PREFIX_SCAN, 0, reader.len())
+                    .with_field("rar.header_prefix", FieldLocation::Head);
+            return password_read_fault_status(py, &fault);
+        }
+    };
     verify_rar_data(py, &data, &candidates)
 }
 
@@ -52,13 +64,15 @@ fn verify_rar_data(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResu
         return verify_rar4(py, &data, &candidates);
     }
     if data.starts_with(b"Rar!") {
-        return status(
-            py,
-            "damaged",
-            -1,
+        let fault = ReadFault::short_read(
+            "read_record",
             0,
-            "rar signature is incomplete or unknown",
-        );
+            RAR5_SIGNATURE.len(),
+            data.len(),
+            data.len() as u64,
+        )
+        .with_field("rar.signature", FieldLocation::Head);
+        return password_read_fault_status(py, &fault);
     }
     status(py, "unsupported_method", -1, 0, "rar signature not found")
 }
@@ -74,7 +88,11 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let parsed = parse_ranges(ranges)?;
-    let data = read_prefix_from_ranges(&parsed, MAX_RAR_PREFIX_SCAN)?;
+    let data =
+        match read_prefix_from_ranges_field(&parsed, MAX_RAR_PREFIX_SCAN, "rar.header_prefix") {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
     verify_rar_data(py, &data, &candidates)
 }
 
@@ -89,7 +107,11 @@ pub(crate) fn rar_fast_verify_passwords_from_volumes(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let volumes = VolumeSet::new(parse_volumes(parts)?);
-    let data = py.detach(|| volumes.first_prefix(MAX_RAR_PREFIX_SCAN))?;
+    let data =
+        match py.detach(|| volumes.first_prefix_field(MAX_RAR_PREFIX_SCAN, "rar.header_prefix")) {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
     verify_rar_data(py, &data, &candidates)
 }
 
@@ -105,13 +127,15 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
         );
     }
     if payload.len() < 8 + 16 {
-        return status(
-            py,
-            "unknown_need_fallback",
-            -1,
-            0,
-            "rar3/rar4 encrypted header data is too short for fast verification",
-        );
+        let fault = ReadFault::short_read(
+            "read_record",
+            RAR4_SIGNATURE.len() as u64,
+            24,
+            payload.len(),
+            data.len() as u64,
+        )
+        .with_field("rar4.encrypted_header.salt_block", FieldLocation::Head);
+        return password_read_fault_status(py, &fault);
     }
 
     let mut salt = [0u8; 8];

@@ -12,9 +12,12 @@ from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
 from sunpack.passwords.verifier import PasswordBatchVerification
 from sunpack.passwords.verifier.base import normalize_verifier_status
 from sunpack.passwords.verifier.sevenzip_dll import SevenZipDllVerifier
+from sunpack.passwords.verifier.registry import PasswordVerifierChain
+from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 from sunpack.support.sevenzip_bridge import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_DAMAGED,
+    STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED,
     STATUS_UNSUPPORTED,
     STATUS_WRONG_PASSWORD,
 )
@@ -29,6 +32,7 @@ from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, CONTENT_IN
         ("unknown_need_fallback", "unknown_needs_final_verifier"),
         ("unknown_needs_fallback", "unknown_needs_final_verifier"),
         ("unsupported", "unsupported_method"),
+        ("needs_volume_or_tail_damaged", "needs_volume_or_tail_damaged"),
         ("unexpected_backend_value", "unknown_needs_final_verifier"),
     ],
 )
@@ -55,6 +59,72 @@ def test_scheduler_uses_no_match_status_not_backend_message(tmp_path):
     assert result.password is None
 
 
+def test_scheduler_stops_password_batch_on_unavailable_tail_without_negative_result(tmp_path):
+    archive = tmp_path / "sample.7z.001"
+    archive.write_bytes(b"7z")
+    scheduler = PasswordScheduler(_StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="needs_volume_or_tail_damaged",
+        attempts=0,
+        error_text="missing volume or damaged next-header offset",
+        terminal=True,
+    )))
+
+    result = scheduler.run(PasswordJob(
+        archive_path=str(archive),
+        candidates=PasswordCandidatePipeline.from_values([f"bad-{index}" for index in range(50)]),
+    ))
+
+    assert result.status == PasswordSearchStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED
+    assert result.attempts == 0
+    assert result.exhausted is False
+
+
+def test_fast_verifier_preserves_native_field_read_diagnostics():
+    outcome = {
+        "status": "needs_volume_or_tail_damaged",
+        "attempts": 0,
+        "message": "tail unavailable",
+        "read_error": {
+            "field": "zip.eocd",
+            "location": "tail",
+            "possible_missing_volume": True,
+        },
+    }
+
+    verification = ZipFastVerifier._from_outcome(outcome)
+
+    assert verification.test_result is outcome
+    assert verification.test_result["read_error"]["field"] == "zip.eocd"
+
+
+def test_final_confirmation_tail_failure_does_not_reject_fast_match():
+    fast = _StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        attempts=1,
+        final_confirmation_required=True,
+        match_evidence="bounded_header",
+    ))
+    final = _StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="needs_volume_or_tail_damaged",
+        attempts=1,
+        error_text="next volume unavailable",
+        terminal=True,
+    ))
+
+    result = PasswordVerifierChain([fast], final).verify_batch(
+        "sample.rar",
+        ["candidate", "later-candidate"],
+    )
+
+    assert result.status == "needs_volume_or_tail_damaged"
+    assert result.terminal is True
+    assert result.final_confirmation_required is False
+
+
 @pytest.mark.parametrize(
     ("native_status", "expected"),
     [
@@ -62,6 +132,7 @@ def test_scheduler_uses_no_match_status_not_backend_message(tmp_path):
         (STATUS_DAMAGED, "damaged"),
         (STATUS_UNSUPPORTED, "unsupported_method"),
         (STATUS_BACKEND_UNAVAILABLE, "backend_unavailable"),
+        (STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED, "needs_volume_or_tail_damaged"),
     ],
 )
 def test_dll_verifier_preserves_native_failure_status(native_status, expected):

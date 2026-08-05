@@ -1,6 +1,19 @@
 impl AnalysisBinaryView {
+    fn read_field_at_bytes(
+        &self,
+        offset: u64,
+        size: usize,
+        field: &'static str,
+        location: FieldLocation,
+    ) -> Result<Vec<u8>, ReadFault> {
+        self.reader
+            .read_exact_field_at(offset, size, field, location)
+    }
+
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
-        self.reader.read_at(offset, size).map_err(reader_error_to_py)
+        self.reader
+            .read_at(offset, size)
+            .map_err(reader_error_to_py)
     }
 
     fn read_tail_bytes(&self, size: usize) -> PyResult<Vec<u8>> {
@@ -120,10 +133,22 @@ impl AnalysisBinaryView {
         let evidence = PyList::empty(py);
         evidence.append("rar4:signature")?;
         for index in 0..max_blocks {
-            if cursor + 7 > size {
+            if cursor.saturating_add(7) > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar4_block_header_out_of_range")?;
-                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
+                let location = if index == 0 {
+                    FieldLocation::Head
+                } else {
+                    FieldLocation::Tail
+                };
+                let fault = ReadFault::short_read(
+                    "read_record",
+                    cursor,
+                    7,
+                    size.saturating_sub(cursor) as usize,
+                    size,
+                )
+                .with_field("rar4.block.header", location);
+                set_view_read_fault(result, &fault, "rar4_block_header_out_of_range")?;
                 return Ok(());
             }
             let fixed = self.read_at_bytes(cursor, 7)?;
@@ -145,9 +170,22 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar4_block_unknown_type")?;
                 return Ok(());
             }
-            if header_size < 7 || cursor + header_size > size {
+            if header_size < 7 || cursor.saturating_add(header_size) > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar4_block_size_out_of_range")?;
+                let location = if index == 0 {
+                    FieldLocation::Head
+                } else {
+                    FieldLocation::Tail
+                };
+                let fault = ReadFault::short_read(
+                    "read_declared_range",
+                    cursor,
+                    usize::try_from(header_size).unwrap_or(usize::MAX),
+                    size.saturating_sub(cursor) as usize,
+                    size,
+                )
+                .with_field("rar4.block.header", location);
+                set_view_read_fault(result, &fault, "rar4_block_size_out_of_range")?;
                 return Ok(());
             }
             let full_header = self.read_at_bytes(cursor, header_size as usize)?;
@@ -181,10 +219,18 @@ impl AnalysisBinaryView {
                 }
                 block_size += u32_le(&full_header, 7) as u64;
             }
-            let next_cursor = cursor + block_size;
+            let next_cursor = cursor.saturating_add(block_size);
             if next_cursor > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar4_block_payload_out_of_range")?;
+                let fault = ReadFault::short_read(
+                    "read_declared_range",
+                    cursor + header_size,
+                    usize::try_from(block_size.saturating_sub(header_size)).unwrap_or(usize::MAX),
+                    size.saturating_sub(cursor + header_size) as usize,
+                    size,
+                )
+                .with_field("rar4.block.payload", FieldLocation::Tail);
+                set_view_read_fault(result, &fault, "rar4_block_payload_out_of_range")?;
                 return Ok(());
             }
             if index == 0 && header_type != 0x73 {
@@ -229,16 +275,41 @@ impl AnalysisBinaryView {
         let evidence = PyList::empty(py);
         evidence.append("rar5:signature")?;
         for index in 0..max_blocks {
-            if cursor + 6 > size {
+            if cursor.saturating_add(6) > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_block_header_out_of_range")?;
-                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
+                let location = if index == 0 {
+                    FieldLocation::Head
+                } else {
+                    FieldLocation::Tail
+                };
+                let fault = ReadFault::short_read(
+                    "read_record",
+                    cursor,
+                    6,
+                    size.saturating_sub(cursor) as usize,
+                    size,
+                )
+                .with_field("rar5.block.header", location);
+                set_view_read_fault(result, &fault, "rar5_block_header_out_of_range")?;
                 return Ok(());
             }
             let first = self.read_at_bytes(cursor, 64)?;
             let Some((header_size, after_size)) = read_vint(&first, 4) else {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_header_size_vint_missing")?;
+                let location = if index == 0 {
+                    FieldLocation::Head
+                } else {
+                    FieldLocation::Tail
+                };
+                let fault = ReadFault::short_read(
+                    "parse_variable_integer",
+                    cursor + 4,
+                    4,
+                    first.len().saturating_sub(4).min(4),
+                    size,
+                )
+                .with_field("rar5.block.header_size", location);
+                set_view_read_fault(result, &fault, "rar5_header_size_vint_missing")?;
                 return Ok(());
             };
             if after_size.saturating_sub(4) > 3 {
@@ -246,10 +317,25 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_header_size_vint_too_long")?;
                 return Ok(());
             }
-            let header_total_size = 4 + (after_size - 4) as u64 + header_size;
-            if header_size == 0 || cursor + header_total_size > size {
+            let header_total_size = 4u64
+                .saturating_add((after_size - 4) as u64)
+                .saturating_add(header_size);
+            if header_size == 0 || cursor.saturating_add(header_total_size) > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_header_size_out_of_range")?;
+                let location = if index == 0 {
+                    FieldLocation::Head
+                } else {
+                    FieldLocation::Tail
+                };
+                let fault = ReadFault::short_read(
+                    "read_declared_range",
+                    cursor,
+                    usize::try_from(header_total_size).unwrap_or(usize::MAX),
+                    size.saturating_sub(cursor) as usize,
+                    size,
+                )
+                .with_field("rar5.block.header", location);
+                set_view_read_fault(result, &fault, "rar5_header_size_out_of_range")?;
                 return Ok(());
             }
             let full = self.read_at_bytes(cursor, header_total_size as usize)?;
@@ -317,10 +403,20 @@ impl AnalysisBinaryView {
                 };
                 data_size = value;
             }
-            let next_cursor = cursor + header_total_size + data_size;
+            let next_cursor = cursor
+                .saturating_add(header_total_size)
+                .saturating_add(data_size);
             if next_cursor > size {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_block_payload_out_of_range")?;
+                let fault = ReadFault::short_read(
+                    "read_declared_range",
+                    cursor + header_total_size,
+                    usize::try_from(data_size).unwrap_or(usize::MAX),
+                    size.saturating_sub(cursor + header_total_size) as usize,
+                    size,
+                )
+                .with_field("rar5.block.payload", FieldLocation::Tail);
+                set_view_read_fault(result, &fault, "rar5_block_payload_out_of_range")?;
                 return Ok(());
             }
             // With RAR5 header encryption enabled the archive starts with a
@@ -406,12 +502,36 @@ impl AnalysisBinaryView {
         let mut cursor = start_offset;
         let mut checked = 0usize;
         let mut zero_blocks = 0usize;
-        while checked < max_entries && cursor + TAR_BLOCK_SIZE as u64 <= size {
-            let header = self.read_at_bytes(cursor, TAR_BLOCK_SIZE)?;
-            if header.len() < TAR_BLOCK_SIZE {
-                result.set_item("error", "short_tar_header")?;
-                break;
-            }
+        if start_offset.saturating_add(TAR_BLOCK_SIZE as u64) > size {
+            let fault = ReadFault::short_read(
+                "read_record",
+                start_offset,
+                TAR_BLOCK_SIZE,
+                size.saturating_sub(start_offset) as usize,
+                size,
+            )
+            .with_field("tar.member.header", FieldLocation::Head);
+            set_view_read_fault(&result, &fault, "short_tar_header")?;
+            return Ok(result);
+        }
+        while checked < max_entries && cursor.saturating_add(TAR_BLOCK_SIZE as u64) <= size {
+            let location = if checked == 0 {
+                FieldLocation::Head
+            } else {
+                FieldLocation::Body
+            };
+            let header = match self.read_field_at_bytes(
+                cursor,
+                TAR_BLOCK_SIZE,
+                "tar.member.header",
+                location,
+            ) {
+                Ok(data) => data,
+                Err(fault) => {
+                    set_view_read_fault(&result, &fault, "tar_header_read_failed")?;
+                    return Ok(result);
+                }
+            };
             if header.iter().all(|byte| *byte == 0) {
                 if checked == 0 {
                     result.set_item("zero_block", true)?;
@@ -475,7 +595,10 @@ impl AnalysisBinaryView {
                         | b'S'
                 );
                 let payload_in_range = member_size.is_some_and(|member_size| {
-                    cursor + TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size)
+                    cursor
+                        .saturating_add(TAR_BLOCK_SIZE as u64)
+                        .saturating_add(member_size)
+                        .saturating_add(tar_padding(member_size))
                         <= size
                 });
                 result.set_item("stored_checksum", stored_checksum.unwrap_or(0))?;
@@ -515,11 +638,22 @@ impl AnalysisBinaryView {
                 }
                 return Ok(result);
             }
-            let next_cursor = cursor + TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size);
+            let payload_start = cursor.saturating_add(TAR_BLOCK_SIZE as u64);
+            let next_cursor = payload_start
+                .saturating_add(member_size)
+                .saturating_add(tar_padding(member_size));
             if next_cursor > size {
                 result.set_item("entries_checked", checked)?;
-                result.set_item("error", "member_payload_out_of_range")?;
-                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
+                let requested = member_size.saturating_add(tar_padding(member_size));
+                let fault = ReadFault::short_read(
+                    "read_declared_range",
+                    payload_start,
+                    usize::try_from(requested).unwrap_or(usize::MAX),
+                    size.saturating_sub(payload_start) as usize,
+                    size,
+                )
+                .with_field("tar.member.payload", FieldLocation::Tail);
+                set_view_read_fault(&result, &fault, "member_payload_out_of_range")?;
                 if checked > 0 {
                     result.set_item("plausible", true)?;
                     result.set_item("entry_walk_ok", true)?;
@@ -551,8 +685,15 @@ impl AnalysisBinaryView {
             result.set_item("entry_walk_ok", true)?;
             result.set_item("segment_end", cursor)?;
             result.set_item("boundary_confidence", "medium")?;
-            result.set_item("error", "tar_end_zero_blocks_not_found")?;
-            result.set_item("damage_flags", PyList::new(py, ["missing_end_block"])?)?;
+            let fault = ReadFault::short_read(
+                "read_record",
+                cursor,
+                TAR_BLOCK_SIZE * 2,
+                size.saturating_sub(cursor).min((TAR_BLOCK_SIZE * 2) as u64) as usize,
+                size,
+            )
+            .with_field("tar.archive.end_zero_blocks", FieldLocation::Tail);
+            set_view_read_fault(&result, &fault, "tar_end_zero_blocks_not_found")?;
             result.set_item(
                 "evidence",
                 PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?,
@@ -708,6 +849,8 @@ impl AnalysisBinaryView {
 
 impl AnalysisMultiVolumeView {
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
-        self.reader.read_at(offset, size).map_err(reader_error_to_py)
+        self.reader
+            .read_at(offset, size)
+            .map_err(reader_error_to_py)
     }
 }

@@ -1,3 +1,4 @@
+use crate::io::read_fault::{FieldLocation, ReadFault};
 use memmap2::{Mmap, MmapOptions};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
@@ -196,7 +197,10 @@ impl ManagedReader {
         let read_len = len.min((self.len() - offset) as usize);
         if !self.uses_request_state() {
             let _permit = self.state.gate.acquire()?;
-            let data = self.source.read_at(offset, read_len)?;
+            let data = self.source.read_at(offset, read_len).map_err(|error| {
+                ReadFault::physical("read_at", offset, read_len, 0, self.len(), &error)
+                    .into_io_error()
+            })?;
             self.state
                 .uncached_read_bytes
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -220,7 +224,9 @@ impl ManagedReader {
         }
 
         let _permit = self.state.gate.acquire()?;
-        let data = self.source.read_at(offset, read_len)?;
+        let data = self.source.read_at(offset, read_len).map_err(|error| {
+            ReadFault::physical("read_at", offset, read_len, 0, self.len(), &error).into_io_error()
+        })?;
         let mut inner = self.lock_inner()?;
         inner.stats.read_bytes += data.len() as u64;
         inner.store_cache_entry(key, Arc::from(data.clone()), self.state.config.cache_bytes);
@@ -230,12 +236,29 @@ impl ManagedReader {
     pub(crate) fn read_exact_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         let data = self.read_at(offset, len)?;
         if data.len() != len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "failed to fill whole buffer",
-            ));
+            return Err(ReadFault::short_read(
+                "read_exact_at",
+                offset,
+                len,
+                data.len(),
+                self.len(),
+            )
+            .into_io_error());
         }
         Ok(data)
+    }
+
+    pub(crate) fn read_exact_field_at(
+        &self,
+        offset: u64,
+        len: usize,
+        field: &'static str,
+        location: FieldLocation,
+    ) -> Result<Vec<u8>, ReadFault> {
+        self.read_exact_at(offset, len).map_err(|error| {
+            ReadFault::from_io(error, "read_exact_at", offset, len, 0, self.len())
+                .with_field(field, location)
+        })
     }
 
     /// Reads through the shared cache directly into a caller-owned buffer.
@@ -247,7 +270,13 @@ impl ManagedReader {
         let read_len = buffer.len().min((self.len() - offset) as usize);
         if !self.uses_request_state() {
             let _permit = self.state.gate.acquire()?;
-            let count = self.source.read_into_at(offset, &mut buffer[..read_len])?;
+            let count = self
+                .source
+                .read_into_at(offset, &mut buffer[..read_len])
+                .map_err(|error| {
+                    ReadFault::physical("read_into_at", offset, read_len, 0, self.len(), &error)
+                        .into_io_error()
+                })?;
             self.state
                 .uncached_read_bytes
                 .fetch_add(count as u64, Ordering::Relaxed);
@@ -272,7 +301,13 @@ impl ManagedReader {
         }
 
         let _permit = self.state.gate.acquire()?;
-        let count = self.source.read_into_at(offset, &mut buffer[..read_len])?;
+        let count = self
+            .source
+            .read_into_at(offset, &mut buffer[..read_len])
+            .map_err(|error| {
+                ReadFault::physical("read_into_at", offset, read_len, 0, self.len(), &error)
+                    .into_io_error()
+            })?;
         let mut inner = self.lock_inner()?;
         inner.stats.read_bytes += count as u64;
         if self.state.config.cache_bytes > 0 {
@@ -310,7 +345,13 @@ impl ManagedReader {
             }]);
         }
         let _permit = self.state.gate.acquire()?;
-        let slices = self.source.read_slices_at(offset, read_len)?;
+        let slices = self
+            .source
+            .read_slices_at(offset, read_len)
+            .map_err(|error| {
+                ReadFault::physical("read_slices_at", offset, read_len, 0, self.len(), &error)
+                    .into_io_error()
+            })?;
         let count = slices.iter().map(|slice| slice.len()).sum::<usize>();
         self.state
             .uncached_read_bytes
@@ -391,7 +432,19 @@ impl ManagedReader {
 
     pub(crate) fn read_direct_into_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
         let _permit = self.state.gate.acquire()?;
-        self.source.read_direct_into_at(offset, buffer)
+        self.source
+            .read_direct_into_at(offset, buffer)
+            .map_err(|error| {
+                ReadFault::physical(
+                    "read_direct_into_at",
+                    offset,
+                    buffer.len(),
+                    0,
+                    self.len(),
+                    &error,
+                )
+                .into_io_error()
+            })
     }
 
     fn lock_inner(&self) -> io::Result<MutexGuard<'_, ReaderInner>> {
@@ -1507,6 +1560,23 @@ mod tests {
             io::ErrorKind::UnexpectedEof
         );
         assert_eq!(reader.stats().unwrap().read_bytes, 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn field_read_preserves_exact_short_read_diagnostics() {
+        let path = temp_file("managed_reader_field_eof", b"abcdef");
+        let reader = ManagedReader::open(&path).unwrap();
+        let fault = reader
+            .read_exact_field_at(4, 8, "zip.eocd", FieldLocation::Tail)
+            .unwrap_err();
+        assert_eq!(fault.code, "unexpected_eof");
+        assert_eq!(fault.field, "zip.eocd");
+        assert_eq!(fault.offset, 4);
+        assert_eq!(fault.requested, 8);
+        assert_eq!(fault.actual, 2);
+        assert_eq!(fault.source_len, 6);
+        assert!(fault.possible_missing_volume());
         let _ = std::fs::remove_file(path);
     }
 

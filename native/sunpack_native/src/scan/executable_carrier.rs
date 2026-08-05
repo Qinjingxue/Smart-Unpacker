@@ -1,6 +1,6 @@
+use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 
 const CHUNK_BYTES: usize = 1024 * 1024;
 const QT_IFW_TAIL_WINDOW_BYTES: u64 = 1024 * 1024;
@@ -53,19 +53,23 @@ fn runtime_bundle_profile_native(
     } else {
         scan_limit_bytes
     };
-    if let Some(profile) = scan_image_profiles(path, image_scan_limit)? {
+    let reader = ManagedReader::open(path)?;
+    if let Some(profile) = scan_image_profiles(&reader, image_scan_limit)? {
         return Ok(profile.to_owned());
     }
-    if qt_ifw_tail_layout_matches(path)? {
+    if qt_ifw_tail_layout_matches(&reader)? {
         return Ok("qt_installer_framework".to_owned());
     }
-    if tail_contains(path, PYINSTALLER_COOKIE, 256)? {
+    if tail_contains(&reader, PYINSTALLER_COOKIE, 256)? {
         return Ok("pyinstaller".to_owned());
     }
     Ok(String::new())
 }
 
-fn scan_image_profiles(path: &str, scan_limit_bytes: u64) -> io::Result<Option<&'static str>> {
+fn scan_image_profiles(
+    reader: &ManagedReader,
+    scan_limit_bytes: u64,
+) -> io::Result<Option<&'static str>> {
     let patterns: Vec<&[u8]> = PROFILES
         .iter()
         .flat_map(|(_, required)| required.iter().copied())
@@ -77,19 +81,21 @@ fn scan_image_profiles(path: &str, scan_limit_bytes: u64) -> io::Result<Option<&
         .unwrap_or(1)
         .saturating_sub(1);
     let mut matched = vec![false; patterns.len()];
-    let mut file = File::open(path)?;
-    let mut remaining = scan_limit_bytes;
+    let mut remaining = scan_limit_bytes.min(reader.len());
+    let mut offset = 0u64;
     let mut carry = Vec::with_capacity(overlap);
     let mut chunk = vec![0u8; CHUNK_BYTES];
 
     while remaining > 0 {
         let requested = usize::try_from(remaining.min(CHUNK_BYTES as u64)).unwrap_or(CHUNK_BYTES);
-        let count = file.read(&mut chunk[..requested])?;
+        let data = reader.read_at(offset, requested)?;
+        let count = data.len();
         if count == 0 {
             break;
         }
         let mut sample = Vec::with_capacity(carry.len() + count);
         sample.extend_from_slice(&carry);
+        chunk[..count].copy_from_slice(&data);
         sample.extend_from_slice(&chunk[..count]);
         for (index, pattern) in patterns.iter().enumerate() {
             if !matched[index] && find_subslice(&sample, pattern).is_some() {
@@ -107,17 +113,15 @@ fn scan_image_profiles(path: &str, scan_limit_bytes: u64) -> io::Result<Option<&
         carry.clear();
         carry.extend_from_slice(&sample[sample.len().saturating_sub(overlap)..]);
         remaining -= count as u64;
+        offset += count as u64;
     }
     Ok(None)
 }
 
-fn qt_ifw_tail_layout_matches(path: &str) -> io::Result<bool> {
-    let mut file = File::open(path)?;
-    let file_size = file.seek(SeekFrom::End(0))?;
+fn qt_ifw_tail_layout_matches(reader: &ManagedReader) -> io::Result<bool> {
+    let file_size = reader.len();
     let window_start = file_size.saturating_sub(QT_IFW_TAIL_WINDOW_BYTES);
-    file.seek(SeekFrom::Start(window_start))?;
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail)?;
+    let tail = reader.read_at(window_start, (file_size - window_start) as usize)?;
     let cookie = QT_IFW_MAGIC_COOKIE.to_le_bytes();
     let mut search_start = 0usize;
     while let Some(relative) = find_subslice(&tail[search_start..], &cookie) {
@@ -138,12 +142,10 @@ fn qt_ifw_tail_layout_matches(path: &str) -> io::Result<bool> {
     Ok(false)
 }
 
-fn tail_contains(path: &str, pattern: &[u8], window_bytes: u64) -> io::Result<bool> {
-    let mut file = File::open(path)?;
-    let size = file.seek(SeekFrom::End(0))?;
-    file.seek(SeekFrom::Start(size.saturating_sub(window_bytes)))?;
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail)?;
+fn tail_contains(reader: &ManagedReader, pattern: &[u8], window_bytes: u64) -> io::Result<bool> {
+    let size = reader.len();
+    let start = size.saturating_sub(window_bytes);
+    let tail = reader.read_at(start, (size - start) as usize)?;
     Ok(find_subslice(&tail, pattern).is_some())
 }
 

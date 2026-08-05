@@ -1,8 +1,8 @@
 use crate::analysis_native::inspect_zip_local_header;
+use crate::io::read_fault::{read_exact_field, seek_field, FieldLocation, ReadFault};
+use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 
 const OVERLAY_SCAN_WINDOW_BYTES: u64 = 65_536;
 const PE_SIGNATURE: &[u8] = b"PE\x00\x00";
@@ -27,20 +27,38 @@ pub(crate) fn inspect_pe_overlay_structure(
     file_size: Option<i64>,
     magic_bytes: Option<&[u8]>,
 ) -> PyResult<Py<PyDict>> {
-    let Ok(mut file) = File::open(path) else {
+    let Ok(reader) = ManagedReader::open(path) else {
         return Ok(empty_result(py, "os_error")?.unbind());
     };
+    let mut file = reader.cursor();
     let actual_size = match file_size {
         Some(value) if value >= 0 => value as u64,
-        _ => file.seek(SeekFrom::End(0))?,
+        _ => reader.len(),
     };
 
     let mut prefix = magic_bytes.unwrap_or(&[]).to_vec();
     if prefix.len() < 64 {
-        prefix.resize(64, 0);
-        file.seek(SeekFrom::Start(0))?;
-        let len = file.read(&mut prefix)?;
-        prefix.truncate(len);
+        prefix.resize(actual_size.min(64) as usize, 0);
+        if let Err(fault) = seek_field(
+            &mut file,
+            0,
+            actual_size,
+            "pe.dos_header",
+            FieldLocation::Head,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                &mut file,
+                &mut prefix,
+                actual_size,
+                "pe.dos_header",
+                FieldLocation::Head,
+            )
+        }) {
+            let out = empty_result(py, "dos_header_read_failed")?;
+            write_read_fault(&out, &fault)?;
+            return Ok(out.unbind());
+        }
     }
     if prefix.len() < 64 || !prefix.starts_with(b"MZ") {
         return Ok(empty_result(py, "mz_magic_not_found")?.unbind());
@@ -51,9 +69,28 @@ pub(crate) fn inspect_pe_overlay_structure(
         return Ok(empty_result(py, "pe_header_offset_out_of_range")?.unbind());
     }
 
-    file.seek(SeekFrom::Start(pe_header_offset))?;
     let mut pe_header = [0u8; 24];
-    if file.read(&mut pe_header)? < 24 || &pe_header[0..4] != PE_SIGNATURE {
+    if let Err(fault) = seek_field(
+        &mut file,
+        pe_header_offset,
+        actual_size,
+        "pe.coff_header",
+        FieldLocation::Head,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut pe_header,
+            actual_size,
+            "pe.coff_header",
+            FieldLocation::Head,
+        )
+    }) {
+        let out = empty_result(py, "pe_header_read_failed")?;
+        write_read_fault(&out, &fault)?;
+        return Ok(out.unbind());
+    }
+    if &pe_header[0..4] != PE_SIGNATURE {
         return Ok(empty_result(py, "pe_signature_not_found")?.unbind());
     }
 
@@ -66,8 +103,26 @@ pub(crate) fn inspect_pe_overlay_structure(
     }
 
     let mut section_table = vec![0; section_table_size as usize];
-    file.seek(SeekFrom::Start(section_table_offset))?;
-    file.read_exact(&mut section_table)?;
+    if let Err(fault) = seek_field(
+        &mut file,
+        section_table_offset,
+        actual_size,
+        "pe.section_table",
+        FieldLocation::Head,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut section_table,
+            actual_size,
+            "pe.section_table",
+            FieldLocation::Head,
+        )
+    }) {
+        let out = empty_result(py, "section_table_read_failed")?;
+        write_read_fault(&out, &fault)?;
+        return Ok(out.unbind());
+    }
 
     let mut pe_end = 0u64;
     for index in 0..section_count as usize {
@@ -98,8 +153,26 @@ pub(crate) fn inspect_pe_overlay_structure(
 
     let sample_size = OVERLAY_SCAN_WINDOW_BYTES.min(actual_size - pe_end);
     let mut sample = vec![0; sample_size as usize];
-    file.seek(SeekFrom::Start(pe_end))?;
-    file.read_exact(&mut sample)?;
+    if let Err(fault) = seek_field(
+        &mut file,
+        pe_end,
+        actual_size,
+        "pe.overlay.sample",
+        FieldLocation::Body,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut sample,
+            actual_size,
+            "pe.overlay.sample",
+            FieldLocation::Body,
+        )
+    }) {
+        result.set_item("error", "overlay_sample_read_failed")?;
+        write_read_fault(&result, &fault)?;
+        return Ok(result.unbind());
+    }
 
     let Some((archive_format, detected_ext, relative_offset)) = find_archive_magic(&sample) else {
         result.set_item("error", "overlay_archive_magic_not_found")?;
@@ -143,6 +216,18 @@ pub(crate) fn inspect_pe_overlay_structure(
     }
 
     Ok(result.unbind())
+}
+
+fn write_read_fault(result: &Bound<'_, PyDict>, fault: &ReadFault) -> PyResult<()> {
+    fault.write_python(result)?;
+    let mut flags = vec!["read_error"];
+    if fault.code == "unexpected_eof" {
+        flags.push("input_truncated");
+    }
+    if fault.possible_missing_volume() {
+        flags.push("missing_volume");
+    }
+    result.set_item("damage_flags", PyList::new(result.py(), flags)?)
 }
 
 fn empty_result<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> {

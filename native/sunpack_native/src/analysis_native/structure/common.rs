@@ -2,6 +2,24 @@ fn dict<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
     Ok(PyDict::new(py))
 }
 
+fn set_read_fault(
+    result: &Bound<'_, PyDict>,
+    fault: &ReadFault,
+    legacy_error: &str,
+) -> PyResult<()> {
+    result.set_item("error", legacy_error)?;
+    fault.write_python(result)?;
+    let mut flags = vec!["read_error"];
+    if fault.code == "unexpected_eof" {
+        flags.push("input_truncated");
+    }
+    if fault.possible_missing_volume() {
+        flags.push("missing_volume");
+    }
+    result.set_item("damage_flags", PyList::new(result.py(), flags)?)?;
+    Ok(())
+}
+
 fn read_at(path: &str, offset: u64, max_len: usize) -> std::io::Result<(u64, Vec<u8>)> {
     let reader = ManagedReader::open(path)?;
     let file_size = reader.len();
@@ -53,7 +71,7 @@ fn walk_zip_central_directory(
     central_directory_size: u64,
     total_entries: usize,
     max_entries: usize,
-) -> PyResult<(usize, bool, usize, bool, &'static str)> {
+) -> Result<(usize, bool, usize, bool, &'static str), ReadFault> {
     if total_entries == 0 || central_directory_size == 0 {
         return Ok((
             0,
@@ -77,8 +95,20 @@ fn walk_zip_central_directory(
             return Ok((checked, false, checked, false, "central_entry_out_of_range"));
         }
         let mut header = [0u8; ZIP_CENTRAL_DIRECTORY_HEADER_SIZE];
-        file.seek(SeekFrom::Start(cursor))?;
-        file.read_exact(&mut header)?;
+        seek_field(
+            file,
+            cursor,
+            file_size,
+            "zip.central_directory.entry_fixed",
+            FieldLocation::Tail,
+        )?;
+        read_exact_field(
+            file,
+            &mut header,
+            file_size,
+            "zip.central_directory.entry_fixed",
+            FieldLocation::Tail,
+        )?;
         if &header[0..4] != ZIP_CENTRAL_DIRECTORY_SIGNATURE {
             return Ok((
                 checked,
@@ -131,8 +161,20 @@ fn walk_zip_central_directory(
             ));
         }
         let mut sig = [0u8; 4];
-        file.seek(SeekFrom::Start(local_header_position))?;
-        file.read_exact(&mut sig)?;
+        seek_field(
+            file,
+            local_header_position,
+            file_size,
+            "zip.local_header.signature",
+            FieldLocation::Body,
+        )?;
+        read_exact_field(
+            file,
+            &mut sig,
+            file_size,
+            "zip.local_header.signature",
+            FieldLocation::Body,
+        )?;
         if &sig != b"PK\x03\x04" {
             return Ok((
                 checked,

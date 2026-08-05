@@ -923,10 +923,30 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
 
         next_cursor = cursor + 512 + member_size + _tar_padding(member_size)
         if next_cursor > int(view.size):
+            payload_start = cursor + 512
+            requested = member_size + _tar_padding(member_size)
+            read_error = {
+                "code": "unexpected_eof",
+                "operation": "read_declared_range",
+                "field": "tar.member.payload",
+                "location": "tail",
+                "offset": payload_start,
+                "requested": requested,
+                "actual": max(0, int(view.size) - payload_start),
+                "source_len": int(view.size),
+                "volume_number": None,
+                "io_kind": "unexpectedeof",
+                "os_error": None,
+                "detail": "declared TAR member payload extends beyond available input",
+                "possible_missing_volume": True,
+            }
             result.update({
                 "entries_checked": entries,
                 "error": "member_payload_out_of_range",
-                "damage_flags": ["probably_truncated"],
+                "read_error": read_error,
+                "error_field": "tar.member.payload",
+                "possible_missing_volume": True,
+                "damage_flags": ["probably_truncated", "read_error", "input_truncated", "missing_volume"],
             })
             if entries > 0:
                 result.update({
@@ -944,6 +964,21 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
         ]
 
     if entries > 0:
+        read_error = {
+            "code": "unexpected_eof",
+            "operation": "read_record",
+            "field": "tar.archive.end_zero_blocks",
+            "location": "tail",
+            "offset": cursor,
+            "requested": 1024,
+            "actual": min(1024, max(0, int(view.size) - cursor)),
+            "source_len": int(view.size),
+            "volume_number": None,
+            "io_kind": "unexpectedeof",
+            "os_error": None,
+            "detail": "TAR end zero blocks are unavailable",
+            "possible_missing_volume": True,
+        }
         result.update({
             "plausible": True,
             "entries_checked": entries,
@@ -951,7 +986,10 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
             "segment_end": cursor,
             "boundary_confidence": "medium",
             "error": "tar_end_zero_blocks_not_found",
-            "damage_flags": ["missing_end_block"],
+            "read_error": read_error,
+            "error_field": "tar.archive.end_zero_blocks",
+            "possible_missing_volume": True,
+            "damage_flags": ["missing_end_block", "read_error", "input_truncated", "probably_truncated", "missing_volume"],
             "evidence": ["tar:header_checksum", "tar:block_walk_prefix"],
         })
     return result

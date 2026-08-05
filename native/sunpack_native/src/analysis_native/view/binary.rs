@@ -86,11 +86,14 @@ impl AnalysisBinaryView {
         result.set_item("content_integrity_warning", "")?;
         result.set_item("evidence", PyList::empty(py))?;
 
-        let eocd = self.read_at_bytes(eocd_offset, 22)?;
-        if eocd.len() < 22 {
-            result.set_item("error", "eocd_too_small")?;
-            return Ok(result.unbind());
-        }
+        let eocd = match self.read_field_at_bytes(eocd_offset, 22, "zip.eocd", FieldLocation::Tail)
+        {
+            Ok(data) => data,
+            Err(fault) => {
+                set_view_read_fault(&result, &fault, "eocd_too_small")?;
+                return Ok(result.unbind());
+            }
+        };
         if &eocd[0..4] != ZIP_EOCD {
             result.set_item("error", "bad_eocd_signature")?;
             return Ok(result.unbind());
@@ -147,8 +150,19 @@ impl AnalysisBinaryView {
             return Ok(result.unbind());
         }
 
-        let central_sig = self.read_at_bytes(physical_central_offset, 4)?;
-        if central_sig.len() < 4 || central_sig.as_slice() != ZIP_CENTRAL {
+        let central_sig = match self.read_field_at_bytes(
+            physical_central_offset,
+            4,
+            "zip.central_directory.signature",
+            FieldLocation::Tail,
+        ) {
+            Ok(data) => data,
+            Err(fault) => {
+                set_view_read_fault(&result, &fault, "central_directory_read_failed")?;
+                return Ok(result.unbind());
+            }
+        };
+        if central_sig.as_slice() != ZIP_CENTRAL {
             result.set_item("error", "bad_central_directory_signature")?;
             return Ok(result.unbind());
         }
@@ -222,7 +236,18 @@ impl AnalysisBinaryView {
         result.set_item("block_walk_ok", false)?;
         result.set_item("evidence", PyList::empty(py))?;
 
-        let header = self.read_at_bytes(start_offset, RAR5.len())?;
+        let header = match self.read_field_at_bytes(
+            start_offset,
+            RAR5.len(),
+            "rar.signature",
+            FieldLocation::Head,
+        ) {
+            Ok(data) => data,
+            Err(fault) => {
+                set_view_read_fault(&result, &fault, "rar_signature_incomplete_or_unknown")?;
+                return Ok(result.unbind());
+            }
+        };
         if header.starts_with(RAR5) {
             result.set_item("magic_matched", true)?;
             result.set_item("version", 5u8)?;
@@ -264,12 +289,18 @@ impl AnalysisBinaryView {
         result.set_item("next_header_nid_valid", false)?;
         result.set_item("evidence", PyList::empty(py))?;
 
-        let header = self.read_at_bytes(start_offset, 32)?;
-        if header.len() < 32 {
-            result.set_item("error", "7z_header_too_small")?;
-            result.set_item("magic_matched", header.starts_with(SEVEN_ZIP))?;
-            return Ok(result.unbind());
-        }
+        let header = match self.read_field_at_bytes(
+            start_offset,
+            32,
+            "7z.start_header",
+            FieldLocation::Head,
+        ) {
+            Ok(data) => data,
+            Err(fault) => {
+                set_view_read_fault(&result, &fault, "7z_header_too_small")?;
+                return Ok(result.unbind());
+            }
+        };
         if &header[0..6] != SEVEN_ZIP {
             result.set_item("error", "7z_signature_not_found")?;
             return Ok(result.unbind());
@@ -313,7 +344,15 @@ impl AnalysisBinaryView {
         }
         let size = self.reader.len();
         if segment_end > size {
-            result.set_item("error", "next_header_out_of_range")?;
+            let fault = ReadFault::short_read(
+                "read_declared_range",
+                next_header_start,
+                usize::try_from(next_header_size).unwrap_or(usize::MAX),
+                size.saturating_sub(next_header_start) as usize,
+                size,
+            )
+            .with_field("7z.next_header", FieldLocation::Tail);
+            set_view_read_fault(&result, &fault, "next_header_out_of_range")?;
             return Ok(result.unbind());
         }
         result.set_item("plausible", true)?;
@@ -322,7 +361,19 @@ impl AnalysisBinaryView {
         evidence.append("7z:start_header_crc")?;
         evidence.append("7z:next_header_range")?;
         if next_header_size <= max_next_header_check_bytes {
-            let next_header = self.read_at_bytes(next_header_start, next_header_size as usize)?;
+            let next_header = match self.read_field_at_bytes(
+                next_header_start,
+                next_header_size as usize,
+                "7z.next_header",
+                FieldLocation::Tail,
+            ) {
+                Ok(data) => data,
+                Err(fault) => {
+                    set_view_read_fault(&result, &fault, "next_header_read_failed")?;
+                    result.set_item("plausible", false)?;
+                    return Ok(result.unbind());
+                }
+            };
             let crc_ok = crc32(&next_header) == next_header_crc;
             let nid = next_header.first().copied().unwrap_or(0);
             let nid_valid = nid == 0x01 || nid == 0x17;

@@ -1,3 +1,4 @@
+use crate::io::read_fault::{read_exact_field, seek_field, FieldLocation};
 use aes::{
     cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit},
     Aes256,

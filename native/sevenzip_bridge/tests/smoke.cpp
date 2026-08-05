@@ -48,6 +48,12 @@ bool check_wrong_password_evidence() {
         looks_wrong_password(S_OK, kOpCrcError, true);
 }
 
+bool check_password_probe_status_names() {
+    return std::string(sunpack::sevenzip::status_name(
+        sunpack::sevenzip::PasswordTestStatus::NeedsVolumeOrTailDamaged
+    )) == "needs_volume_or_tail_damaged";
+}
+
 }  // namespace
 #endif
 
@@ -60,6 +66,10 @@ int wmain(int argc, wchar_t** argv) {
     if (!check_wrong_password_evidence()) {
         std::cerr << "wrong password evidence check failed\n";
         return 3;
+    }
+    if (!check_password_probe_status_names()) {
+        std::cerr << "password probe status name check failed\n";
+        return 4;
     }
 #endif
 

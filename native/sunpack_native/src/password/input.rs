@@ -1,3 +1,4 @@
+use crate::io::read_fault::{FieldLocation, ReadFault};
 use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -67,13 +68,19 @@ pub(crate) fn ranges_total_len(ranges: &[RangeSpec]) -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn read_prefix_from_ranges(
+pub(crate) fn read_prefix_from_ranges_field(
     ranges: &[RangeSpec],
     max_len: usize,
-) -> std::io::Result<Vec<u8>> {
+    field: &'static str,
+) -> Result<Vec<u8>, ReadFault> {
+    let total_len = ranges_total_len(ranges);
     let mut reader = VirtualRangeReader::new(Arc::from(ranges));
-    let mut data = vec![0u8; max_len.min(ranges_total_len(ranges) as usize)];
-    let len = reader.read(&mut data)?;
+    let requested = max_len.min(total_len as usize);
+    let mut data = vec![0u8; requested];
+    let len = reader.read(&mut data).map_err(|error| {
+        ReadFault::from_io(error, "read_ranges", 0, requested, 0, total_len)
+            .with_field(field, FieldLocation::Head)
+    })?;
     data.truncate(len);
     Ok(data)
 }
@@ -261,6 +268,43 @@ impl VolumeSet {
         Ok(output)
     }
 
+    pub(crate) fn read_disk_spanning_field(
+        &self,
+        disk: usize,
+        offset: u64,
+        size: usize,
+        field: &'static str,
+        location: FieldLocation,
+    ) -> Result<Vec<u8>, ReadFault> {
+        let data = self
+            .read_disk_spanning(disk, offset, size)
+            .map_err(|error| {
+                ReadFault::from_io(
+                    error,
+                    "read_volume",
+                    offset,
+                    size,
+                    0,
+                    self.volume_len(disk).unwrap_or(0),
+                )
+                .with_field(field, location)
+                .with_volume(disk as u32 + 1)
+            })?;
+        if data.len() != size {
+            return Err(ReadFault::short_read(
+                "read_volume",
+                offset,
+                size,
+                data.len(),
+                self.volume_len(disk).unwrap_or(0),
+            )
+            .with_field(field, location)
+            .with_volume(disk as u32 + 1)
+            .with_possible_missing_volume());
+        }
+        Ok(data)
+    }
+
     pub(crate) fn advance_disk_offset(
         &self,
         mut disk: usize,
@@ -282,20 +326,50 @@ impl VolumeSet {
         }
     }
 
-    pub(crate) fn read_last_tail(&self, size: usize) -> std::io::Result<Vec<u8>> {
+    pub(crate) fn read_last_tail_field(
+        &self,
+        size: usize,
+        field: &'static str,
+    ) -> Result<Vec<u8>, ReadFault> {
         let disk = self.volumes.len().saturating_sub(1);
         let Some(volume_len) = self.volume_len(disk) else {
-            return Ok(Vec::new());
+            return Err(ReadFault::short_read("read_volume_tail", 0, size, 0, 0)
+                .with_field(field, FieldLocation::Tail)
+                .with_volume(disk as u32 + 1));
         };
         let read_size = size.min(volume_len as usize);
-        self.read_disk_spanning(disk, volume_len - read_size as u64, read_size)
+        self.read_disk_spanning_field(
+            disk,
+            volume_len - read_size as u64,
+            read_size,
+            field,
+            FieldLocation::Tail,
+        )
     }
 
-    pub(crate) fn first_prefix(&self, size: usize) -> std::io::Result<Vec<u8>> {
+    pub(crate) fn first_prefix_field(
+        &self,
+        size: usize,
+        field: &'static str,
+    ) -> Result<Vec<u8>, ReadFault> {
         let Some(volume_len) = self.volume_len(0) else {
-            return Ok(Vec::new());
+            return Err(ReadFault::short_read("read_volume", 0, size, 0, 0)
+                .with_field(field, FieldLocation::Head)
+                .with_volume(1));
         };
         self.read_disk_spanning(0, 0, size.min(volume_len as usize))
+            .map_err(|error| {
+                ReadFault::from_io(
+                    error,
+                    "read_volume",
+                    0,
+                    size.min(volume_len as usize),
+                    0,
+                    volume_len,
+                )
+                .with_field(field, FieldLocation::Head)
+                .with_volume(1)
+            })
     }
 }
 

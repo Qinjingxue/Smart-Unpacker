@@ -138,6 +138,36 @@ bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_pa
     return available_size < expected_size;
 }
 
+bool zip_parts_require_unavailable_tail(const std::vector<std::wstring>& part_paths, bool structured_order) {
+    const auto existing = unique_existing_paths(L"", part_paths);
+    const auto volumes = structured_order ? existing : sorted_data_volume_paths(existing);
+    if (volumes.empty() || (!structured_order && !has_numbered_split_head(volumes))) {
+        return false;
+    }
+
+    RangeFile first(volumes.front());
+    const std::size_t prefix_size = static_cast<std::size_t>(std::min<UInt64>(first.size(), 16u * 1024u * 1024u));
+    std::vector<unsigned char> prefix;
+    const unsigned char local_signature[] = {'P', 'K', 0x03, 0x04};
+    const unsigned char split_signature[] = {'P', 'K', 0x07, 0x08};
+    if (!first.valid() || prefix_size < 4 || !first.read(0, prefix_size, prefix)) {
+        return false;
+    }
+    if (std::search(prefix.begin(), prefix.end(), std::begin(local_signature), std::end(local_signature)) == prefix.end() &&
+        std::search(prefix.begin(), prefix.end(), std::begin(split_signature), std::end(split_signature)) == prefix.end()) {
+        return false;
+    }
+
+    RangeFile last(volumes.back());
+    const std::size_t tail_size = static_cast<std::size_t>(std::min<UInt64>(last.size(), 65557u));
+    std::vector<unsigned char> tail;
+    const unsigned char eocd_signature[] = {'P', 'K', 0x05, 0x06};
+    if (!last.valid() || tail_size < 4 || !last.read(last.size() - tail_size, tail_size, tail)) {
+        return true;
+    }
+    return std::search(tail.begin(), tail.end(), std::begin(eocd_signature), std::end(eocd_signature)) == tail.end();
+}
+
 #endif
 
 }  // namespace sunpack::sevenzip

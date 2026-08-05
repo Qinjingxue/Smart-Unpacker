@@ -598,19 +598,42 @@ class SingleArchiveExtractor:
                 "",
                 False,
             ),
+            PasswordResolutionStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED: (
+                FailureKind.MISSING_VOLUME,
+                "failure.missing_volume_or_tail_damaged",
+                "",
+                False,
+            ),
         }
         spec = mapping.get(resolution.status)
         if spec is None:
             return None
         kind, message_key, user_action, repairable = spec
+        native_result = resolution.test_result if isinstance(resolution.test_result, dict) else {}
+        read_error = native_result.get("read_error")
+        message_params = {}
+        if isinstance(read_error, dict) and read_error.get("field"):
+            field_code = str(read_error["field"])
+            field_name = self.i18n.t(f"archive.field.{field_code}")
+            message_key = (
+                "failure.archive_field_read_failed_possible_missing_volume"
+                if read_error.get("possible_missing_volume")
+                else "failure.archive_field_read_failed"
+            )
+            message_params = {
+                "field": field_name,
+                "offset": int(read_error.get("offset") or 0),
+                "requested": int(read_error.get("requested") or 0),
+                "actual": int(read_error.get("actual") or 0),
+            }
         return FailureInfo(
             kind=kind,
             stage="password_resolution",
-            message=self.i18n.t(message_key),
+            message=self.i18n.t(message_key, **message_params),
             message_key=message_key,
             user_action=user_action,
             repairable=repairable,
-            details={"diagnostic": resolution.error_text},
+            details={"diagnostic": resolution.error_text, "read_error": read_error},
         )
 
     @staticmethod

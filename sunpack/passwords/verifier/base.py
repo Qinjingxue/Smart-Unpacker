@@ -11,6 +11,7 @@ VerifierStatus = Literal[
     "damaged",
     "unsupported_method",
     "backend_unavailable",
+    "needs_volume_or_tail_damaged",
 ]
 
 
@@ -21,6 +22,7 @@ VERIFIER_STATUSES = {
     "damaged",
     "unsupported_method",
     "backend_unavailable",
+    "needs_volume_or_tail_damaged",
 }
 
 

@@ -18,6 +18,8 @@
 
 #include "sevenzip_streams.hpp"
 
+#include "strict_archive_validation.hpp"
+
 
 
 namespace sunpack::sevenzip {
@@ -27,6 +29,28 @@ namespace sunpack::sevenzip {
 #ifdef _WIN32
 
 namespace {
+
+PasswordTestResult needs_volume_or_tail_damaged_result(
+    const char* evidence,
+    const std::wstring& requested_name = L"") {
+    PasswordTestResult result;
+    result.backend_available = true;
+    result.status = PasswordTestStatus::NeedsVolumeOrTailDamaged;
+    result.message = "password probe could not read required tail data; missing volume or damaged tail offset/structure";
+    if (evidence && *evidence) {
+        result.message += " [evidence=";
+        result.message += evidence;
+        result.message += "]";
+    }
+    if (!requested_name.empty()) {
+        result.message += " [requested_volume=";
+        for (wchar_t ch : requested_name) {
+            result.message.push_back(ch >= 0x20 && ch <= 0x7e ? static_cast<char>(ch) : '?');
+        }
+        result.message += "]";
+    }
+    return result;
+}
 
 bool encrypted_header_range_probe_candidate(const std::wstring& archive_type) {
     return archive_type == L"7z" || archive_type == L"rar" || archive_type == L"rar4" || archive_type == L"rar5";
@@ -237,6 +261,14 @@ PasswordTestResult test_one_password(
 
             hr = archive->Open(stream.get(), nullptr, open_callback.get());
             last_encryption_evidence = raw_open_callback->password_requested();
+
+            if (raw_open_callback->missing_volume_requested()) {
+                auto missing = needs_volume_or_tail_damaged_result(
+                    "open_volume_callback_not_found",
+                    raw_open_callback->missing_volume_name());
+                apply_plan_metadata(missing, plan);
+                return missing;
+            }
 
             if (hr != S_OK) {
 
@@ -460,6 +492,12 @@ PasswordTestResult test_one_password_reuse_stream(
 
         hr = archive->Open(stream, nullptr, open_callback.get());
         last_encryption_evidence = raw_open_callback->password_requested();
+
+        if (raw_open_callback->missing_volume_requested()) {
+            return needs_volume_or_tail_damaged_result(
+                "open_volume_callback_not_found",
+                raw_open_callback->missing_volume_name());
+        }
 
         if (hr != S_OK) {
 
@@ -782,6 +820,16 @@ PasswordTestResult test_passwords_with_parts(
 
         part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
 
+    if (has_split_volume_gap(effective_part_paths)) {
+        return needs_volume_or_tail_damaged_result("standard_sequence_gap");
+    }
+    if (seven_zip_parts_prove_missing_tail(effective_part_paths, !canonical_names.empty())) {
+        return needs_volume_or_tail_damaged_result("seven_zip_start_header_length");
+    }
+    if (zip_parts_require_unavailable_tail(effective_part_paths, !canonical_names.empty())) {
+        return needs_volume_or_tail_damaged_result("zip_eocd_unavailable");
+    }
+
     const std::vector<GUID> formats = candidate_formats(archive_path, effective_part_paths);
 
 
@@ -823,6 +871,8 @@ PasswordTestResult test_passwords_with_parts(
         if (current.status == PasswordTestStatus::BackendUnavailable ||
 
             current.status == PasswordTestStatus::Damaged ||
+
+            current.status == PasswordTestStatus::NeedsVolumeOrTailDamaged ||
 
             current.status == PasswordTestStatus::Error) {
 
@@ -967,6 +1017,8 @@ PasswordTestResult test_passwords_with_ranges(
         if (current.status == PasswordTestStatus::BackendUnavailable ||
 
             current.status == PasswordTestStatus::Damaged ||
+
+            current.status == PasswordTestStatus::NeedsVolumeOrTailDamaged ||
 
             current.status == PasswordTestStatus::Error) {
 

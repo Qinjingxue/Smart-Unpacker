@@ -9,6 +9,7 @@ from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.failures import FailureKind
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
+from sunpack.i18n import I18nContext
 
 
 def test_split_worker_damage_takes_precedence_over_wrong_password_signal():
@@ -92,6 +93,35 @@ def test_unknown_empty_password_on_split_input_is_not_conclusive_password_eviden
 
     assert failure.kind is FailureKind.PASSWORD_INCONCLUSIVE
     assert failure.is_password_failure is False
+
+
+def test_password_probe_tail_failure_maps_to_missing_volume_with_ambiguous_cli_message():
+    extractor = object.__new__(SingleArchiveExtractor)
+    extractor.i18n = I18nContext("zh")
+    resolution = PasswordResolution(
+        password=None,
+        status=PasswordResolutionStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED,
+        error_text="evidence=seven_zip_start_header_length",
+        test_result={
+            "read_error": {
+                "field": "7z.next_header",
+                "offset": 4096,
+                "requested": 128,
+                "actual": 0,
+                "possible_missing_volume": True,
+            }
+        },
+    )
+
+    failure = extractor._password_resolution_failure(resolution)
+
+    assert failure is not None
+    assert failure.kind is FailureKind.MISSING_VOLUME
+    assert "7z 尾部 Next Header" in failure.message
+    assert "可能缺少分卷" in failure.message
+    assert failure.message_key == "failure.archive_field_read_failed_possible_missing_volume"
+    assert failure.details["read_error"]["field"] == "7z.next_header"
+    assert failure.details["diagnostic"] == "evidence=seven_zip_start_header_length"
 
 
 def test_known_encrypted_split_input_keeps_wrong_password_failure():

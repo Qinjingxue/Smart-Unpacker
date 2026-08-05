@@ -1,13 +1,15 @@
+use crate::io::read_fault::{read_exact_field, seek_field, FieldLocation, ReadFault};
 use crate::io::reader::ManagedReader;
 use crate::password::input::{
     parse_ranges, parse_volumes, ranges_total_len, VirtualRangeReader, VolumeSet,
 };
+use crate::password::password_read_fault_status;
 use pbkdf2::pbkdf2_hmac;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use sha1::Sha1;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
 const ZIP_CENTRAL: &[u8] = b"PK\x01\x02";
@@ -77,17 +79,26 @@ fn verify_zip_volumes(
     volumes: &VolumeSet,
     candidates: &[String],
 ) -> PyResult<Py<PyAny>> {
-    let tail = volumes.read_last_tail(MAX_EOCD_SCAN)?;
+    let tail = match volumes.read_last_tail_field(MAX_EOCD_SCAN, "zip.eocd_search_window") {
+        Ok(tail) => tail,
+        Err(fault) => return password_read_fault_status(py, &fault),
+    };
     let Some(eocd_offset) = find_last_signature(&tail, ZIP_EOCD) else {
-        return simple_status(
-            py,
-            "unknown_need_fallback",
-            0,
-            "zip EOCD was not found in terminal volume",
-        );
+        let fault =
+            ReadFault::invalid_field("locate", 0, 22, tail.len() as u64, "ZIP EOCD was not found")
+                .with_field("zip.eocd", FieldLocation::Tail);
+        return password_read_fault_status(py, &fault);
     };
     if eocd_offset + 22 > tail.len() {
-        return simple_status(py, "damaged", 0, "zip EOCD is incomplete");
+        let fault = ReadFault::short_read(
+            "read_record",
+            eocd_offset as u64,
+            22,
+            tail.len().saturating_sub(eocd_offset),
+            tail.len() as u64,
+        )
+        .with_field("zip.eocd", FieldLocation::Tail);
+        return password_read_fault_status(py, &fault);
     }
     let disk_number = le_u16(&tail, eocd_offset + 4).unwrap_or(u16::MAX) as usize;
     let central_disk = le_u16(&tail, eocd_offset + 6).unwrap_or(u16::MAX) as usize;
@@ -95,12 +106,19 @@ fn verify_zip_volumes(
     let central_size = le_u32(&tail, eocd_offset + 12).unwrap_or(u32::MAX) as u64;
     let central_offset = le_u32(&tail, eocd_offset + 16).unwrap_or(u32::MAX) as u64;
     if disk_number + 1 != volumes.len() {
-        return simple_status(
-            py,
-            "unknown_need_fallback",
-            0,
-            "zip volume set is incomplete or misnumbered",
-        );
+        let fault = ReadFault::invalid_field(
+            "validate_field",
+            eocd_offset as u64 + 4,
+            2,
+            tail.len() as u64,
+            format!(
+                "declared disk count {} does not match available volume count {}",
+                disk_number + 1,
+                volumes.len()
+            ),
+        )
+        .with_field("zip.eocd.disk_number", FieldLocation::Tail);
+        return password_read_fault_status(py, &fault);
     }
     if total_entries == u16::MAX as usize
         || central_size == u32::MAX as u64
@@ -125,9 +143,26 @@ fn verify_zip_volumes(
     let mut disk = central_disk;
     let mut offset = central_offset;
     for _ in 0..total_entries {
-        let fixed = volumes.read_disk_spanning(disk, offset, 46)?;
-        if fixed.len() < 46 || &fixed[..4] != ZIP_CENTRAL {
-            return simple_status(py, "damaged", 0, "zip central directory entry is malformed");
+        let fixed = match volumes.read_disk_spanning_field(
+            disk,
+            offset,
+            46,
+            "zip.central_directory.entry_fixed",
+            FieldLocation::Tail,
+        ) {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
+        if &fixed[..4] != ZIP_CENTRAL {
+            let fault = ReadFault::invalid_field(
+                "validate_signature",
+                offset,
+                4,
+                46,
+                "invalid ZIP central-directory signature",
+            )
+            .with_field("zip.central_directory.entry_signature", FieldLocation::Tail);
+            return password_read_fault_status(py, &fault);
         }
         let flags = le_u16(&fixed, 8).unwrap_or(0);
         let name_len = le_u16(&fixed, 28).unwrap_or(0) as u64;
@@ -150,9 +185,9 @@ fn verify_zip_volumes(
         let Some(next) = volumes.advance_disk_offset(disk, offset, record_len) else {
             return simple_status(
                 py,
-                "damaged",
+                "needs_volume_or_tail_damaged",
                 0,
-                "zip central directory crosses a missing volume",
+                "zip central directory crosses unavailable data; missing volume or damaged tail field",
             );
         };
         (disk, offset) = next;
@@ -167,9 +202,26 @@ fn verify_zip_volume_entry(
     local_offset: u64,
     candidates: &[String],
 ) -> PyResult<Py<PyAny>> {
-    let fixed = volumes.read_disk_spanning(disk, local_offset, 30)?;
-    if fixed.len() < 30 || &fixed[..4] != ZIP_LOCAL {
-        return simple_status(py, "damaged", 0, "zip local header link is invalid");
+    let fixed = match volumes.read_disk_spanning_field(
+        disk,
+        local_offset,
+        30,
+        "zip.local_header.fixed",
+        FieldLocation::Body,
+    ) {
+        Ok(data) => data,
+        Err(fault) => return password_read_fault_status(py, &fault),
+    };
+    if &fixed[..4] != ZIP_LOCAL {
+        let fault = ReadFault::invalid_field(
+            "validate_signature",
+            local_offset,
+            4,
+            30,
+            "invalid ZIP local-header signature",
+        )
+        .with_field("zip.local_header.signature", FieldLocation::Body);
+        return password_read_fault_status(py, &fault);
     }
     let flags = le_u16(&fixed, 6).unwrap_or(0);
     let method = le_u16(&fixed, 8).unwrap_or(0);
@@ -182,24 +234,21 @@ fn verify_zip_volume_entry(
     else {
         return simple_status(
             py,
-            "damaged",
+            "needs_volume_or_tail_damaged",
             0,
             "zip local header crosses a missing volume",
         );
     };
-    let variable = volumes.read_disk_spanning(
+    let variable = match volumes.read_disk_spanning_field(
         variable_disk,
         variable_offset,
         (name_len + extra_len) as usize,
-    )?;
-    if variable.len() != (name_len + extra_len) as usize {
-        return simple_status(
-            py,
-            "damaged",
-            0,
-            "zip local header fields cross a missing volume",
-        );
-    }
+        "zip.local_header.name_extra",
+        FieldLocation::Body,
+    ) {
+        Ok(data) => data,
+        Err(fault) => return password_read_fault_status(py, &fault),
+    };
     let extra = &variable[name_len as usize..];
     let data_delta = 30 + name_len + extra_len;
     let Some((data_disk, data_offset)) =
@@ -207,7 +256,7 @@ fn verify_zip_volume_entry(
     else {
         return simple_status(
             py,
-            "damaged",
+            "needs_volume_or_tail_damaged",
             0,
             "zip encrypted data starts beyond available volumes",
         );
@@ -229,13 +278,28 @@ fn verify_zip_volume_entry(
                 "unsupported winzip AES strength",
             );
         };
-        let material = volumes.read_disk_spanning(data_disk, data_offset, salt_len + 2)?;
+        let material = match volumes.read_disk_spanning_field(
+            data_disk,
+            data_offset,
+            salt_len + 2,
+            "zip.aes.salt_password_verifier",
+            FieldLocation::Body,
+        ) {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
         return verify_winzip_aes_material(py, candidates, strength, &material);
     }
-    let material = volumes.read_disk_spanning(data_disk, data_offset, 12)?;
-    if material.len() != 12 {
-        return simple_status(py, "damaged", 0, "zip encryption header is incomplete");
-    }
+    let material = match volumes.read_disk_spanning_field(
+        data_disk,
+        data_offset,
+        12,
+        "zip.zipcrypto.encryption_header",
+        FieldLocation::Body,
+    ) {
+        Ok(data) => data,
+        Err(fault) => return password_read_fault_status(py, &fault),
+    };
     let mut header = [0u8; 12];
     header.copy_from_slice(&material);
     let check_byte = if flags & 0x0008 != 0 {
@@ -253,17 +317,41 @@ fn verify_zip_stream<R: Read + Seek>(
     candidates: &[String],
 ) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
-    if let Ok(Some(header)) = locate_encrypted_entry_from_central_directory(file, total_len) {
-        return verify_zip_header(py, file, candidates, &header);
+    if let Err(fault) = zip_tail_requirement(file, total_len) {
+        return password_read_fault_status(py, &fault);
+    }
+    match locate_encrypted_entry_from_central_directory(file, total_len) {
+        Ok(Some(mut header)) => {
+            header.source_len = total_len;
+            return verify_zip_header(py, file, candidates, &header);
+        }
+        Ok(None) => {}
+        Err(fault) => return password_read_fault_status(py, &fault),
     }
     // Central-directory probing leaves the shared/range reader near the end.
     // Rewind before the bounded local-header fallback; otherwise an
     // unencrypted ZIP (or an inconclusive central scan) reads from EOF and
     // leaks `failed to fill whole buffer` into the watch completion path.
-    file.seek(SeekFrom::Start(0))?;
+    if let Err(fault) = seek_field(
+        file,
+        0,
+        total_len,
+        "zip.local_header_scan",
+        FieldLocation::Head,
+    ) {
+        return password_read_fault_status(py, &fault);
+    }
     let scan_len = total_len.min(MAX_PREFIX_SCAN as u64) as usize;
     let mut prefix = vec![0u8; scan_len];
-    file.read_exact(&mut prefix)?;
+    if let Err(fault) = read_exact_field(
+        file,
+        &mut prefix,
+        total_len,
+        "zip.local_header_scan",
+        FieldLocation::Head,
+    ) {
+        return password_read_fault_status(py, &fault);
+    }
 
     let Some(local_offset) = find_signature(&prefix, ZIP_LOCAL) else {
         result.set_item("status", "unsupported_method")?;
@@ -273,13 +361,14 @@ fn verify_zip_stream<R: Read + Seek>(
         return Ok(result.into());
     };
 
-    let Some(header) = parse_local_header(&prefix, local_offset) else {
+    let Some(mut header) = parse_local_header(&prefix, local_offset) else {
         result.set_item("status", "damaged")?;
         result.set_item("matched_index", -1)?;
         result.set_item("attempts", 0)?;
         result.set_item("message", "zip local header is incomplete or malformed")?;
         return Ok(result.into());
     };
+    header.source_len = total_len;
 
     verify_zip_header(py, file, candidates, &header)
 }
@@ -303,13 +392,23 @@ fn verify_zip_header<R: Read + Seek>(
     }
 
     let mut encryption_header = [0u8; 12];
-    file.seek(SeekFrom::Start(header.data_offset))?;
-    if file.read_exact(&mut encryption_header).is_err() {
-        result.set_item("status", "damaged")?;
-        result.set_item("matched_index", -1)?;
-        result.set_item("attempts", 0)?;
-        result.set_item("message", "zip encryption header is incomplete")?;
-        return Ok(result.into());
+    if let Err(fault) = seek_field(
+        file,
+        header.data_offset,
+        header.source_len,
+        "zip.zipcrypto.encryption_header",
+        FieldLocation::Body,
+    ) {
+        return password_read_fault_status(py, &fault);
+    }
+    if let Err(fault) = read_exact_field(
+        file,
+        &mut encryption_header,
+        header.source_len,
+        "zip.zipcrypto.encryption_header",
+        FieldLocation::Body,
+    ) {
+        return password_read_fault_status(py, &fault);
     }
 
     verify_zipcrypto_material(py, candidates, &encryption_header, header.check_byte)
@@ -321,6 +420,7 @@ struct ZipLocalHeader {
     aes_strength: Option<u8>,
     check_byte: u8,
     data_offset: u64,
+    source_len: u64,
 }
 
 fn parse_local_header(bytes: &[u8], offset: usize) -> Option<ZipLocalHeader> {
@@ -353,6 +453,7 @@ fn parse_local_header(bytes: &[u8], offset: usize) -> Option<ZipLocalHeader> {
         aes_strength,
         check_byte,
         data_offset: data_offset as u64,
+        source_len: bytes.len() as u64,
     })
 }
 
@@ -378,82 +479,242 @@ fn verify_winzip_aes(
         return Ok(result.into());
     };
     let mut salt_and_verifier = vec![0u8; salt_len + 2];
-    file.seek(SeekFrom::Start(header.data_offset))?;
-    if file.read_exact(&mut salt_and_verifier).is_err() {
-        result.set_item("status", "damaged")?;
-        result.set_item("matched_index", -1)?;
-        result.set_item("attempts", 0)?;
-        result.set_item(
-            "message",
-            "winzip aes salt or password verifier is incomplete",
-        )?;
-        return Ok(result.into());
+    if let Err(fault) = seek_field(
+        file,
+        header.data_offset,
+        header.source_len,
+        "zip.aes.salt_password_verifier",
+        FieldLocation::Body,
+    ) {
+        return password_read_fault_status(py, &fault);
+    }
+    if let Err(fault) = read_exact_field(
+        file,
+        &mut salt_and_verifier,
+        header.source_len,
+        "zip.aes.salt_password_verifier",
+        FieldLocation::Body,
+    ) {
+        return password_read_fault_status(py, &fault);
     }
     verify_winzip_aes_material(py, candidates, strength, &salt_and_verifier)
+}
+
+fn zip_tail_requirement<R: Read + Seek>(file: &mut R, total_len: u64) -> Result<(), ReadFault> {
+    let tail_len = MAX_EOCD_SCAN.min(total_len as usize);
+    if tail_len < 22 {
+        return Err(
+            ReadFault::short_read("read_record", 0, 22, tail_len, total_len)
+                .with_field("zip.eocd", FieldLocation::Tail),
+        );
+    }
+    seek_field(
+        file,
+        total_len - tail_len as u64,
+        total_len,
+        "zip.eocd_search_window",
+        FieldLocation::Tail,
+    )?;
+    let mut tail = vec![0u8; tail_len];
+    read_exact_field(
+        file,
+        &mut tail,
+        total_len,
+        "zip.eocd_search_window",
+        FieldLocation::Tail,
+    )?;
+    let Some(eocd) = find_last_signature(&tail, ZIP_EOCD) else {
+        return Err(ReadFault::invalid_field(
+            "locate",
+            total_len.saturating_sub(tail_len as u64),
+            22,
+            total_len,
+            "ZIP EOCD was not found",
+        )
+        .with_field("zip.eocd", FieldLocation::Tail));
+    };
+    if eocd + 22 > tail.len() {
+        return Err(ReadFault::short_read(
+            "read_record",
+            total_len - tail_len as u64 + eocd as u64,
+            22,
+            tail.len().saturating_sub(eocd),
+            total_len,
+        )
+        .with_field("zip.eocd", FieldLocation::Tail));
+    }
+    Ok(())
 }
 
 fn locate_encrypted_entry_from_central_directory<R: Read + Seek>(
     file: &mut R,
     total_len: u64,
-) -> Result<Option<ZipLocalHeader>, ()> {
+) -> Result<Option<ZipLocalHeader>, ReadFault> {
     let tail_len = MAX_EOCD_SCAN.min(total_len as usize);
     let tail_start = total_len.saturating_sub(tail_len as u64);
     let mut tail = vec![0u8; tail_len];
-    file.seek(SeekFrom::Start(tail_start)).map_err(|_| ())?;
-    file.read_exact(&mut tail).map_err(|_| ())?;
-    let eocd = find_last_signature(&tail, ZIP_EOCD).ok_or(())?;
+    seek_field(
+        file,
+        tail_start,
+        total_len,
+        "zip.eocd_search_window",
+        FieldLocation::Tail,
+    )?;
+    read_exact_field(
+        file,
+        &mut tail,
+        total_len,
+        "zip.eocd_search_window",
+        FieldLocation::Tail,
+    )?;
+    let eocd = find_last_signature(&tail, ZIP_EOCD).ok_or_else(|| {
+        ReadFault::invalid_field(
+            "locate",
+            tail_start,
+            22,
+            total_len,
+            "ZIP EOCD was not found",
+        )
+        .with_field("zip.eocd", FieldLocation::Tail)
+    })?;
     if eocd + 22 > tail.len()
         || le_u16(&tail, eocd + 4) != Some(0)
         || le_u16(&tail, eocd + 6) != Some(0)
     {
-        return Err(());
+        return Err(ReadFault::short_read(
+            "parse_record",
+            tail_start + eocd as u64,
+            22,
+            tail.len().saturating_sub(eocd),
+            total_len,
+        )
+        .with_field("zip.eocd", FieldLocation::Tail));
     }
-    let total_entries = le_u16(&tail, eocd + 10).ok_or(())? as usize;
-    let central_size = le_u32(&tail, eocd + 12).ok_or(())? as u64;
-    let central_offset = le_u32(&tail, eocd + 16).ok_or(())? as u64;
+    let total_entries = le_u16(&tail, eocd + 10).unwrap() as usize;
+    let central_size = le_u32(&tail, eocd + 12).unwrap() as u64;
+    let central_offset = le_u32(&tail, eocd + 16).unwrap() as u64;
     if total_entries == u16::MAX as usize
         || central_size == u32::MAX as u64
         || central_offset == u32::MAX as u64
         || central_size > MAX_CENTRAL_SCAN
     {
-        return Err(());
+        return Err(ReadFault::invalid_field(
+            "validate_field",
+            tail_start + eocd as u64 + 10,
+            12,
+            total_len,
+            "ZIP central-directory location requires ZIP64 or exceeds the bounded probe",
+        )
+        .with_field("zip.eocd.central_directory_location", FieldLocation::Tail));
     }
     let mut cursor = central_offset;
     for _ in 0..total_entries {
         let mut fixed = [0u8; 46];
-        file.seek(SeekFrom::Start(cursor)).map_err(|_| ())?;
-        file.read_exact(&mut fixed).map_err(|_| ())?;
+        seek_field(
+            file,
+            cursor,
+            total_len,
+            "zip.central_directory.entry_fixed",
+            FieldLocation::Tail,
+        )?;
+        read_exact_field(
+            file,
+            &mut fixed,
+            total_len,
+            "zip.central_directory.entry_fixed",
+            FieldLocation::Tail,
+        )?;
         if &fixed[..4] != ZIP_CENTRAL {
-            return Err(());
+            return Err(ReadFault::invalid_field(
+                "validate_signature",
+                cursor,
+                4,
+                total_len,
+                "invalid ZIP central-directory signature",
+            )
+            .with_field("zip.central_directory.entry_signature", FieldLocation::Tail));
         }
-        let flags = le_u16(&fixed, 8).ok_or(())?;
-        let name_len = le_u16(&fixed, 28).ok_or(())? as u64;
-        let extra_len = le_u16(&fixed, 30).ok_or(())? as u64;
-        let comment_len = le_u16(&fixed, 32).ok_or(())? as u64;
+        let flags = le_u16(&fixed, 8).unwrap();
+        let name_len = le_u16(&fixed, 28).unwrap() as u64;
+        let extra_len = le_u16(&fixed, 30).unwrap() as u64;
+        let comment_len = le_u16(&fixed, 32).unwrap() as u64;
         if flags & 0x0001 != 0 {
-            let local_offset = le_u32(&fixed, 42).ok_or(())? as u64;
+            let local_offset = le_u32(&fixed, 42).unwrap() as u64;
             if local_offset == u32::MAX as u64 {
-                return Err(());
+                return Err(ReadFault::invalid_field(
+                    "validate_field",
+                    cursor + 42,
+                    4,
+                    total_len,
+                    "ZIP64 local-header offset requires fallback",
+                )
+                .with_field(
+                    "zip.central_directory.local_header_offset",
+                    FieldLocation::Tail,
+                ));
             }
             let mut local_fixed = [0u8; 30];
-            file.seek(SeekFrom::Start(local_offset)).map_err(|_| ())?;
-            file.read_exact(&mut local_fixed).map_err(|_| ())?;
+            seek_field(
+                file,
+                local_offset,
+                total_len,
+                "zip.local_header.fixed",
+                FieldLocation::Body,
+            )?;
+            read_exact_field(
+                file,
+                &mut local_fixed,
+                total_len,
+                "zip.local_header.fixed",
+                FieldLocation::Body,
+            )?;
             if &local_fixed[..4] != ZIP_LOCAL {
-                return Err(());
+                return Err(ReadFault::invalid_field(
+                    "validate_signature",
+                    local_offset,
+                    4,
+                    total_len,
+                    "invalid ZIP local-header signature",
+                )
+                .with_field("zip.local_header.signature", FieldLocation::Body));
             }
-            let local_name_len = le_u16(&local_fixed, 26).ok_or(())? as usize;
-            let local_extra_len = le_u16(&local_fixed, 28).ok_or(())? as usize;
+            let local_name_len = le_u16(&local_fixed, 26).unwrap() as usize;
+            let local_extra_len = le_u16(&local_fixed, 28).unwrap() as usize;
             let mut local = Vec::with_capacity(30 + local_name_len + local_extra_len);
             local.extend_from_slice(&local_fixed);
             local.resize(30 + local_name_len + local_extra_len, 0);
-            file.read_exact(&mut local[30..]).map_err(|_| ())?;
-            let mut header = parse_local_header(&local, 0).ok_or(())?;
+            read_exact_field(
+                file,
+                &mut local[30..],
+                total_len,
+                "zip.local_header.name_extra",
+                FieldLocation::Body,
+            )?;
+            let mut header = parse_local_header(&local, 0).ok_or_else(|| {
+                ReadFault::invalid_field(
+                    "parse_record",
+                    local_offset,
+                    local.len(),
+                    total_len,
+                    "invalid ZIP local header",
+                )
+                .with_field("zip.local_header", FieldLocation::Body)
+            })?;
             header.data_offset = header.data_offset.saturating_add(local_offset);
             return Ok(Some(header));
         }
         cursor = cursor
             .checked_add(46 + name_len + extra_len + comment_len)
-            .ok_or(())?;
+            .ok_or_else(|| {
+                ReadFault::invalid_field(
+                    "advance",
+                    cursor,
+                    12,
+                    total_len,
+                    "ZIP central-directory entry length overflow",
+                )
+                .with_field("zip.central_directory.entry_length", FieldLocation::Tail)
+            })?;
     }
     Ok(None)
 }

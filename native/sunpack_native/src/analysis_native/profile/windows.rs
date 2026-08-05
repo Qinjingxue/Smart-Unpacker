@@ -170,10 +170,15 @@ impl LogicalVolumes {
             let local_start = offset.max(volume.start) - volume.start;
             let local_end = end.min(volume.end) - volume.start;
             let chunk_len = (local_end - local_start) as usize;
-            let mut file = File::open(&volume.path)?;
-            file.seek(SeekFrom::Start(local_start))?;
-            let mut chunk = vec![0; chunk_len];
-            file.read_exact(&mut chunk)?;
+            let reader = ManagedReader::open(&volume.path)?;
+            let chunk = reader
+                .read_exact_field_at(
+                    local_start,
+                    chunk_len,
+                    "profile.sample_window",
+                    FieldLocation::Body,
+                )
+                .map_err(|fault| pyo3::exceptions::PyIOError::new_err(fault.to_string()))?;
             out.extend_from_slice(&chunk);
         }
         Ok(out)

@@ -31,8 +31,15 @@ impl SevenZipPasswordProbe {
         let reader_len = reader
             .seek(std::io::SeekFrom::End(0))
             .map_err(|err| format!("7z password probe length read failed: {err}"))?;
-        let start = read_seven_zip_probe_range(reader, 0, SEVEN_Z_HEADER_SIZE)
-            .map_err(|err| format!("7z password probe start header read failed: {err}"))?;
+        let start = read_seven_zip_probe_range(
+            reader,
+            reader_len,
+            0,
+            SEVEN_Z_HEADER_SIZE,
+            "7z.start_header",
+            FieldLocation::Head,
+        )
+        .map_err(|err| format!("7z password probe start header read failed: {err}"))?;
         if start.len() != SEVEN_Z_HEADER_SIZE || !start.starts_with(SEVEN_Z_MAGIC) || start[6] != 0
         {
             return Err("7z password probe signature or version is unsupported".to_string());
@@ -56,8 +63,15 @@ impl SevenZipPasswordProbe {
         if next_header_end > reader_len {
             return Err("7z password probe next header is truncated".to_string());
         }
-        let raw = read_seven_zip_probe_range(reader, next_header_start, next_header_size)
-            .map_err(|err| format!("7z password probe next header read failed: {err}"))?;
+        let raw = read_seven_zip_probe_range(
+            reader,
+            reader_len,
+            next_header_start,
+            next_header_size,
+            "7z.next_header",
+            FieldLocation::Tail,
+        )
+        .map_err(|err| format!("7z password probe next header read failed: {err}"))?;
         if crc32(&raw) != u32_le(&start, 28) {
             return Err("7z password probe next header crc is invalid".to_string());
         }
@@ -82,8 +96,15 @@ impl SevenZipPasswordProbe {
             let stream_size = usize::try_from(size.value)
                 .map_err(|_| "7z password probe stream is too large".to_string())?;
             packed_data.push(
-                read_seven_zip_probe_range(reader, stream_start, stream_size)
-                    .map_err(|err| format!("7z password probe stream read failed: {err}"))?,
+                read_seven_zip_probe_range(
+                    reader,
+                    reader_len,
+                    stream_start,
+                    stream_size,
+                    "7z.encoded_header.packed_stream",
+                    FieldLocation::Body,
+                )
+                .map_err(|err| format!("7z password probe stream read failed: {err}"))?,
             );
             stream_start = stream_end;
         }
@@ -113,12 +134,17 @@ impl SevenZipPasswordProbe {
 
 fn read_seven_zip_probe_range<R: Read + Seek>(
     reader: &mut R,
+    source_len: u64,
     offset: u64,
     len: usize,
+    field: &'static str,
+    location: FieldLocation,
 ) -> std::io::Result<Vec<u8>> {
-    reader.seek(std::io::SeekFrom::Start(offset))?;
+    seek_field(reader, offset, source_len, field, location)
+        .map_err(|fault| fault.into_io_error())?;
     let mut output = vec![0u8; len];
-    reader.read_exact(&mut output)?;
+    read_exact_field(reader, &mut output, source_len, field, location)
+        .map_err(|fault| fault.into_io_error())?;
     Ok(output)
 }
 

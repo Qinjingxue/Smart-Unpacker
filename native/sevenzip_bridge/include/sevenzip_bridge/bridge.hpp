@@ -13,6 +13,7 @@ enum class PasswordTestStatus {
     Unsupported,
     BackendUnavailable,
     Error,
+    NeedsVolumeOrTailDamaged,
 };
 
 struct PasswordTestResult {

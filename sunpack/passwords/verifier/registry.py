@@ -95,6 +95,18 @@ class PasswordVerifierChain:
                         final_confirmation_required=True,
                         match_evidence=fast_outcome.match_evidence,
                     )
+                if confirmation.status in {"damaged", "needs_volume_or_tail_damaged"}:
+                    return PasswordBatchVerification(
+                        ok=False,
+                        status=confirmation.status,
+                        matched_index=-1,
+                        attempts=total_fast_attempts,
+                        test_result=confirmation.test_result,
+                        error_text=confirmation.error_text or fast_outcome.error_text,
+                        terminal=True,
+                        final_confirmation_required=False,
+                        match_evidence=fast_outcome.match_evidence,
+                    )
                 next_offset = fast_outcome.matched_index + 1
                 remaining = remaining[next_offset:]
                 offset = candidate_index + 1
@@ -111,7 +123,11 @@ class PasswordVerifierChain:
                     terminal=False,
                 )
 
-            if fast_outcome.status in {"damaged", "backend_unavailable"}:
+            if fast_outcome.status in {
+                "damaged",
+                "backend_unavailable",
+                "needs_volume_or_tail_damaged",
+            }:
                 return fast_outcome
 
             final_outcome = self._run_final_verifier(archive_path, passwords, part_paths=part_paths, archive_input=archive_input)

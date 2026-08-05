@@ -7,6 +7,7 @@ from sunpack.passwords.verifier.base import PasswordBatchVerification
 from sunpack.support.sevenzip_bridge import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_DAMAGED,
+    STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED,
     STATUS_UNSUPPORTED,
     STATUS_WRONG_PASSWORD,
     get_native_password_tester,
@@ -66,6 +67,7 @@ class SevenZipDllVerifier:
             STATUS_DAMAGED: "damaged",
             STATUS_UNSUPPORTED: "unsupported_method",
             STATUS_BACKEND_UNAVAILABLE: "backend_unavailable",
+            STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED: "needs_volume_or_tail_damaged",
         }
         status = status_by_native.get(native_attempt.status, "unknown_needs_final_verifier")
         return PasswordBatchVerification(
@@ -75,5 +77,10 @@ class SevenZipDllVerifier:
             attempts=native_attempt.attempts,
             test_result=native_result,
             error_text=error_text,
-            terminal=status in {"damaged", "unsupported_method", "backend_unavailable"},
+            terminal=status in {
+                "damaged",
+                "unsupported_method",
+                "backend_unavailable",
+                "needs_volume_or_tail_damaged",
+            },
         )

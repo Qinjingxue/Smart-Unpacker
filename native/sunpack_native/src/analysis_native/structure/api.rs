@@ -11,15 +11,32 @@ pub(crate) fn inspect_zip_local_header(
     result.set_item("plausible", false)?;
     result.set_item("error", "")?;
 
-    let Ok((file_size, header)) = read_at(path, offset, ZIP_LOCAL_HEADER_LENGTH) else {
-        result.set_item("error", "os_error")?;
-        return Ok(result.unbind());
+    let reader = match ManagedReader::open(path) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let fault = ReadFault::from_io(error, "open", offset, 0, 0, 0)
+                .with_field("zip.local_header.fixed", FieldLocation::Body);
+            set_read_fault(&result, &fault, "os_error")?;
+            return Ok(result.unbind());
+        }
     };
-    if header.len() < ZIP_LOCAL_HEADER_LENGTH {
-        result.set_item("magic_matched", header.starts_with(b"PK"))?;
-        result.set_item("error", "short_header")?;
-        return Ok(result.unbind());
-    }
+    let file_size = reader.len();
+    let header = match reader.read_exact_at(offset, ZIP_LOCAL_HEADER_LENGTH) {
+        Ok(header) => header,
+        Err(error) => {
+            let fault = ReadFault::from_io(
+                error,
+                "read_exact_at",
+                offset,
+                ZIP_LOCAL_HEADER_LENGTH,
+                0,
+                file_size,
+            )
+            .with_field("zip.local_header.fixed", FieldLocation::Body);
+            set_read_fault(&result, &fault, "short_header")?;
+            return Ok(result.unbind());
+        }
+    };
     if &header[0..4] != b"PK\x03\x04" {
         result.set_item(
             "magic_matched",
@@ -76,15 +93,33 @@ pub(crate) fn inspect_zip_eocd_structure(
         return Ok(result.unbind());
     };
     let mut file = reader.cursor();
-    let file_size = file.seek(SeekFrom::End(0))?;
+    let file_size = reader.len();
     if file_size < ZIP_EOCD_MIN_SIZE as u64 {
         result.set_item("error", "file_too_small")?;
         return Ok(result.unbind());
     }
     let read_size = file_size.min(ZIP_EOCD_MIN_SIZE as u64 + ZIP_EOCD_MAX_COMMENT);
     let mut tail = vec![0; read_size as usize];
-    file.seek(SeekFrom::Start(file_size - read_size))?;
-    file.read_exact(&mut tail)?;
+    let tail_offset = file_size - read_size;
+    if let Err(fault) = seek_field(
+        &mut file,
+        tail_offset,
+        file_size,
+        "zip.eocd_search_window",
+        FieldLocation::Tail,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut tail,
+            file_size,
+            "zip.eocd_search_window",
+            FieldLocation::Tail,
+        )
+    }) {
+        set_read_fault(&result, &fault, "eocd_read_failed")?;
+        return Ok(result.unbind());
+    }
     if let Some((candidate_offset, candidate, comment_delta)) =
         find_eocd_candidate(&tail, file_size, read_size)
     {
@@ -223,9 +258,26 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("error", "central_directory_too_small")?;
         return Ok(result.unbind());
     }
-    file.seek(SeekFrom::Start(physical_central_offset))?;
     let mut sig = [0u8; 4];
-    file.read_exact(&mut sig)?;
+    if let Err(fault) = seek_field(
+        &mut file,
+        physical_central_offset,
+        file_size,
+        "zip.central_directory.signature",
+        FieldLocation::Tail,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut sig,
+            file_size,
+            "zip.central_directory.signature",
+            FieldLocation::Tail,
+        )
+    }) {
+        set_read_fault(&result, &fault, "central_directory_read_failed")?;
+        return Ok(result.unbind());
+    }
     if sig != ZIP_CENTRAL_DIRECTORY_SIGNATURE {
         result.set_item("error", "bad_central_directory_signature")?;
         result.set_item(
@@ -236,7 +288,7 @@ pub(crate) fn inspect_zip_eocd_structure(
     }
     result.set_item("plausible", true)?;
     result.set_item("central_directory_present", true)?;
-    let walk = walk_zip_central_directory(
+    let walk = match walk_zip_central_directory(
         &mut file,
         file_size,
         archive_offset,
@@ -244,7 +296,14 @@ pub(crate) fn inspect_zip_eocd_structure(
         central_directory_size,
         total_entries as usize,
         max_cd_entries_to_walk,
-    )?;
+    ) {
+        Ok(walk) => walk,
+        Err(fault) => {
+            set_read_fault(&result, &fault, "central_directory_read_failed")?;
+            result.set_item("plausible", false)?;
+            return Ok(result.unbind());
+        }
+    };
     result.set_item("central_directory_entries_checked", walk.0)?;
     result.set_item("central_directory_walk_ok", walk.1)?;
     result.set_item("entry_count_delta", walk.0 as i64 - total_entries as i64)?;
@@ -294,13 +353,30 @@ pub(crate) fn inspect_seven_zip_structure(
         return Ok(seven_empty(py, "os_error")?.unbind());
     };
     let mut file = reader.cursor();
-    let file_size = file.seek(SeekFrom::End(0))?;
+    let file_size = reader.len();
     let mut header = magic_bytes.unwrap_or(&[]).to_vec();
     if header.len() < SEVEN_Z_HEADER_SIZE {
         header.resize(SEVEN_Z_HEADER_SIZE, 0);
-        file.seek(SeekFrom::Start(0))?;
-        let len = file.read(&mut header)?;
-        header.truncate(len);
+        if let Err(fault) = seek_field(
+            &mut file,
+            0,
+            file_size,
+            "7z.start_header",
+            FieldLocation::Head,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                &mut file,
+                &mut header,
+                file_size,
+                "7z.start_header",
+                FieldLocation::Head,
+            )
+        }) {
+            let out = seven_empty(py, "start_header_read_failed")?;
+            set_read_fault(&out, &fault, "start_header_read_failed")?;
+            return Ok(out.unbind());
+        }
     }
     if file_size < SEVEN_Z_HEADER_SIZE as u64 {
         let out = seven_empty(py, "file_too_small")?;
@@ -368,6 +444,15 @@ pub(crate) fn inspect_seven_zip_structure(
     };
     if next_header_end > file_size {
         result.set_item("error", "next_header_out_of_range")?;
+        let fault = ReadFault::short_read(
+            "read_declared_range",
+            next_header_start,
+            next_header_size.min(usize::MAX as u64) as usize,
+            file_size.saturating_sub(next_header_start) as usize,
+            file_size,
+        )
+        .with_field("7z.next_header", FieldLocation::Tail);
+        set_read_fault(&result, &fault, "next_header_out_of_range")?;
         return Ok(result.unbind());
     }
     result.set_item("plausible", true)?;
@@ -376,8 +461,26 @@ pub(crate) fn inspect_seven_zip_structure(
     evidence.append("7z:next_header_range")?;
     if next_header_size <= max_next_header_check_bytes {
         let mut next_header = vec![0; next_header_size as usize];
-        file.seek(SeekFrom::Start(next_header_start))?;
-        file.read_exact(&mut next_header)?;
+        if let Err(fault) = seek_field(
+            &mut file,
+            next_header_start,
+            file_size,
+            "7z.next_header",
+            FieldLocation::Tail,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                &mut file,
+                &mut next_header,
+                file_size,
+                "7z.next_header",
+                FieldLocation::Tail,
+            )
+        }) {
+            set_read_fault(&result, &fault, "next_header_read_failed")?;
+            result.set_item("plausible", false)?;
+            return Ok(result.unbind());
+        }
         let crc_ok = crc32(&next_header) == next_header_crc;
         let nid = next_header.first().copied().unwrap_or(0);
         let nid_valid = nid == 0x01 || nid == 0x17;
@@ -409,34 +512,93 @@ pub(crate) fn inspect_rar_structure(
     magic_bytes: Option<&[u8]>,
     max_first_header_check_bytes: u64,
 ) -> PyResult<Py<PyDict>> {
-    let Ok(reader) = ManagedReader::open(path) else {
-        return Ok(rar_empty(py, "os_error")?.unbind());
+    let reader = match ManagedReader::open(path) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let out = rar_empty(py, "os_error")?;
+            let fault = ReadFault::from_io(error, "open", 0, 0, 0, 0)
+                .with_field("rar.header_prefix", FieldLocation::Head);
+            set_read_fault(&out, &fault, "os_error")?;
+            return Ok(out.unbind());
+        }
     };
     let mut file = reader.cursor();
-    let file_size = file.seek(SeekFrom::End(0))?;
+    let file_size = reader.len();
     let mut data = magic_bytes.unwrap_or(&[]).to_vec();
     if data.len() < 64 {
-        data.resize(64, 0);
-        file.seek(SeekFrom::Start(0))?;
-        let len = file.read(&mut data)?;
-        data.truncate(len);
+        let read_size = file_size.min(64) as usize;
+        data.resize(read_size, 0);
+        if let Err(fault) = seek_field(
+            &mut file,
+            0,
+            file_size,
+            "rar.header_prefix",
+            FieldLocation::Head,
+        )
+        .and_then(|_| {
+            read_exact_field(
+                &mut file,
+                &mut data,
+                file_size,
+                "rar.header_prefix",
+                FieldLocation::Head,
+            )
+        }) {
+            let out = rar_empty(py, "header_prefix_read_failed")?;
+            set_read_fault(&out, &fault, "header_prefix_read_failed")?;
+            return Ok(out.unbind());
+        }
     }
     if data.starts_with(RAR4_SIGNATURE) && data.len() >= RAR4_SIGNATURE.len() + 7 {
         let read_size = file_size.min(max_first_header_check_bytes);
         if data.len() < read_size as usize {
             data.resize(read_size as usize, 0);
-            file.seek(SeekFrom::Start(0))?;
-            let len = file.read(&mut data)?;
-            data.truncate(len);
+            if let Err(fault) = seek_field(
+                &mut file,
+                0,
+                file_size,
+                "rar4.first_header",
+                FieldLocation::Head,
+            )
+            .and_then(|_| {
+                read_exact_field(
+                    &mut file,
+                    &mut data,
+                    file_size,
+                    "rar4.first_header",
+                    FieldLocation::Head,
+                )
+            }) {
+                let out = rar_empty(py, "first_header_read_failed")?;
+                set_read_fault(&out, &fault, "first_header_read_failed")?;
+                return Ok(out.unbind());
+            }
         }
     } else if data.starts_with(RAR5_SIGNATURE) {
         if read_vint(&data, RAR5_SIGNATURE.len() + 4).is_some() {
             let read_size = file_size.min(max_first_header_check_bytes);
             if data.len() < read_size as usize {
                 data.resize(read_size as usize, 0);
-                file.seek(SeekFrom::Start(0))?;
-                let len = file.read(&mut data)?;
-                data.truncate(len);
+                if let Err(fault) = seek_field(
+                    &mut file,
+                    0,
+                    file_size,
+                    "rar5.first_header",
+                    FieldLocation::Head,
+                )
+                .and_then(|_| {
+                    read_exact_field(
+                        &mut file,
+                        &mut data,
+                        file_size,
+                        "rar5.first_header",
+                        FieldLocation::Head,
+                    )
+                }) {
+                    let out = rar_empty(py, "first_header_read_failed")?;
+                    set_read_fault(&out, &fault, "first_header_read_failed")?;
+                    return Ok(out.unbind());
+                }
             }
         }
     }
@@ -475,15 +637,34 @@ pub(crate) fn inspect_tar_header_structure(
         return Ok(out.unbind());
     };
     let mut file = reader.cursor();
-    let file_size = file.seek(SeekFrom::End(0))?;
+    let file_size = reader.len();
     if file_size < TAR_BLOCK_SIZE as u64 {
         let out = tar_empty(py, "file_too_small")?;
         finish_fields(&out, TAR_FIELDS)?;
         return Ok(out.unbind());
     }
     let mut header = vec![0; TAR_BLOCK_SIZE];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut header)?;
+    if let Err(fault) = seek_field(
+        &mut file,
+        0,
+        file_size,
+        "tar.member.header",
+        FieldLocation::Head,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            &mut file,
+            &mut header,
+            file_size,
+            "tar.member.header",
+            FieldLocation::Head,
+        )
+    }) {
+        let out = tar_empty(py, "header_read_failed")?;
+        set_read_fault(&out, &fault, "header_read_failed")?;
+        finish_fields(&out, TAR_FIELDS)?;
+        return Ok(out.unbind());
+    }
     let result = tar_empty(py, "")?;
     result.set_item("file_size", file_size)?;
     if header.iter().all(|b| *b == 0) {
@@ -556,7 +737,15 @@ pub(crate) fn inspect_tar_header_structure(
             "tar"
         },
     )?;
-    let walk = walk_tar(&mut file, file_size, max_entries_to_walk)?;
+    let walk = match walk_tar(&mut file, file_size, max_entries_to_walk) {
+        Ok(walk) => walk,
+        Err(fault) => {
+            set_read_fault(&result, &fault, "member_header_read_failed")?;
+            result.set_item("plausible", false)?;
+            finish_fields(&result, TAR_FIELDS)?;
+            return Ok(result.unbind());
+        }
+    };
     result.set_item("entries_checked", walk.0)?;
     result.set_item("entry_walk_ok", walk.1)?;
     result.set_item("end_zero_blocks", walk.2)?;

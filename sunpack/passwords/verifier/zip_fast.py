@@ -73,7 +73,8 @@ class ZipFastVerifier:
             matched_index=matched_index,
             matched_indices=matched_indices,
             attempts=attempts,
+            test_result=outcome,
             error_text=message.lower(),
-            terminal=status == "damaged",
+            terminal=status in {"damaged", "needs_volume_or_tail_damaged"},
             match_evidence=match_evidence,
         )

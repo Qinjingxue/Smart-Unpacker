@@ -1,4 +1,5 @@
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
+from sunpack.analysis.structure_pipeline.modules._read_fault import read_fault_damage_flags
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
@@ -23,7 +24,7 @@ class TarAnalysisModule:
                 confidence = 0.94 if result.get("end_zero_blocks") else 0.86
                 details = dict(result)
                 evidence = list(result.get("evidence") or [])
-                damage_flags = []
+                damage_flags = read_fault_damage_flags(result)
                 apply_fuzzy_routes(
                     details,
                     evidence,
@@ -44,7 +45,7 @@ class TarAnalysisModule:
                 continue
             if result and result.get("magic_matched"):
                 details = dict(result)
-                damage_flags = list(result.get("damage_flags") or ["tar_metadata_bad"])
+                damage_flags = read_fault_damage_flags(result) or ["tar_metadata_bad"]
                 evidences.append(ArchiveFormatEvidence(
                     format="tar", confidence=0.72, status="damaged",
                     segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.72,

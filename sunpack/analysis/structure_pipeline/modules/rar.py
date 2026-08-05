@@ -2,6 +2,7 @@ from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
+from sunpack.analysis.structure_pipeline.modules._read_fault import read_fault_damage_flags
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
 from sunpack.analysis.probes.rar import RarProbeOptions, probe_rar_view
@@ -58,7 +59,7 @@ class RarAnalysisModule:
         else:
             status = "weak"
             confidence = 0.35
-        damage_flags = list(native.get("damage_flags") or [])
+        damage_flags = read_fault_damage_flags(native)
         if error:
             damage_flags.append(str(error))
         if taxonomy:

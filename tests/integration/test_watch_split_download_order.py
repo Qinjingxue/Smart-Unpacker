@@ -15,6 +15,10 @@ from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from sunpack.filesystem.watcher.group_models import BLOCKER_MISSING_VOLUME, BLOCKER_PASSWORD
 from sunpack.filesystem.watcher.scheduler import WatchRunResult, WatchScheduler
+from sunpack.support.sevenzip_bridge import (
+    STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED,
+    get_native_password_tester,
+)
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 
 
@@ -461,13 +465,19 @@ def test_watch_resolves_wrong_password_and_incomplete_split_in_either_order(
             lambda: (
                 any(entry.status == "failed_password" for entry in watcher.state.entries.values())
                 or any(BLOCKER_PASSWORD in group.blockers for group in watcher.state.groups.values())
+                or any(BLOCKER_MISSING_VOLUME in group.blockers for group in watcher.state.groups.values())
             ),
         )
-        assert engine.submit_times, "the incomplete contiguous prefix must exercise the wrong password"
-        assert (
+        assert engine.submit_times, "the incomplete contiguous prefix must exercise the backend"
+        initial_password_blocker = (
             any(entry.status == "failed_password" for entry in watcher.state.entries.values())
             or any(BLOCKER_PASSWORD in group.blockers for group in watcher.state.groups.values())
-        ), "the initial incomplete extraction must retain the wrong-password blocker"
+        )
+        initial_missing_blocker = any(
+            BLOCKER_MISSING_VOLUME in group.blockers
+            for group in watcher.state.groups.values()
+        )
+        assert initial_password_blocker or initial_missing_blocker
 
         if unblock_order == "volumes_then_password":
             volume_results = [arrive(source) for source in remaining_sources]
@@ -504,11 +514,17 @@ def test_watch_resolves_wrong_password_and_incomplete_split_in_either_order(
             password_file.write_text(password + "\n", encoding="utf-8")
             watcher.notify_password_table_changed(str(password_file))
             submits_before_password = len(engine.submit_times)
-            password_result = _drive_watch_until(
-                watcher,
-                lambda: len(engine.submit_times) > submits_before_password,
-            )
-            assert password_result.succeeded == 0, password_result
+            if initial_password_blocker:
+                password_result = _drive_watch_until(
+                    watcher,
+                    lambda: len(engine.submit_times) > submits_before_password,
+                )
+                assert password_result.succeeded == 0, password_result
+            else:
+                # A tail-read failure carries only the missing-volume blocker.
+                # Password-table changes must not spin the unchanged input.
+                assert watcher.run_once().processed == 0
+                assert len(engine.submit_times) == submits_before_password
             assert not list(output_root.rglob(case.marker_name))
             assert watcher.run_once().processed == 0
             time.sleep(0.05)
@@ -541,22 +557,8 @@ def test_watch_resolves_wrong_password_and_incomplete_split_in_either_order(
     "archive_format",
     [
         pytest.param("rar", id="rar"),
-        pytest.param(
-            "7z",
-            id="7z",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="incomplete 7z password probe collapses needs-volume into wrong-password",
-            ),
-        ),
-        pytest.param(
-            "zip",
-            id="zip",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="incomplete ZIP password probe collapses needs-volume into wrong-password",
-            ),
-        ),
+        pytest.param("7z", id="7z"),
+        pytest.param("zip", id="zip"),
     ],
 )
 def test_watch_suspends_incomplete_encrypted_split_after_wrong_password_candidates(
@@ -598,6 +600,21 @@ def test_watch_suspends_incomplete_encrypted_split_after_wrong_password_candidat
     omitted = non_heads[-1:]
     assert omitted, [path.name for path in non_heads]
 
+    native_probe = get_native_password_tester().try_passwords(
+        str(head),
+        [*wrong_passwords, correct_password],
+        part_paths=[str(path) for path in arrived],
+    )
+    assert native_probe.status == STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED, native_probe
+    if archive_format in {"7z", "zip"}:
+        assert native_probe.attempts == 0, native_probe
+    else:
+        # Header-encrypted RAR cannot request the next named volume until a
+        # password has unlocked the header.  It must still stop at that first
+        # callback failure instead of converting it to a password verdict.
+        assert native_probe.attempts <= len(wrong_passwords) + 1, native_probe
+    assert "evidence=" in native_probe.message, native_probe
+
     config = _watch_config()
     delegate = PipelineEngine(config).start()
     engine = _TimedPipelineEngine(delegate)
@@ -635,6 +652,13 @@ def test_watch_suspends_incomplete_encrypted_split_after_wrong_password_candidat
         ]
         assert len(suspended_groups) == 1, watcher.state.groups
         assert suspended_groups[0].status == "suspended"
+        assert BLOCKER_PASSWORD not in suspended_groups[0].blockers
+        diagnostic = str(
+            (suspended_groups[0].failure_payload.get("details") or {}).get("diagnostic")
+            or suspended_groups[0].failure_payload.get("message")
+            or ""
+        ).lower()
+        assert "missing" in diagnostic or "tail" in diagnostic or "尾部" in diagnostic
 
         submissions_after_suspend = len(engine.submit_times)
         for _ in range(5):
