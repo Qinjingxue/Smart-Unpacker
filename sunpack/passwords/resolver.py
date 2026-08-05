@@ -216,12 +216,16 @@ class PasswordResolver:
     def _archive_input_for_password_probe(fact_bag: FactBag | None) -> dict | None:
         if fact_bag is None:
             return None
-        knowledge_input = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input")
+        knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+        knowledge_input = knowledge.get("source.password_probe_input")
+        if not isinstance(knowledge_input, dict) or not knowledge_input:
+            knowledge_input = knowledge.get("source.input")
         if not isinstance(knowledge_input, dict):
             return None
         selected_format = str(
-            ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("inspection.summary.format", "")
-            or ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input.format_hint", "")
+            knowledge.get("inspection.summary.format", "")
+            or knowledge_input.get("format_hint", "")
+            or knowledge.get("source.input.format_hint", "")
             or fact_bag.get("archive.format_hint")
             or ""
         ).strip().lower().lstrip(".")

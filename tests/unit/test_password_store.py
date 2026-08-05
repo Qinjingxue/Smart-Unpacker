@@ -41,6 +41,32 @@ def test_password_store_bounds_recent_success_history():
     assert store.recent_passwords[0] == f"password-{MAX_RECENT_PASSWORDS + 19}"
 
 
+def test_password_resolver_prefers_formal_password_probe_input():
+    bag = FactBag()
+    bag.set("archive.knowledge", {
+        "source": {
+            "input": {
+                "kind": "archive_input",
+                "entry_path": "carrier.exe",
+                "open_mode": "sfx_with_volumes",
+                "format_hint": "rar",
+            },
+            "password_probe_input": {
+                "kind": "archive_input",
+                "entry_path": "carrier.exe",
+                "open_mode": "file_range",
+                "format_hint": "rar",
+                "parts": [{"path": "carrier.exe", "start": 4096}],
+            },
+        },
+    })
+
+    selected = PasswordResolver._archive_input_for_password_probe(bag)
+
+    assert selected["open_mode"] == "file_range"
+    assert selected["parts"][0]["start"] == 4096
+
+
 class FakePasswordTester:
     passwords = ["secret"]
 

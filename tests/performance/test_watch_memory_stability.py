@@ -2,6 +2,7 @@ import contextlib
 import gc
 import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 
@@ -88,8 +89,17 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
                     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as handle:
                         handle.writestr("payload.txt", "payload" * 128)
                     watcher.enqueue(str(archive))
-                result = watcher.run_once()
-                assert result.succeeded == SAMPLE_EVERY
+                processed = 0
+                succeeded = 0
+                deadline = time.monotonic() + 30
+                while processed < SAMPLE_EVERY and time.monotonic() < deadline:
+                    result = watcher.run_once()
+                    processed += result.processed
+                    succeeded += result.succeeded
+                    if processed < SAMPLE_EVERY:
+                        time.sleep(0.01)
+                assert processed == SAMPLE_EVERY
+                assert succeeded == SAMPLE_EVERY
                 sample(engine, watcher, start + SAMPLE_EVERY)
 
         warm = samples[1:]

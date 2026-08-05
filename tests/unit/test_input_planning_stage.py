@@ -368,6 +368,40 @@ def test_input_planning_stage_uses_range_input_for_embedded_password_required_ar
             "damage_flags": ["valid_encrypted_but_unwalkable"],
         },
     }
+    assert knowledge_view.source_password_probe_input(task) == segments[0]["archive_input"]
+
+
+def test_input_planning_stage_projects_rar_sfx_volume_password_probe(tmp_path):
+    first = tmp_path / "case.part1.exe"
+    second = tmp_path / "case.part2.rar"
+    first.write_bytes(b"MZ-stub" + b"Rar!\x1a\x07\x01\x00" + b"header")
+    second.write_bytes(b"Rar!\x1a\x07\x01\x00volume-two")
+    start = len(b"MZ-stub")
+    evidence = ArchiveFormatEvidence(
+        format="rar",
+        confidence=0.97,
+        status="damaged",
+        segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.97)],
+        details={"password_required": True, "header_encrypted": True},
+    )
+    task = _task(first, parts=[first, second])
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
+    stage.enabled = True
+    stage.analyzer = _FakeAnalyzer(_multi_report(first, [evidence]))
+
+    stage.plan_task(task)
+
+    assert knowledge_view.source_extractable_segments(task) == []
+    probe = knowledge_view.source_password_probe_input(task)
+    assert probe["open_mode"] == "file_range"
+    assert probe["format_hint"] == "rar"
+    assert probe["parts"] == [{
+        "path": str(first),
+        "role": "main",
+        "start": start,
+        "end": first.stat().st_size,
+    }]
+    assert task.split_info.archive_input.open_mode == "sfx_with_volumes"
 
 
 def test_input_planner_understands_rar_patch_state_without_reading_carrier_prefix(tmp_path):

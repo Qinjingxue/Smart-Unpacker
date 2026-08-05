@@ -8,6 +8,31 @@ from sunpack.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
 from tests.helpers.tool_config import get_test_tools
 
 
+def _raw_split_input(tmp_path, archive, *, format_hint: str):
+    payload = archive.read_bytes()
+    cut1 = max(1, len(payload) // 3)
+    cut2 = max(cut1 + 1, (len(payload) * 2) // 3)
+    chunks = [payload[:cut1], payload[cut1:cut2], payload[cut2:]]
+    parts = []
+    for index, chunk in enumerate(chunks, 1):
+        path = tmp_path / f"split.{format_hint}.{index:03d}"
+        path.write_bytes(chunk)
+        parts.append({
+            "path": str(path),
+            "role": "first" if index == 1 else "member",
+            "volume_number": index,
+            "canonical_name": path.name,
+        })
+    return {
+        "kind": "archive_input",
+        "entry_path": parts[0]["path"],
+        "open_mode": "native_volumes",
+        "format_hint": format_hint,
+        "volume_style": "numeric_suffix",
+        "parts": parts,
+    }
+
+
 def _vint(value: int) -> bytes:
     out = bytearray()
     while True:
@@ -90,6 +115,50 @@ def test_rar_fast_verifier_rejects_wrong_rar5_password_check(tmp_path):
     assert outcome.attempts == 2
 
 
+def test_rar_fast_verifier_reads_complete_raw_split_stream(tmp_path):
+    archive = tmp_path / "source.rar"
+    archive.write_bytes(_rar5_encryption_header_fixture())
+    archive_input = _raw_split_input(tmp_path, archive, format_hint="rar")
+
+    outcome = RarFastVerifier().verify_batch(
+        archive_input["entry_path"],
+        ["wrong", "U0b7258526OROQY"],
+        part_paths=[part["path"] for part in archive_input["parts"]],
+        archive_input=archive_input,
+    )
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
+
+
+def test_rar_fast_verifier_uses_structured_first_volume(tmp_path):
+    first = tmp_path / "archive.part1.rar"
+    second = tmp_path / "archive.part2.rar"
+    first.write_bytes(_rar5_encryption_header_fixture())
+    second.write_bytes(b"Rar!\x1a\x07\x01\x00trailing-volume")
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(first),
+        "open_mode": "native_volumes",
+        "format_hint": "rar",
+        "volume_style": "rar_part",
+        "parts": [
+            {"path": str(first), "role": "first", "volume_number": 1, "canonical_name": first.name},
+            {"path": str(second), "role": "member", "volume_number": 2, "canonical_name": second.name},
+        ],
+    }
+
+    outcome = RarFastVerifier().verify_batch(
+        str(first),
+        ["wrong", "U0b7258526OROQY"],
+        part_paths=[str(first), str(second)],
+        archive_input=archive_input,
+    )
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
+
+
 def test_rar_fast_verifier_parallel_batch_preserves_first_match(tmp_path):
     archive = tmp_path / "sample.rar"
     archive.write_bytes(_rar5_encryption_header_fixture())
@@ -164,6 +233,46 @@ def test_seven_zip_fast_verifier_rejects_wrong_encrypted_header_passwords(tmp_pa
     assert outcome.ok is False
     assert outcome.status == "no_match"
     assert outcome.attempts == 2
+
+
+def test_seven_zip_fast_verifier_reads_complete_raw_split_stream(tmp_path):
+    archive = _create_encrypted_header_7z(tmp_path, "split-secret", "5")
+    archive_input = _raw_split_input(tmp_path, archive, format_hint="7z")
+
+    outcome = SevenZipFastVerifier().verify_batch(
+        archive_input["entry_path"],
+        ["wrong", "split-secret"],
+        part_paths=[part["path"] for part in archive_input["parts"]],
+        archive_input=archive_input,
+    )
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
+
+
+def test_seven_zip_fast_verifier_defers_callback_volume_family(tmp_path):
+    first = tmp_path / "archive.part1.rar"
+    second = tmp_path / "archive.part2.rar"
+    first.write_bytes(b"not-read")
+    second.write_bytes(b"not-read")
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(first),
+        "open_mode": "native_volumes",
+        "format_hint": "7z",
+        "volume_style": "rar_part",
+        "parts": [
+            {"path": str(first), "role": "first", "volume_number": 1, "canonical_name": first.name},
+            {"path": str(second), "role": "member", "volume_number": 2, "canonical_name": second.name},
+        ],
+    }
+
+    outcome = SevenZipFastVerifier().verify_batch(
+        str(first), ["secret"], part_paths=[str(first), str(second)], archive_input=archive_input
+    )
+
+    assert outcome.status == "unknown_needs_final_verifier"
+    assert outcome.attempts == 0
 
 
 def test_seven_zip_fast_verifier_parallel_batch_preserves_first_match(tmp_path):

@@ -1,5 +1,5 @@
 use crate::io::reader::ManagedReader;
-use crate::password::input::{parse_ranges, read_prefix_from_ranges};
+use crate::password::input::{parse_ranges, parse_volumes, read_prefix_from_ranges, VolumeSet};
 use aes::cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit};
 use aes::Aes128;
 use cbc::Decryptor;
@@ -41,7 +41,10 @@ pub(crate) fn rar_fast_verify_passwords_with_reader(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let data = py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN))?;
+    verify_rar_data(py, &data, &candidates)
+}
 
+fn verify_rar_data(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<Py<PyAny>> {
     if data.starts_with(RAR5_SIGNATURE) {
         return verify_rar5(py, &data, &candidates);
     }
@@ -72,22 +75,22 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
         .collect::<PyResult<Vec<_>>>()?;
     let parsed = parse_ranges(ranges)?;
     let data = read_prefix_from_ranges(&parsed, MAX_RAR_PREFIX_SCAN)?;
-    if data.starts_with(RAR5_SIGNATURE) {
-        return verify_rar5(py, &data, &candidates);
-    }
-    if data.starts_with(RAR4_SIGNATURE) {
-        return verify_rar4(py, &data, &candidates);
-    }
-    if data.starts_with(b"Rar!") {
-        return status(
-            py,
-            "damaged",
-            -1,
-            0,
-            "rar signature is incomplete or unknown",
-        );
-    }
-    status(py, "unsupported_method", -1, 0, "rar signature not found")
+    verify_rar_data(py, &data, &candidates)
+}
+
+#[pyfunction]
+pub(crate) fn rar_fast_verify_passwords_from_volumes(
+    py: Python<'_>,
+    parts: &Bound<'_, PyList>,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
+    let candidates = passwords
+        .iter()
+        .map(|item| item.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let volumes = VolumeSet::new(parse_volumes(parts)?);
+    let data = py.detach(|| volumes.first_prefix(MAX_RAR_PREFIX_SCAN))?;
+    verify_rar_data(py, &data, &candidates)
 }
 
 fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<Py<PyAny>> {
@@ -126,16 +129,25 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
     }
     let encrypted_prefix = &encrypted[..decrypt_len];
 
-    for (index, password) in candidates.iter().enumerate() {
-        if rar3_hp_password_matches(password, &salt, encrypted_prefix) {
-            return status(
-                py,
-                "match",
-                index as i32,
-                (index + 1) as i32,
-                "rar3/rar4 -hp encrypted header matched",
-            );
+    let matched_index = py.detach(|| {
+        if candidates.len() >= PARALLEL_PASSWORD_THRESHOLD {
+            candidates.par_iter().position_first(|password| {
+                rar3_hp_password_matches(password, &salt, encrypted_prefix)
+            })
+        } else {
+            candidates
+                .iter()
+                .position(|password| rar3_hp_password_matches(password, &salt, encrypted_prefix))
         }
+    });
+    if let Some(index) = matched_index {
+        return status(
+            py,
+            "match",
+            index as i32,
+            (index + 1) as i32,
+            "rar3/rar4 -hp encrypted header matched",
+        );
     }
     status(
         py,

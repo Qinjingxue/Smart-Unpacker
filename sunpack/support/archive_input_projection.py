@@ -32,6 +32,19 @@ def write_source_extractable_segments(task: ArchiveTask, segments: list[dict]) -
     commit_task_knowledge(task, knowledge)
 
 
+def write_source_password_probe_input(task: ArchiveTask, archive_input: dict | None) -> None:
+    """Publish the logical archive view used only for bounded password probes."""
+    knowledge = ensure_knowledge(task)
+    write_value(
+        knowledge,
+        "source.password_probe_input",
+        dict(archive_input or {}),
+        source_layer="detection",
+        source_module="archive_input_planner",
+    )
+    commit_task_knowledge(task, knowledge)
+
+
 def write_source_selected_segment(
     task: ArchiveTask,
     evidence: ArchiveFormatEvidence,

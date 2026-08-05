@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import zipfile
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import sunpack.filesystem.watcher.scheduler as scheduler_module
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
+from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
 from sunpack.filesystem.watcher.scanner import WatchCandidate
@@ -187,6 +189,97 @@ def _summary_pipeline_engine():
 def _write_zip(path: Path):
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("inside.txt", "ok")
+
+
+class _DeferredHandle:
+    def __init__(self, path: str):
+        self.path = path
+        self.future = Future()
+
+    def done(self):
+        return self.future.done()
+
+    def result(self, timeout=None):
+        return self.future.result(timeout=timeout)
+
+    def add_done_callback(self, callback):
+        self.future.add_done_callback(lambda _future: callback(self))
+
+    def finalize(self, output_path_map=None):
+        return self.result()
+
+    def complete_no_tasks(self):
+        summary = SimpleNamespace(
+            success_count=0,
+            partial_success_count=0,
+            failed_tasks=[],
+            failures=[],
+            processed_keys=[],
+            target_results=[],
+            recovered_outputs=[],
+        )
+        self.future.set_result(PipelineResponse(
+            request_id=self.path,
+            summary=summary,
+            artifacts=PipelineArtifacts(),
+            recent_passwords=(),
+        ))
+
+
+class _DeferredPipelineEngine:
+    def __init__(self):
+        self.handles = []
+
+    def update_password_sources(self, *, user_passwords, builtin_passwords):
+        return None
+
+    @property
+    def recent_passwords(self):
+        return []
+
+    def submit(self, targets, *, direct=False, defer_postprocess=False):
+        handle = _DeferredHandle(targets[0].path)
+        self.handles.append(handle)
+        return handle
+
+
+def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archives = [tmp_path / f"sample-{index}.zip" for index in range(3)]
+    for archive in archives:
+        _write_zip(archive)
+    engine = _DeferredPipelineEngine()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=engine,
+    )
+
+    watcher.enqueue(str(archives[0]))
+    watcher.enqueue(str(archives[1]))
+    submitted = watcher.run_once()
+
+    assert submitted.processed == 0
+    assert len(engine.handles) == 2
+
+    engine.handles[1].complete_no_tasks()
+    harvested = watcher.run_once()
+    assert harvested.processed == 1
+    assert engine.handles[0].done() is False
+
+    watcher.enqueue(str(archives[2]))
+    still_scheduling = watcher.run_once()
+    assert still_scheduling.processed == 0
+    assert len(engine.handles) == 3
+
+    engine.handles[0].complete_no_tasks()
+    engine.handles[2].complete_no_tasks()
+    final = watcher.run_once()
+    assert final.processed == 2
 
 
 def _watch_summary(path: str, kind: OutcomeKind, verification: dict):

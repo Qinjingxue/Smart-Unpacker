@@ -1,6 +1,7 @@
 from pathlib import Path
 import queue
 import threading
+import time
 
 import pytest
 
@@ -192,6 +193,10 @@ def test_watch_submits_all_quiet_files_to_one_engine_micro_batch(tmp_path, monke
     watcher.enqueue(str(first))
     watcher.enqueue(str(second))
     result = watcher.run_once()
+    deadline = time.monotonic() + 10
+    while not result.processed and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = watcher.run_once()
     engine.close()
 
     assert batch_sizes == [2]

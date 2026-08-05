@@ -206,11 +206,19 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        password::rar::rar_fast_verify_passwords_from_volumes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         password::zip::zip_fast_verify_passwords,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
         password::zip::zip_fast_verify_passwords_from_ranges,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        password::zip::zip_fast_verify_passwords_from_volumes,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(io::repair::repair_read_file_range, m)?)?;

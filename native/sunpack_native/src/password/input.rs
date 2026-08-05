@@ -150,6 +150,155 @@ impl Seek for VirtualRangeReader {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct VolumeSpec {
+    pub(crate) reader: ManagedReader,
+    pub(crate) number: u32,
+}
+
+pub(crate) fn parse_volumes(parts: &Bound<'_, PyList>) -> PyResult<Vec<VolumeSpec>> {
+    let mut parsed = Vec::new();
+    for item in parts.iter() {
+        let dict = item.cast::<PyDict>()?;
+        let path = dict
+            .get_item("path")?
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("volume path is required")
+            })?
+            .extract::<String>()?;
+        let number = dict
+            .get_item("volume_number")?
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("volume_number is required")
+            })?
+            .extract::<u32>()?;
+        let canonical_name = dict
+            .get_item("canonical_name")?
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("canonical_name is required")
+            })?
+            .extract::<String>()?;
+        if number == 0 || canonical_name.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "structured volumes require positive numbers and canonical names",
+            ));
+        }
+        parsed.push(VolumeSpec {
+            reader: ManagedReader::open(&path)?,
+            number,
+        });
+    }
+    parsed.sort_by_key(|volume| volume.number);
+    if parsed.is_empty()
+        || parsed
+            .iter()
+            .enumerate()
+            .any(|(index, volume)| volume.number != index as u32 + 1)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "structured volume numbers must be contiguous from one",
+        ));
+    }
+    Ok(parsed)
+}
+
+pub(crate) struct VolumeSet {
+    volumes: Arc<[VolumeSpec]>,
+}
+
+impl VolumeSet {
+    pub(crate) fn new(volumes: Vec<VolumeSpec>) -> Self {
+        Self {
+            volumes: volumes.into(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.volumes.len()
+    }
+
+    pub(crate) fn volume_len(&self, disk: usize) -> Option<u64> {
+        self.volumes.get(disk).map(|volume| volume.reader.len())
+    }
+
+    pub(crate) fn read_disk_spanning(
+        &self,
+        mut disk: usize,
+        mut offset: u64,
+        size: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut output = vec![0u8; size];
+        let mut written = 0usize;
+        while written < size {
+            let Some(volume) = self.volumes.get(disk) else {
+                break;
+            };
+            let volume_len = volume.reader.len();
+            if offset >= volume_len {
+                if offset == volume_len {
+                    disk += 1;
+                    offset = 0;
+                    continue;
+                }
+                break;
+            }
+            let available = (volume_len - offset) as usize;
+            let requested = available.min(size - written);
+            let read = volume
+                .reader
+                .read_into_at(offset, &mut output[written..written + requested])?;
+            if read == 0 {
+                break;
+            }
+            written += read;
+            offset += read as u64;
+            if offset == volume_len {
+                disk += 1;
+                offset = 0;
+            }
+        }
+        output.truncate(written);
+        Ok(output)
+    }
+
+    pub(crate) fn advance_disk_offset(
+        &self,
+        mut disk: usize,
+        mut offset: u64,
+        mut amount: u64,
+    ) -> Option<(usize, u64)> {
+        loop {
+            let volume_len = self.volume_len(disk)?;
+            if offset > volume_len {
+                return None;
+            }
+            let remaining = volume_len - offset;
+            if amount <= remaining {
+                return Some((disk, offset + amount));
+            }
+            amount -= remaining;
+            disk += 1;
+            offset = 0;
+        }
+    }
+
+    pub(crate) fn read_last_tail(&self, size: usize) -> std::io::Result<Vec<u8>> {
+        let disk = self.volumes.len().saturating_sub(1);
+        let Some(volume_len) = self.volume_len(disk) else {
+            return Ok(Vec::new());
+        };
+        let read_size = size.min(volume_len as usize);
+        self.read_disk_spanning(disk, volume_len - read_size as u64, read_size)
+    }
+
+    pub(crate) fn first_prefix(&self, size: usize) -> std::io::Result<Vec<u8>> {
+        let Some(volume_len) = self.volume_len(0) else {
+            return Ok(Vec::new());
+        };
+        self.read_disk_spanning(0, 0, size.min(volume_len as usize))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

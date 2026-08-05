@@ -66,6 +66,12 @@ class PipelineHandle:
     def result(self, timeout: float | None = None) -> PipelineResponse:
         return self._submission.future.result(timeout=timeout)
 
+    def done(self) -> bool:
+        return self._submission.future.done()
+
+    def add_done_callback(self, callback) -> None:
+        self._submission.future.add_done_callback(lambda _future: callback(self))
+
     def finalize(self, output_path_map: Mapping[str, str] | None = None) -> PipelineResponse:
         response = self.result()
         with self._finalize_lock:

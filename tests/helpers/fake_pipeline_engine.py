@@ -73,6 +73,12 @@ class _FakeHandle:
     def result(self, timeout=None):
         return self.response
 
+    def done(self):
+        return True
+
+    def add_done_callback(self, callback):
+        callback(self)
+
     def finalize(self, output_path_map=None):
         callback = getattr(self.runner, "apply_deferred_postprocess", None)
         if callable(callback):

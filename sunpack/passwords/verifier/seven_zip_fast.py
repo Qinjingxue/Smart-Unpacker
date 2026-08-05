@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification, normalize_verifier_status
-from sunpack.passwords.verifier.input import verifier_input
+from sunpack.passwords.verifier.input import requires_volume_aware_verifier, verifier_input
 from sunpack.support.archive_sessions import get_archive_session, retain_archive_sessions
 from sunpack_native import seven_zip_fast_verify_passwords_from_ranges
 
@@ -17,16 +17,17 @@ class SevenZipFastVerifier:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
-        if part_paths:
-            if archive_input:
-                part_paths = None
-            else:
-                return PasswordBatchVerification(
-                    ok=False,
-                    status="unknown_needs_final_verifier",
-                    attempts=0,
-                    error_text="7z fast verifier does not support split archives yet",
-                )
+        if requires_volume_aware_verifier(
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        ):
+            return PasswordBatchVerification(
+                ok=False,
+                status="unknown_needs_final_verifier",
+                attempts=0,
+                error_text="7z volume set requires the volume-aware bounded verifier",
+            )
         verifier_path, ranges = verifier_input(
             archive_path,
             part_paths=part_paths,

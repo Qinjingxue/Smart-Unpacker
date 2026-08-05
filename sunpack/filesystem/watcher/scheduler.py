@@ -94,6 +94,13 @@ class _ActivePipelineRequest:
     predicted_final_dirs: list[str]
 
 
+def _handle_done(handle: object) -> bool:
+    done = getattr(handle, "done", None)
+    # Older embedders and synchronous test doubles predate the asynchronous
+    # handle contract; their result is already available when submit returns.
+    return bool(done()) if callable(done) else True
+
+
 class WatchScheduler:
     def __init__(
         self,
@@ -154,6 +161,7 @@ class WatchScheduler:
         self._lock = threading.Lock()
         self._password_source_lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
+        self._inflight_requests: list[_ActivePipelineRequest] = []
         self._active_states: dict[str, _ActiveCandidateState] = {}
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
@@ -287,9 +295,13 @@ class WatchScheduler:
 
     def run_once(self) -> WatchRunResult:
         self._process_password_dirty_dirs(time.monotonic())
+        result = self._harvest_completed_requests()
         ready = self._pop_ready(time.time())
         with self._lock:
-            active_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
+            active_paths = {
+                os.path.normcase(os.path.abspath(path))
+                for path in self._pending
+            } | self._inflight_path_keys_locked()
         dispatches, waiting = plan_watch_dispatches(
             ready,
             active_paths=active_paths,
@@ -310,17 +322,63 @@ class WatchScheduler:
             self._submit_candidate(dispatch.candidate, group=dispatch.group)
             for dispatch in dispatches
         ]
-        result = WatchRunResult(pending=self.pending_count)
-        for active_request in active_requests:
-            single = self._complete_candidate(active_request)
-            result.processed += single.processed
-            result.succeeded += single.succeeded
-            result.failed += single.failed
-            result.errors.extend(single.errors)
-        for candidate in ready:
-            self.state.complete_work_if_matches(candidate)
+        with self._lock:
+            self._inflight_requests.extend(active_requests)
+        self._merge_run_result(result, self._harvest_completed_requests())
         result.pending = self.pending_count
         return result
+
+    def _harvest_completed_requests(self) -> WatchRunResult:
+        with self._lock:
+            completed = [request for request in self._inflight_requests if _handle_done(request.handle)]
+            if completed:
+                completed_ids = {id(request) for request in completed}
+                self._inflight_requests = [
+                    request for request in self._inflight_requests if id(request) not in completed_ids
+                ]
+        result = WatchRunResult()
+        for request in completed:
+            try:
+                single = self._complete_candidate(request)
+            except Exception as exc:
+                single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
+                self.log.write(
+                    "error",
+                    path=request.candidate.path,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    phase="pipeline_completion",
+                )
+                # Preserve crash-recovery state and put the candidate back into
+                # the live queue.  A completion/finalization exception must not
+                # silently acknowledge durable work that never finished.
+                self.enqueue(
+                    request.candidate.path,
+                    force=True,
+                    event_type="pipeline_completion_error",
+                )
+            else:
+                self.state.complete_work_if_matches(request.candidate)
+            self._merge_run_result(result, single)
+        return result
+
+    @staticmethod
+    def _merge_run_result(target: WatchRunResult, source: WatchRunResult) -> None:
+        target.processed += source.processed
+        target.succeeded += source.succeeded
+        target.failed += source.failed
+        target.errors.extend(source.errors)
+
+    def _inflight_path_keys_locked(self) -> set[str]:
+        paths: set[str] = set()
+        for request in self._inflight_requests:
+            paths.add(os.path.normcase(os.path.abspath(request.candidate.path)))
+            if request.group is not None:
+                paths.update(
+                    os.path.normcase(os.path.abspath(path))
+                    for path in request.group.member_paths
+                )
+        return paths
 
     @property
     def pending_count(self) -> int:
@@ -340,12 +398,18 @@ class WatchScheduler:
         now = time.time()
         monotonic_now = time.monotonic()
         with self._lock:
-            if self._pending:
+            inflight_paths = self._inflight_path_keys_locked()
+            schedulable_states = [
+                state
+                for path, state in self._active_states.items()
+                if os.path.normcase(os.path.abspath(path)) not in inflight_paths
+            ]
+            if schedulable_states:
                 delay = max(
                     0.0,
                     min(
                         state.quiet_seconds - (now - state.last_event_at)
-                        for state in self._active_states.values()
+                        for state in schedulable_states
                     ),
                 )
             else:
@@ -579,7 +643,10 @@ class WatchScheduler:
         ready: list[WatchCandidate] = []
         due: list[tuple[str, WatchCandidate, int, bool, bool, int, int, float, float]] = []
         with self._lock:
+            inflight_paths = self._inflight_path_keys_locked()
             for path, candidate in self._pending.items():
+                if os.path.normcase(os.path.abspath(path)) in inflight_paths:
+                    continue
                 state = self._active_states[path]
                 if now - state.last_event_at >= state.quiet_seconds:
                     due.append((
@@ -799,6 +866,9 @@ class WatchScheduler:
             self._release_output_roots([probe_workspace, *predicted_probe_dirs])
             self._cleanup_probe_workspace(probe_workspace)
             raise
+        add_done_callback = getattr(handle, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(lambda _handle: self._wake_service())
         return _ActivePipelineRequest(
             candidate=candidate,
             group=group,

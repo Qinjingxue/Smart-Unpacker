@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 import uuid
 
 import pytest
@@ -12,6 +13,16 @@ from sunpack.config.loader import load_config
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.tool_config import get_test_tools
+
+
+def _wait_for_completed_watch_run(watcher: WatchScheduler, *, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = watcher.run_once()
+        if result.processed:
+            return result
+        time.sleep(0.01)
+    pytest.fail("watch pipeline did not complete before timeout")
 
 
 @pytest.mark.parametrize("source", ["directory", "watch_clipboard"])
@@ -83,7 +94,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
     )
     try:
         watcher.enqueue(str(archive))
-        first = watcher.run_once()
+        first = _wait_for_completed_watch_run(watcher)
         assert first.failed == 1, first
         first_entries = list(watcher.state.entries.values())
         assert len(first_entries) == 1, first_entries
@@ -95,7 +106,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         else:
             monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
             watcher._clipboard_monitor._handle_clipboard_update()
-        second = watcher.run_once()
+        second = _wait_for_completed_watch_run(watcher)
         extracted = list(output_root.rglob("payload.txt"))
     finally:
         engine.close()
@@ -181,7 +192,7 @@ def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, incl
     )
     try:
         watcher.enqueue(str(archive))
-        result = watcher.run_once()
+        result = _wait_for_completed_watch_run(watcher)
         extracted = list(output_root.rglob("payload.txt"))
     finally:
         engine.close()

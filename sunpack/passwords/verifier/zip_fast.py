@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification, normalize_verifier_status
-from sunpack.passwords.verifier.input import verifier_input
+from sunpack.passwords.verifier.input import (
+    requires_volume_aware_verifier,
+    structured_volume_input,
+    verifier_input,
+)
 from sunpack.support.archive_sessions import get_archive_session, retain_archive_sessions
-from sunpack_native import zip_fast_verify_passwords_from_ranges
+from sunpack_native import zip_fast_verify_passwords_from_ranges, zip_fast_verify_passwords_from_volumes
 
 
 class ZipFastVerifier:
@@ -17,22 +21,33 @@ class ZipFastVerifier:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
-        if part_paths:
-            if archive_input:
-                part_paths = None
-            else:
-                return PasswordBatchVerification(
-                    ok=False,
-                    status="unknown_needs_final_verifier",
-                    attempts=0,
-                    error_text="zip fast verifier does not support split archives yet",
-                )
+        normalized_passwords = list(passwords or [""])
+        volume_input = structured_volume_input(
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+        if volume_input is not None and volume_input[0] == "zip_spanned":
+            retain_archive_sessions([item.get("path") for item in volume_input[1]])
+            return self._from_outcome(
+                zip_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords)
+            )
+        if requires_volume_aware_verifier(
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        ):
+            return PasswordBatchVerification(
+                ok=False,
+                status="unknown_needs_final_verifier",
+                attempts=0,
+                error_text="zip volume set requires the volume-aware bounded verifier",
+            )
         verifier_path, ranges = verifier_input(
             archive_path,
             part_paths=part_paths,
             archive_input=archive_input,
         )
-        normalized_passwords = list(passwords or [""])
         retain_archive_sessions(
             [item.get("path") for item in ranges] if ranges else [verifier_path]
         )
@@ -42,6 +57,10 @@ class ZipFastVerifier:
             else get_archive_session(verifier_path).zip_fast_verify_passwords(normalized_passwords)
         )
 
+        return self._from_outcome(outcome)
+
+    @staticmethod
+    def _from_outcome(outcome: dict) -> PasswordBatchVerification:
         status = normalize_verifier_status(outcome.get("status"))
         matched_index = int(outcome.get("matched_index", -1))
         matched_indices = tuple(int(index) for index in outcome.get("matched_indices") or ())

@@ -1,12 +1,25 @@
 import pytest
 
+from sunpack.config.loader import load_config
+from sunpack.coordinator.task_scan import direct_file_task
+from sunpack.detection.input_planning import ArchiveInputPlanningStage
+from sunpack.passwords.verifier.rar_fast import RarFastVerifier
+from sunpack.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
+from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 from sunpack.support.sevenzip_bridge import get_native_password_tester
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, require_7z
 
 
 PASSWORD = "sfx-split-secret"
 WRONG_PASSWORD = "wrong-sfx-password"
+
+FAST_VERIFIERS = {
+    "7z": SevenZipFastVerifier,
+    "zip": ZipFastVerifier,
+    "rar": RarFastVerifier,
+}
 
 
 def _parts(case):
@@ -21,6 +34,41 @@ def _remove_last_data_part(case):
     if not parts:
         pytest.skip("generated SFX archive has no separate data volumes")
     parts[-1].unlink()
+
+
+@pytest.mark.parametrize("archive_format", ["7z", "zip", "rar"])
+@pytest.mark.parametrize("split", [False, True], ids=["single", "split"])
+def test_input_planned_sfx_uses_format_fast_password_probe(tmp_path, archive_format, split):
+    require_7z()
+    if archive_format == "rar" and not get_optional_rar():
+        pytest.skip("RAR generator is not configured")
+    case = ArchiveFixtureFactory().create(
+        tmp_path,
+        f"fast_probe_{archive_format}_{split}",
+        archive_format,
+        split=split,
+        sfx=True,
+        password=PASSWORD,
+    )
+    parts = _parts(case)
+    task = direct_file_task(str(case.entry_path), all_parts=parts)
+    extraction_mode = task.split_info.archive_input.open_mode
+
+    ArchiveInputPlanningStage(load_config()).plan_task(task)
+    probe_input = knowledge_view.source_password_probe_input(task)
+    outcome = FAST_VERIFIERS[archive_format]().verify_batch(
+        str(case.entry_path),
+        [WRONG_PASSWORD, PASSWORD],
+        part_paths=parts,
+        archive_input=probe_input,
+    )
+
+    assert outcome.ok is True, outcome
+    assert outcome.matched_index == 1
+    assert probe_input["open_mode"] in {"file_range", "concat_ranges"}
+    assert task.split_info.archive_input.open_mode == extraction_mode
+    if split:
+        assert extraction_mode == "sfx_with_volumes"
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,7 @@ from sunpack.analysis.request import AnalysisRequest
 from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
 from sunpack.support.archive_input_projection import (
     write_source_extractable_segments,
+    write_source_password_probe_input,
     write_source_selected_segment,
 )
 from sunpack.support.archive_knowledge_writer import (
@@ -256,7 +257,18 @@ class ArchiveInputPlanningStage:
                 with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
                     self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
             with _phase(phase_timer, f"{phase_prefix}_batched_write"):
-                _write_plan_knowledge(task, report, segment_payloads, selected_segment)
+                password_probe_input = (
+                    self._password_probe_input_for_segment(task, *selected_segment)
+                    if selected_segment is not None
+                    else None
+                )
+                _write_plan_knowledge(
+                    task,
+                    report,
+                    segment_payloads,
+                    selected_segment,
+                    password_probe_input,
+                )
             with _phase(phase_timer, f"{phase_prefix}_state_update"):
                 self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
             return [task]
@@ -265,7 +277,19 @@ class ArchiveInputPlanningStage:
         with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
             self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
         with _phase(phase_timer, f"{phase_prefix}_batched_write"):
-            _write_plan_knowledge(task, report, segment_payloads, selected_segment)
+            password_probe_input = self._password_probe_input_for_segment(
+                task,
+                evidence,
+                segment,
+                index,
+            )
+            _write_plan_knowledge(
+                task,
+                report,
+                segment_payloads,
+                selected_segment,
+                password_probe_input,
+            )
         with _phase(phase_timer, f"{phase_prefix}_state_update"):
             self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
         return [task]
@@ -566,6 +590,56 @@ class ArchiveInputPlanningStage:
             },
         )
 
+    def _password_probe_input_for_segment(
+        self,
+        task: ArchiveTask,
+        evidence: ArchiveFormatEvidence,
+        segment: ArchiveSegment,
+        index: int,
+    ) -> ArchiveInputDescriptor | None:
+        archive_input = self._archive_input_for_segment(
+            task,
+            evidence,
+            segment,
+            index=index,
+        )
+        if archive_input is not None:
+            return archive_input
+
+        # RAR volumes are independent containers and cannot become one concat
+        # stream.  Header-password probes only need the real archive prefix in
+        # the first SFX volume, while extraction retains sfx_with_volumes.
+        parts = self._ordered_parts(task)
+        start = int(segment.start_offset)
+        if str(evidence.format or "").lower() != "rar" or len(parts) < 2 or start <= 0:
+            return None
+        first_part = parts[0]
+        try:
+            first_size = os.path.getsize(first_part)
+        except OSError:
+            return None
+        if start >= first_size:
+            return None
+        archive_range = ArchiveInputRange(path=first_part, start=start, end=first_size)
+        return ArchiveInputDescriptor(
+            entry_path=first_part,
+            open_mode="file_range",
+            format_hint="rar",
+            logical_name=self._segment_logical_name(task, evidence, index),
+            parts=[ArchiveInputPart(path=first_part, role="main", range=archive_range)],
+            segment=ArchiveInputSegment(
+                start=start,
+                end=first_size,
+                confidence=float(segment.confidence),
+            ),
+            analysis={
+                "status": evidence.status,
+                "confidence": float(evidence.confidence),
+                "damage_flags": list(segment.damage_flags),
+                "purpose": "password_probe",
+            },
+        )
+
     def _ordered_parts(self, task: ArchiveTask) -> list[str]:
         volumes = list(getattr(task.split_info, "volumes", None) or [])
         if volumes:
@@ -700,6 +774,7 @@ def _write_plan_knowledge(
     report: ArchiveAnalysisReport,
     segments: list[dict[str, Any]],
     selected_segment: tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None,
+    password_probe_input: ArchiveInputDescriptor | None,
 ) -> None:
     selected = _best_selected(report)
     knowledge = ensure_knowledge(task)
@@ -719,6 +794,10 @@ def _write_plan_knowledge(
     )
     commit_task_knowledge(task, knowledge)
     write_source_extractable_segments(task, segments)
+    write_source_password_probe_input(
+        task,
+        password_probe_input.to_dict() if password_probe_input is not None else None,
+    )
     if selected_segment is not None:
         evidence, segment, index = selected_segment
         write_source_selected_segment(task, evidence, segment, index=index)
