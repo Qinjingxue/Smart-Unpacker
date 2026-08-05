@@ -716,20 +716,42 @@ pub(crate) fn filter_inventory_file_indices(
         whitelist_rules,
     )?;
     let root = PathBuf::from(root_path);
-    let mut accepted = Vec::new();
+    let mut accepted = vec![false; paths.len()];
+    let mut size_accepted_split_families = HashSet::new();
+    let mut size_deferred = Vec::new();
     let mut directory_rejections = HashMap::new();
     for (index, path) in paths.into_iter().enumerate() {
         let size = sizes.get(index).copied().unwrap_or(0);
         let path = PathBuf::from(path);
-        if !numeric_ranges_allow(&options.size_ranges, Some(size))
-            || file_rejected_by_path(&path, &root, &options)
+        if file_rejected_by_path(&path, &root, &options)
             || file_under_rejected_directory(&path, &root, &options, &mut directory_rejections)
         {
             continue;
         }
-        accepted.push(index);
+        let family_keys = if options.size_ranges.is_empty() {
+            Vec::new()
+        } else {
+            crate::relations::relations_size_filter_split_family_keys(
+                path.to_string_lossy().as_ref(),
+            )
+        };
+        if numeric_ranges_allow(&options.size_ranges, Some(size)) {
+            accepted[index] = true;
+            size_accepted_split_families.extend(family_keys);
+        } else if !family_keys.is_empty() {
+            size_deferred.push((index, family_keys));
+        }
     }
-    Ok(accepted)
+    for (index, family_keys) in size_deferred {
+        accepted[index] = family_keys
+            .iter()
+            .any(|key| size_accepted_split_families.contains(key));
+    }
+    Ok(accepted
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, keep)| keep.then_some(index))
+        .collect())
 }
 
 #[pyfunction]
@@ -1237,6 +1259,8 @@ fn scan_directory_impl<const PROFILE: bool>(
 
     let mut records = Vec::new();
     let mut raw_records = Vec::new();
+    let mut size_accepted_split_families = HashSet::new();
+    let mut size_deferred_split_records = Vec::new();
     let mut stack = vec![(root.clone(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         let read_dir =
@@ -1335,13 +1359,13 @@ fn scan_directory_impl<const PROFILE: bool>(
                     mtime_ns,
                 });
             }
-            let rejected = measure::<PROFILE, _>(&mut profile, ProfileBucket::PathMatching, || {
-                !metadata.is_file()
-                    || file_rejected_by_path(&path, &root, options)
-                    || !numeric_ranges_allow(&options.size_ranges, Some(size))
-                    || !numeric_ranges_allow(&options.mtime_ranges, mtime_ns)
-            });
-            if rejected {
+            let hard_rejected =
+                measure::<PROFILE, _>(&mut profile, ProfileBucket::PathMatching, || {
+                    !metadata.is_file()
+                        || file_rejected_by_path(&path, &root, options)
+                        || !numeric_ranges_allow(&options.mtime_ranges, mtime_ns)
+                });
+            if hard_rejected {
                 if PROFILE {
                     if let Some(profile) = profile.as_deref_mut() {
                         profile.rejected_files += 1;
@@ -1349,6 +1373,34 @@ fn scan_directory_impl<const PROFILE: bool>(
                 }
                 continue;
             }
+            let split_family_keys = if options.size_ranges.is_empty() {
+                Vec::new()
+            } else {
+                crate::relations::relations_size_filter_split_family_keys(
+                    path.to_string_lossy().as_ref(),
+                )
+            };
+            if !numeric_ranges_allow(&options.size_ranges, Some(size)) {
+                if split_family_keys.is_empty() {
+                    if PROFILE {
+                        if let Some(profile) = profile.as_deref_mut() {
+                            profile.rejected_files += 1;
+                        }
+                    }
+                } else {
+                    size_deferred_split_records.push((
+                        DirectoryEntryRecord {
+                            path: path_to_string(&path),
+                            is_dir: false,
+                            size: Some(size),
+                            mtime_ns,
+                        },
+                        split_family_keys,
+                    ));
+                }
+                continue;
+            }
+            size_accepted_split_families.extend(split_family_keys);
             measure::<PROFILE, _>(&mut profile, ProfileBucket::RecordBuilding, || {
                 records.push(DirectoryEntryRecord {
                     path: path_to_string(&path),
@@ -1370,6 +1422,23 @@ fn scan_directory_impl<const PROFILE: bool>(
                 stack.push((child, depth + 1));
             }
         });
+    }
+    for (record, family_keys) in size_deferred_split_records {
+        if family_keys
+            .iter()
+            .any(|key| size_accepted_split_families.contains(key))
+        {
+            records.push(record);
+            if PROFILE {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.accepted_entries += 1;
+                }
+            }
+        } else if PROFILE {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.rejected_files += 1;
+            }
+        }
     }
     if PROFILE {
         if let Some(profile) = profile.as_deref_mut() {

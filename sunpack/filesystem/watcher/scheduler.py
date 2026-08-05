@@ -19,7 +19,11 @@ from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.results import OutcomeKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.pipeline import PipelineTarget
-from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
+from sunpack.filesystem.directory_scanner import (
+    apply_ordered_filters_to_entries,
+    rejected_only_by_size_range,
+    split_size_family_keys,
+)
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.group_dispatch import NullWatchGroupResolver, plan_watch_dispatches
@@ -1173,7 +1177,17 @@ class WatchScheduler:
         if not self.filters:
             return True
         entry = _file_entry_from_watch_candidate(candidate)
-        return bool(apply_ordered_filters_to_entries([entry], self.filters))
+        if apply_ordered_filters_to_entries([entry], self.filters):
+            return True
+        if not rejected_only_by_size_range(entry, self.filters):
+            return False
+        if not split_size_family_keys(candidate.path):
+            return False
+        snapshot = self.group_coordinator.resolve_paths([candidate.path]).get(path_key(candidate.path))
+        if snapshot is None or not snapshot.head_path:
+            return False
+        member_keys = {path_key(path) for path in snapshot.member_paths}
+        return path_key(candidate.path) in member_keys
 
     def _output_suppression_reason(self, path: str) -> str:
         normalized = os.path.abspath(path)

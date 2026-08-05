@@ -886,6 +886,115 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
     Some(parsed)
 }
 
+/// Return the exact split-family identities a path can participate in.
+///
+/// This is the sole naming seam exposed to the filesystem scanner. The
+/// scanner may retain a size-rejected row when one of these identities has a
+/// normally accepted anchor; relations still decides whether the resulting
+/// group is a valid archive.
+#[pyfunction]
+pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String> {
+    if !may_have_size_deferred_split_identity(path) {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    if let Some(parsed) = parse_numbered_volume(path) {
+        let scheme = match parsed.style {
+            "rar_part" | "rar_sfx_part" => "rar:part",
+            "rar_oldstyle" => "rar:oldstyle",
+            "zip_spanned" => "zip:spanned",
+            "zip_zero_numbered" => "zip:zero-numbered",
+            "numeric_suffix" => "archive:numeric",
+            "plain_numeric_suffix" => "generic:numeric",
+            other => other,
+        };
+        keys.push(split_size_family_key(scheme, &parsed.prefix));
+    }
+
+    // Canonical heads/tails do not themselves carry a numeric suffix, but
+    // they can anchor these exact filename families.
+    let (base, ext) = split_ext(path);
+    match ext.to_ascii_lowercase().as_str() {
+        ".7z" => keys.push(split_size_family_key("archive:numeric", path)),
+        ".zip" => {
+            keys.push(split_size_family_key("archive:numeric", path));
+            keys.push(split_size_family_key("zip:zero-numbered", path));
+            keys.push(split_size_family_key("zip:spanned", &base));
+        }
+        ".rar" => {
+            keys.push(split_size_family_key("archive:numeric", path));
+            keys.push(split_size_family_key("rar:oldstyle", &base));
+        }
+        _ => {}
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+#[pyfunction]
+pub(crate) fn relations_apply_split_size_anchors(
+    paths: Vec<String>,
+    size_accepted: Vec<bool>,
+) -> PyResult<Vec<bool>> {
+    if paths.len() != size_accepted.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "split size anchor paths and decisions must have equal lengths",
+        ));
+    }
+    if size_accepted.iter().all(|accepted| *accepted)
+        || size_accepted.iter().all(|accepted| !*accepted)
+    {
+        return Ok(size_accepted);
+    }
+    let accepted_families: HashSet<String> = paths
+        .iter()
+        .zip(&size_accepted)
+        .filter(|(_, accepted)| **accepted)
+        .flat_map(|(path, _)| relations_size_filter_split_family_keys(path))
+        .collect();
+    Ok(paths
+        .iter()
+        .zip(size_accepted)
+        .map(|(path, accepted)| {
+            accepted
+                || relations_size_filter_split_family_keys(path)
+                    .iter()
+                    .any(|key| accepted_families.contains(key))
+        })
+        .collect())
+}
+
+fn may_have_size_deferred_split_identity(path: &str) -> bool {
+    let name = basename(path).to_ascii_lowercase();
+    if name.ends_with(".7z") || name.ends_with(".zip") || name.ends_with(".rar") {
+        return true;
+    }
+    let suffix = name.rsplit('.').next().unwrap_or_default();
+    if (suffix.len() == 3 || suffix.len() == 4) && suffix.as_bytes().iter().all(u8::is_ascii_digit)
+    {
+        return true;
+    }
+    if suffix.len() >= 3
+        && matches!(suffix.as_bytes().first(), Some(b'z' | b'r'))
+        && suffix.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return true;
+    }
+    let has_family_token = ["7z", "zip", "rar", "exe"]
+        .iter()
+        .any(|token| name.contains(token));
+    has_family_token && (name.contains(".part") || name.contains("vol") || name.contains(".z"))
+}
+
+fn split_size_family_key(scheme: &str, prefix: &str) -> String {
+    format!(
+        "{}\u{001f}{}",
+        scheme,
+        prefix.replace('\\', "/").to_ascii_lowercase()
+    )
+}
+
 fn parse_numbered_volume_name(filename: &str) -> Option<ParsedVolume> {
     if let Some(captures) = parse_zip_spanned_re().captures(filename) {
         return Some(ParsedVolume {
@@ -1433,6 +1542,16 @@ fn old_rar_member_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_filter_family_keys_join_numbered_7z_parts_and_exclude_other_prefixes() {
+        let first = relations_size_filter_split_family_keys(r"C:\downloads\payload.7z.001");
+        let tail = relations_size_filter_split_family_keys(r"C:\downloads\payload.7z.003");
+        let other = relations_size_filter_split_family_keys(r"C:\downloads\other.7z.003");
+
+        assert!(first.iter().any(|key| tail.contains(key)));
+        assert!(!first.iter().any(|key| other.contains(key)));
+    }
 
     #[test]
     fn noisy_rar_part_names_keep_the_same_declared_family_and_prefix() {

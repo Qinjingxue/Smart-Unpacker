@@ -121,6 +121,14 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(relations::relations_split_sort_key, m)?)?;
     m.add_function(wrap_pyfunction!(
+        relations::relations_size_filter_split_family_keys,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        relations::relations_apply_split_size_anchors,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         relations::relations_build_candidate_groups_from_snapshot,
         m
     )?)?;

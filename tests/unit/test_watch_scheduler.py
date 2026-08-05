@@ -15,6 +15,7 @@ from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
 from sunpack.filesystem.watcher.scanner import WatchCandidate
+from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
@@ -826,6 +827,45 @@ def test_watch_scheduler_uses_filesystem_filters_for_candidates(tmp_path, monkey
     pending_paths = set(watcher._pending)
     assert any(path.endswith("keep.weird") for path in pending_paths)
     assert not any(path.endswith("blocked.zip") for path in pending_paths)
+
+
+def test_watch_scheduler_accepts_small_split_tail_only_when_family_is_anchored(tmp_path):
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    first = watch_root / "payload.7z.001"
+    tail = watch_root / "payload.7z.002"
+    unrelated = watch_root / "unrelated.7z.002"
+    first.write_bytes(b"a" * 16)
+    tail.write_bytes(b"tail")
+    unrelated.write_bytes(b"noise")
+    watcher = WatchScheduler(
+        {
+            "filesystem": {
+                "scan_filters": [
+                    {"name": "size_range", "enabled": True, "gte": 10},
+                ],
+            },
+            "watch": {"clipboard_monitor_enabled": False},
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        group_coordinator=WatchGroupCoordinator({
+            "filesystem": {
+                "scan_filters": [
+                    {"name": "size_range", "enabled": True, "gte": 10},
+                ],
+            },
+        }),
+    )
+
+    watcher.enqueue(str(tail))
+    watcher.enqueue(str(unrelated))
+
+    pending_paths = set(watcher._pending)
+    assert str(tail.resolve()) in pending_paths
+    assert str(unrelated.resolve()) not in pending_paths
 
 
 def test_watch_scheduler_reuses_filter_result_for_unchanged_pending_candidate(tmp_path, monkeypatch):
