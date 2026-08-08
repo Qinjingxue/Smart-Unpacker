@@ -5,6 +5,7 @@ from sunpack.config.schema import ConfigField
 
 
 DEFAULT_WATCH_CONFIG = advanced_config_value(("watch",))
+PARTIAL_OUTPUT_POLICIES = frozenset({"discard", "promote"})
 
 
 def normalize_watch_config(value: Any) -> dict[str, Any]:
@@ -36,6 +37,9 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config["password_retry_include_subtree"])
+    config["partial_output_policy"] = str(config["partial_output_policy"]).strip().lower()
+    if config["partial_output_policy"] not in PARTIAL_OUTPUT_POLICIES:
+        raise ValueError("watch.partial_output_policy must be 'discard' or 'promote'")
     config["clipboard_monitor_enabled"] = bool(config["clipboard_monitor_enabled"])
     config["clipboard_builtin_max_entries"] = max(1, _int_field(config, "clipboard_builtin_max_entries"))
     roots = config["roots"]

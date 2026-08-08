@@ -342,9 +342,12 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
         recent_passwords = []
 
         def __init__(self, config):
+            self.output_dir = Path(config["output"]["root"]) / "sample"
             self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
 
         def run_targets(self, paths):
+            self.output_dir.mkdir(parents=True)
+            (self.output_dir / "invalid.bin").write_bytes(b"invalid")
             return SimpleNamespace(
                 success_count=0,
                 partial_success_count=0,
@@ -360,7 +363,7 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
             finalize_calls.append(dict(output_path_map))
 
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
+        {"watch": {"clipboard_monitor_enabled": False, "partial_output_policy": "promote"}},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
@@ -373,6 +376,9 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
 
     assert result.failed == 1
     assert finalize_calls == []
+    probe_root = tmp_path / ".sunpack_watch_probes"
+    assert probe_root.is_dir()
+    assert list(probe_root.iterdir()) == []
 
 
 def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, monkeypatch):
@@ -432,6 +438,57 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     assert len(postprocess_maps) == 1
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
+
+
+def test_partial_result_can_promote_recovered_output_without_complete_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    postprocess_maps = []
+
+    class PartialRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            self.output_dir.mkdir(parents=True)
+            (self.output_dir / "recovered.bin").write_bytes(b"partial")
+            self.context.recovered_outputs = [{"out_dir": str(self.output_dir)}]
+            return _watch_summary(
+                paths[0],
+                OutcomeKind.PARTIAL_SUCCESS,
+                {"decision_hint": "accept_partial", "archive_coverage": {"complete_files": 1}},
+            )
+
+        def apply_deferred_postprocess(self, output_path_map):
+            postprocess_maps.append(dict(output_path_map))
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "partial_output_policy": "promote"}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(PartialRunner),
+    )
+    watcher.enqueue(str(archive))
+
+    result = watcher.run_once()
+
+    assert result.processed == 1
+    assert result.succeeded == 0
+    assert result.failed == 0
+    assert (tmp_path / "out" / "sample" / "recovered.bin").read_bytes() == b"partial"
+    assert len(postprocess_maps) == 1
+    assert postprocess_maps[0]
+    probe_root = tmp_path / ".sunpack_watch_probes"
+    assert probe_root.is_dir()
+    assert list(probe_root.iterdir()) == []
+    assert watcher.run_once().processed == 0
 
 
 def test_probe_promotion_keeps_nested_outputs_inside_outer_directory(tmp_path):

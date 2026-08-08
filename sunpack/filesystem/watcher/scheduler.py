@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from sunpack.config.detection_view import directory_scan_is_recursive
-from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
+from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG, PARTIAL_OUTPUT_POLICIES
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.filesystem import FileEntry
@@ -217,6 +217,9 @@ class WatchScheduler:
         self.output_suppression_seconds = max(0.0, float(watch_config["output_suppression_seconds"]))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config["password_retry_debounce_seconds"]))
         self.password_retry_include_subtree = bool(watch_config["password_retry_include_subtree"])
+        self.partial_output_policy = str(watch_config["partial_output_policy"]).strip().lower()
+        if self.partial_output_policy not in PARTIAL_OUTPUT_POLICIES:
+            raise ValueError("watch.partial_output_policy must be 'discard' or 'promote'")
         self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
         self._configured_builtin_passwords = dedupe_passwords(list(config.get("builtin_passwords") or []))
         self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
@@ -913,7 +916,18 @@ class WatchScheduler:
         ])
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
-            self._cleanup_probe_workspace(request.probe_workspace)
+            generated_output_dirs: list[str] = []
+            if self.partial_output_policy == "promote":
+                generated_output_dirs, output_path_map = self._promote_probe_outputs(
+                    probe_output_dirs,
+                    request.predicted_final_dirs,
+                    request.probe_workspace,
+                )
+                request.handle.finalize(output_path_map)
+                self._remember_recent_output_roots(generated_output_dirs)
+                self._remember_known_output_roots(generated_output_dirs)
+            else:
+                self._cleanup_probe_workspace(request.probe_workspace)
             if group is not None:
                 self.state.record_group_terminal(group, status="partial")
             self.state.mark(
@@ -924,7 +938,12 @@ class WatchScheduler:
                 change_usn=candidate.change_usn,
                 status="partial",
             )
-            self.log.write("partial", path=candidate.path)
+            self.log.write(
+                "partial",
+                path=candidate.path,
+                output_policy=self.partial_output_policy,
+                output_dirs=generated_output_dirs,
+            )
             return WatchRunResult(processed=1)
 
         failed = list(summary.failed_tasks)

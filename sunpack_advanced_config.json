@@ -109,6 +109,7 @@
     "output_suppression_seconds": 120.0,
     "password_retry_debounce_seconds": 0.5,
     "password_retry_include_subtree": true,
+    "partial_output_policy": "discard",
     "clipboard_monitor_enabled": true,
     "clipboard_builtin_max_entries": 30,
     "enabled": false,
