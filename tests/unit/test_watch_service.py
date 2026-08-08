@@ -653,6 +653,61 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
     assert waits == [120.0, 5.0]
 
 
+def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    state_dir.mkdir()
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    scheduler_runs = []
+    waits = []
+
+    class FakeScheduler:
+        def __init__(self):
+            self.delay = 120.0
+
+        def run_once(self):
+            scheduler_runs.append(len(scheduler_runs))
+            return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[])
+
+        def next_delay_seconds(self):
+            return self.delay
+
+    scheduler = FakeScheduler()
+
+    class FakeControlEvents:
+        def start(self):
+            pass
+
+        def wait(self, timeout_seconds):
+            waits.append(timeout_seconds)
+            if len(waits) == 1:
+                # A completed request remains registered as inflight until the
+                # scheduler runs again and harvests it, so no path is currently
+                # eligible for a quiet-window deadline.
+                scheduler.delay = None
+                return CONTROL_SCHEDULER_WAKEUP
+            return CONTROL_STOP
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_acquire_lock", lambda: True)
+    monkeypatch.setattr(service, "_release_lock", lambda: None)
+    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", scheduler))
+    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    monkeypatch.setattr(service, "_start_tray", lambda: None)
+    monkeypatch.setattr(service, "_stop_tray", lambda: None)
+    service.control_events = FakeControlEvents()
+
+    assert service.run() == 0
+    assert len(scheduler_runs) == 2
+    assert waits == [120.0, None]
+
+
 def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     state_dir.mkdir()

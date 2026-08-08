@@ -264,9 +264,11 @@ class WatchService:
                     sleep_seconds = None
                 control_event = self.control_events.wait(sleep_seconds)
                 if control_event == CONTROL_SCHEDULER_WAKEUP and self.scheduler is not None:
-                    now = time.monotonic()
-                    delay = self._scheduler_next_delay()
-                    next_scheduler_run = None if delay is None else now + delay
+                    # A pipeline completion wakes the service so run_once() can
+                    # harvest the finished request.  Recomputing the delay here
+                    # can return None while that request is still registered as
+                    # inflight, leaving the completed request unharvested.
+                    next_scheduler_run = time.monotonic()
                 else:
                     self._handle_control_event(control_event)
             return 0
