@@ -20,10 +20,12 @@ class TaskExecutor:
         scheduler: ConcurrencyScheduler,
         max_workers: int = 8,
         executor_pool: concurrent.futures.ThreadPoolExecutor | None = None,
+        request_id: str = "",
     ):
         self.scheduler = scheduler
         self.max_workers = max_workers
         self.executor_pool = executor_pool
+        self.request_id = str(request_id or "")
 
     def execute_all(
         self,
@@ -37,7 +39,9 @@ class TaskExecutor:
         results = []
         pass_scheduler = self._worker_accepts_scheduler(worker_func)
         fifo_selection = self._can_use_fifo_selection(tasks)
-        workload_id = self.scheduler.register_workload(len(tasks), label=workload_label)
+        workload_id = self.scheduler.register_workload(
+            len(tasks), label=workload_label, request_id=self.request_id
+        )
 
         def wrapped_worker(task: Any, demand: ResourceDemand, profile_key: str) -> Any:
             started_at = time.perf_counter()
@@ -75,7 +79,7 @@ class TaskExecutor:
                         if selected is None:
                             break
                         index, task, demand, profile_key = selected
-                        if not self.scheduler.try_acquire_slot(demand=demand):
+                        if not self.scheduler.try_acquire_slot(demand=demand, workload_id=workload_id):
                             break
                         pending.pop(index)
                         try:
@@ -92,7 +96,7 @@ class TaskExecutor:
                         demand = self._resource_demand(task)
                         profile_key = task_profile_key(task)
                         demand = self.scheduler.apply_profile_calibration(demand, profile_key)
-                        self.scheduler.acquire_slot(demand=demand)
+                        self.scheduler.acquire_slot(demand=demand, workload_id=workload_id)
                         try:
                             future = pool.submit(wrapped_worker, task, demand, profile_key)
                         except Exception:

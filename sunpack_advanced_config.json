@@ -19,6 +19,7 @@
   "pipeline": {
     "batch_window_seconds": 0,
     "max_batch_requests": 64,
+    "max_active_pipeline_requests": null,
     "queue_capacity": 4096
   },
   "post_extract": {

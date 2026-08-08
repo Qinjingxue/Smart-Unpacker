@@ -34,7 +34,8 @@ from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.i18n import I18nContext
 from sunpack.postprocess.actions import PostProcessActions
 from sunpack.platform.windows.shell_notify import notify_shell_directories_updated
-from sunpack.rename.scheduler import RenameScheduler
+from sunpack.rename.scheduler import OutputReservationRegistry, RenameScheduler
+from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.archive_sessions import clear_archive_sessions
@@ -49,6 +50,7 @@ class _Submission:
     defer_postprocess: bool
     user_passwords: tuple[str, ...]
     builtin_passwords: tuple[str, ...]
+    config: dict
     future: Future
 
 
@@ -76,13 +78,13 @@ class PipelineHandle:
         response = self.result()
         with self._finalize_lock:
             if not self._finalized:
-                self._engine.finalize(response, output_path_map=output_path_map)
+                self._engine._finalize_submission(self._submission, response, output_path_map=output_path_map)
                 self._finalized = True
         return response
 
 
 class PipelineEngine:
-    """Process-scoped pipeline runtime with asynchronous micro-batch intake."""
+    """Process-scoped services with independently completing request pipelines."""
 
     _STOP = object()
 
@@ -90,16 +92,32 @@ class PipelineEngine:
         self.config = config
         self.detection_options = detection_options or DetectionOptions()
         pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
-        self.batch_window_seconds = max(0.0, float(pipeline_config["batch_window_seconds"]))
-        self.max_batch_requests = max(1, int(pipeline_config["max_batch_requests"]))
         queue_capacity = max(1, int(pipeline_config["queue_capacity"]))
+        configured_active = pipeline_config.get("max_active_pipeline_requests")
+        self.max_active_pipeline_requests = (
+            max(1, int(configured_active))
+            if configured_active is not None
+            else max(2, min(4, resolve_max_workers()))
+        )
         self._queue: queue.Queue = queue.Queue(maxsize=queue_capacity)
-        self._runtime = _PipelineRuntime(config, self.detection_options)
+        self._services = _PipelineServices(config, self.detection_options)
+        self._runtime = self._services
+        self._request_pool: ThreadPoolExecutor | None = None
+        self._request_runtime_factory = _RequestRuntime
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._dispatch_condition = threading.Condition()
         self._pressure_lock = threading.Lock()
         self._active_request_count = 0
+        self._pending_request_count = 0
+        self._outstanding_request_count = 0
+        self._active_request_futures: dict[Future, _Submission] = {}
+        self._path_leases = _PathLeaseRegistry()
+        self._cancel_pending_on_stop = False
         self._password_source_lock = threading.Lock()
+        self._config_lock = threading.Lock()
+        self._recent_passwords_lock = threading.Lock()
+        self._recent_passwords: list[str] = []
         self._user_passwords = tuple(config.get("user_passwords", []) or [])
         self._builtin_passwords = tuple(config.get("builtin_passwords", []) or [])
         self._started = False
@@ -107,36 +125,20 @@ class PipelineEngine:
         self._closed = False
 
     @property
-    def extractor(self) -> ExtractionScheduler:
-        return self._runtime.extractor
-
-    @property
-    def batch_runner(self) -> ExtractionBatchRunner:
-        return self._runtime.batch_runner
-
-    @property
     def resource_scheduler(self) -> ConcurrencyScheduler:
-        return self._runtime.resource_scheduler
-
-    @property
-    def task_scanner(self) -> ArchiveTaskScanner:
-        return self._runtime.task_scanner
-
-    @property
-    def output_scan_policy(self) -> NestedOutputScanPolicy:
-        return self._runtime.output_scan_policy
-
-    @property
-    def input_planning_stage(self) -> ArchiveInputPlanningStage:
-        return self._runtime.input_planning_stage
+        return self._services.resource_scheduler
 
     @property
     def recent_passwords(self) -> list[str]:
-        return list(self.extractor.recent_passwords)
+        with self._recent_passwords_lock:
+            return list(self._recent_passwords)
 
     def is_idle(self) -> bool:
         with self._pressure_lock:
-            return self._active_request_count == 0 and self._queue.empty()
+            return (
+                getattr(self, "_outstanding_request_count", self._active_request_count) == 0
+                and self._queue.empty()
+            )
 
     def start(self) -> "PipelineEngine":
         with self._lifecycle_lock:
@@ -144,7 +146,11 @@ class PipelineEngine:
                 raise RuntimeError("PipelineEngine is closed")
             if self._started:
                 return self
-            self._runtime.start()
+            self._services.start()
+            self._request_pool = ThreadPoolExecutor(
+                max_workers=self.max_active_pipeline_requests,
+                thread_name_prefix="sunpack-request",
+            )
             self._started = True
             self._accepting = True
             self._thread = threading.Thread(target=self._dispatch_loop, name="sunpack-pipeline", daemon=True)
@@ -164,6 +170,10 @@ class PipelineEngine:
         with self._password_source_lock:
             user_passwords = self._user_passwords
             builtin_passwords = self._builtin_passwords
+        with self._config_lock:
+            request_config = copy.deepcopy(self.config)
+        request_config["user_passwords"] = list(user_passwords)
+        request_config["builtin_passwords"] = list(builtin_passwords)
         submission = _Submission(
             request_id=uuid.uuid4().hex,
             targets=normalized,
@@ -171,11 +181,13 @@ class PipelineEngine:
             defer_postprocess=bool(defer_postprocess),
             user_passwords=user_passwords,
             builtin_passwords=builtin_passwords,
+            config=request_config,
             future=Future(),
         )
         with self._lifecycle_lock:
             if not self._started or not self._accepting:
                 raise RuntimeError("PipelineEngine must be started before submit")
+            self._change_outstanding_request_count(1)
             self._queue.put(submission)
             self._sync_pipeline_pressure()
         return PipelineHandle(self, submission)
@@ -186,11 +198,9 @@ class PipelineEngine:
             self._builtin_passwords = tuple(builtin_passwords)
 
     def reconfigure_request(self, config: dict) -> None:
-        """Refresh request-scoped config while preserving long-lived native workers."""
-        _replace_mapping_in_place(self.config, config)
-        cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
-        self._runtime.quiet = bool(cli_config.get("quiet", False))
-        self._runtime.verbose = bool(cli_config.get("verbose", False))
+        """Refresh the snapshot source for future requests only."""
+        with self._config_lock:
+            _replace_mapping_in_place(self.config, config)
 
     def finalize(
         self,
@@ -198,7 +208,18 @@ class PipelineEngine:
         *,
         output_path_map: Mapping[str, str] | None = None,
     ) -> None:
-        self._runtime.finalize(response, output_path_map=output_path_map)
+        with self._config_lock:
+            config = copy.deepcopy(self.config)
+        _finalize_response(config, response, output_path_map=output_path_map)
+
+    def _finalize_submission(
+        self,
+        submission: _Submission,
+        response: PipelineResponse,
+        *,
+        output_path_map: Mapping[str, str] | None = None,
+    ) -> None:
+        _finalize_response(submission.config, response, output_path_map=output_path_map)
 
     def close(self, *, graceful: bool = True) -> None:
         with self._lifecycle_lock:
@@ -206,11 +227,14 @@ class PipelineEngine:
                 return
             self._accepting = False
             thread = self._thread
+            self._cancel_pending_on_stop = not graceful
             if self._started:
                 self._queue.put(self._STOP)
-        if thread is not None and graceful:
+        if thread is not None:
             thread.join()
-        self._runtime.close()
+        if self._request_pool is not None:
+            self._request_pool.shutdown(wait=True, cancel_futures=False)
+        self._services.close()
         with self._lifecycle_lock:
             self._closed = True
             self._started = False
@@ -222,65 +246,130 @@ class PipelineEngine:
         self.close(graceful=True)
 
     def _dispatch_loop(self) -> None:
+        pending: list[_Submission] = []
+        stopping = False
         while True:
-            item = self._queue.get()
-            if item is self._STOP:
-                self._set_active_request_count(0)
-                self._queue.task_done()
-                return
-            batch = [item]
-            self._set_active_request_count(len(batch))
-            deadline = time.monotonic() + self.batch_window_seconds
-            while len(batch) < self.max_batch_requests:
-                timeout = deadline - time.monotonic()
-                if timeout <= 0:
-                    break
+            if not pending and not stopping:
+                item = self._queue.get()
+                if item is self._STOP:
+                    stopping = True
+                    self._queue.task_done()
+                else:
+                    pending.append(item)
+            while not stopping:
                 try:
-                    candidate = self._queue.get(timeout=timeout)
+                    item = self._queue.get_nowait()
                 except queue.Empty:
                     break
-                if candidate is self._STOP:
+                if item is self._STOP:
+                    stopping = True
                     self._queue.task_done()
-                    self._set_active_request_count(len(batch))
-                    self._execute_batch(batch)
-                    return
-                batch.append(candidate)
-                self._set_active_request_count(len(batch))
-            self._execute_batch(batch)
+                    break
+                pending.append(item)
+            self._set_pending_request_count(len(pending))
 
-    def _execute_batch(self, submissions: list[_Submission]) -> None:
-        try:
-            compatible: dict[tuple, list[_Submission]] = {}
-            for submission in submissions:
-                key = (submission.direct, submission.user_passwords, submission.builtin_passwords)
-                compatible.setdefault(key, []).append(submission)
-            for (direct, user_passwords, builtin_passwords), group in compatible.items():
-                self.extractor.password_store.replace_sources(
-                    user_passwords=list(user_passwords),
-                    builtin_passwords=list(builtin_passwords),
+            if stopping and self._cancel_pending_on_stop:
+                for submission in pending:
+                    submission.future.cancel()
+                    self._queue.task_done()
+                    self._change_outstanding_request_count(-1)
+                pending.clear()
+                self._set_pending_request_count(0)
+
+            scheduled = False
+            while pending and self._active_count() < self.max_active_pipeline_requests:
+                index = next(
+                    (
+                        i for i, submission in enumerate(pending)
+                        if self._path_leases.try_acquire(
+                            submission.request_id,
+                            [target.path for target in submission.targets],
+                        )
+                    ),
+                    None,
                 )
-                try:
-                    self._runtime.execute(group, direct=direct)
-                finally:
-                    self._runtime.release_request_state()
+                if index is None:
+                    break
+                submission = pending.pop(index)
+                self._set_pending_request_count(len(pending))
+                assert self._request_pool is not None
+                worker_future = self._request_pool.submit(self._execute_submission, submission)
+                with self._dispatch_condition:
+                    self._active_request_futures[worker_future] = submission
+                    active = len(self._active_request_futures)
+                self._set_active_request_count(active)
+                worker_future.add_done_callback(self._request_finished)
+                scheduled = True
+
+            if stopping and not pending and self._active_count() == 0:
+                self._set_active_request_count(0)
+                return
+            if not scheduled:
+                with self._dispatch_condition:
+                    self._dispatch_condition.wait(timeout=0.05)
+
+    def _execute_submission(self, submission: _Submission) -> None:
+        try:
+            runtime = self._request_runtime_factory(
+                self._services,
+                submission,
+                self.detection_options,
+                self._path_leases,
+            )
+            response = runtime.execute()
+            self._remember_recent_passwords(response.recent_passwords)
+            if not submission.future.done():
+                submission.future.set_result(response)
         except Exception as exc:
-            for submission in submissions:
-                if not submission.future.done():
-                    submission.future.set_exception(exc)
+            if not submission.future.done():
+                submission.future.set_exception(exc)
         finally:
-            for _submission in submissions:
-                self._queue.task_done()
-            self._set_active_request_count(0)
+            self._services.output_reservations.release(submission.request_id)
+
+    def _request_finished(self, worker_future: Future) -> None:
+        with self._dispatch_condition:
+            submission = self._active_request_futures.pop(worker_future, None)
+            active = len(self._active_request_futures)
+            self._dispatch_condition.notify_all()
+        self._set_active_request_count(active)
+        if submission is not None:
+            self._path_leases.release(submission.request_id)
+            self._queue.task_done()
+            self._change_outstanding_request_count(-1)
+
+    def _active_count(self) -> int:
+        with self._dispatch_condition:
+            return len(self._active_request_futures)
+
+    def _remember_recent_passwords(self, passwords: Iterable[str]) -> None:
+        with self._recent_passwords_lock:
+            for password in reversed(list(passwords)):
+                if password in self._recent_passwords:
+                    self._recent_passwords.remove(password)
+                self._recent_passwords.insert(0, password)
+            del self._recent_passwords[20:]
 
     def _set_active_request_count(self, count: int) -> None:
         with self._pressure_lock:
             self._active_request_count = max(0, int(count or 0))
-            pressure = self._active_request_count + self._queue.qsize()
+            pressure = self._outstanding_request_count
+        self.resource_scheduler.set_pipeline_request_backlog(pressure)
+
+    def _set_pending_request_count(self, count: int) -> None:
+        with self._pressure_lock:
+            self._pending_request_count = max(0, int(count or 0))
+            pressure = self._outstanding_request_count
+        self.resource_scheduler.set_pipeline_request_backlog(pressure)
+
+    def _change_outstanding_request_count(self, delta: int) -> None:
+        with self._pressure_lock:
+            self._outstanding_request_count = max(0, self._outstanding_request_count + int(delta))
+            pressure = self._outstanding_request_count
         self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     def _sync_pipeline_pressure(self) -> None:
         with self._pressure_lock:
-            pressure = self._active_request_count + self._queue.qsize()
+            pressure = self._outstanding_request_count
         self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     @staticmethod
@@ -288,6 +377,60 @@ class PipelineEngine:
         if isinstance(target, PipelineTarget):
             return PipelineTarget(os.path.abspath(os.path.normpath(target.path)), dict(target.output))
         return PipelineTarget(os.path.abspath(os.path.normpath(str(target))))
+
+
+class _PathLeaseRegistry:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._owned: dict[str, set[str]] = {}
+
+    def try_acquire(self, owner: str, paths: Iterable[str]) -> bool:
+        normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
+        with self._condition:
+            if self._conflicts(owner, normalized):
+                return False
+            self._owned.setdefault(owner, set()).update(normalized)
+            return True
+
+    def acquire(self, owner: str, paths: Iterable[str]) -> None:
+        normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
+        with self._condition:
+            while self._conflicts(owner, normalized):
+                self._condition.wait()
+            self._owned.setdefault(owner, set()).update(normalized)
+
+    def replace(self, owner: str, paths: Iterable[str]) -> None:
+        """Replace a provisional top-level lease with a discovered member set.
+
+        Dropping the provisional lease before waiting prevents two different
+        split members from each holding one path while requesting the other.
+        """
+        normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
+        with self._condition:
+            self._owned.pop(owner, None)
+            self._condition.notify_all()
+            while self._conflicts(owner, normalized):
+                self._condition.wait()
+            self._owned[owner] = normalized
+
+    def release(self, owner: str) -> None:
+        with self._condition:
+            self._owned.pop(owner, None)
+            self._condition.notify_all()
+
+    def _conflicts(self, owner: str, candidates: set[str]) -> bool:
+        for current_owner, current_paths in self._owned.items():
+            if current_owner == owner:
+                continue
+            for candidate in candidates:
+                for current in current_paths:
+                    if path_key(candidate) == path_key(current):
+                        return True
+                    if os.path.isdir(candidate) and _is_relative_to(current, candidate):
+                        return True
+                    if os.path.isdir(current) and _is_relative_to(candidate, current):
+                        return True
+        return False
 
 
 def _replace_mapping_in_place(target: dict, source: dict) -> None:
@@ -302,16 +445,12 @@ def _replace_mapping_in_place(target: dict, source: dict) -> None:
             target[key] = copy.deepcopy(value)
 
 
-class _PipelineRuntime:
-    """Long-lived pipeline components; request state is rebound per micro-batch."""
+class _PipelineServices:
+    """Thread-safe process services shared by all request runtimes."""
 
     def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
-        cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
-        self.i18n = I18nContext(cli_config.get("language"))
-        self.language = self.i18n.language
-        self.quiet = bool(cli_config.get("quiet", False))
-        self.verbose = bool(cli_config.get("verbose", False))
+        self.output_reservations = OutputReservationRegistry()
         planning_config = config.get("input_planning") if isinstance(config.get("input_planning"), dict) else {}
         analysis_config = config.get("analysis") if isinstance(config.get("analysis"), dict) else {}
         planning_workers = max(1, int(planning_config.get("task_max_workers", 4) or 4))
@@ -340,12 +479,6 @@ class _PipelineRuntime:
             max_workers=module_workers,
             thread_name_prefix="sunpack-analysis-capability",
         )
-        self.input_planning_stage = ArchiveInputPlanningStage(
-            config,
-            executor_pool=self.input_planning_executor_pool,
-            module_executor_pool=self.analysis_capability_pool,
-            workload_executor=self._execute_input_planning_workload,
-        )
         self.repair_inspection_service = RepairInspectionService(
             config,
             executor_pool=self.analysis_capability_pool,
@@ -354,38 +487,89 @@ class _PipelineRuntime:
             max_workers=max_workers,
             thread_name_prefix="sunpack-task",
         )
-        initial_context = RunContext()
-        self.task_scanner = ArchiveTaskScanner(config, initial_context, detection_options=detection_options)
-        self.rename_scheduler = RenameScheduler()
-        self.output_scan_policy = NestedOutputScanPolicy(config)
-        self.nested_extraction_policy = NestedExtractionPolicy(config)
         performance_config = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
-        self.extractor = ExtractionScheduler(
-            cli_passwords=config.get("user_passwords", []),
-            builtin_passwords=config.get("builtin_passwords", []),
-            max_retries=config.get("max_retries", 3),
-            process_config=performance_config,
-            output_config=config.get("output", {}),
-            extraction_config={
-                **(config.get("extraction", {}) if isinstance(config.get("extraction"), dict) else {}),
-                "language": self.language,
-            },
-        )
-        initial_reporter = self._new_reporter()
-        self.batch_runner = ExtractionBatchRunner(
-            initial_context,
-            self.extractor,
-            self.output_scan_policy,
-            self.resource_scheduler,
-            self.rename_scheduler,
-            config,
-            repair_inspection_service=self.repair_inspection_service,
-            progress_reporter=initial_reporter,
-            executor_pool=self.executor_pool,
-        )
+        self.sevenzip_runner = SevenZipRunner(performance_config)
 
     def start(self) -> None:
         self.resource_scheduler.start()
+
+    def close(self) -> None:
+        self.resource_scheduler.set_pipeline_request_backlog(0)
+        self.resource_scheduler.stop()
+        self.sevenzip_runner.close()
+        self.executor_pool.shutdown(wait=True, cancel_futures=False)
+        self.input_planning_executor_pool.shutdown(wait=True, cancel_futures=False)
+        self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
+        clear_archive_sessions()
+
+
+class _RequestRuntime:
+    """All mutable state belonging to exactly one PipelineEngine submission."""
+
+    def __init__(
+        self,
+        services: _PipelineServices,
+        submission: _Submission,
+        detection_options: DetectionOptions,
+        path_leases: _PathLeaseRegistry,
+    ):
+        self.services = services
+        self.submission = submission
+        self.config = submission.config
+        self.path_leases = path_leases
+        cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
+        self.i18n = I18nContext(cli_config.get("language"))
+        self.language = self.i18n.language
+        self.quiet = bool(cli_config.get("quiet", False))
+        self.verbose = bool(cli_config.get("verbose", False))
+        self.context = RunContext()
+        self.reporter = RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)
+        self.postprocess = PostProcessActions(self.config, self.context, language=self.language)
+        self.space_guard = ExtractionSpaceGuard(self.context, self.postprocess)
+        self.task_scanner = ArchiveTaskScanner(
+            self.config,
+            self.context,
+            detection_options=detection_options,
+        )
+        self.input_planning_stage = ArchiveInputPlanningStage(
+            self.config,
+            executor_pool=services.input_planning_executor_pool,
+            module_executor_pool=services.analysis_capability_pool,
+            workload_executor=self._execute_input_planning_workload,
+        )
+        self.output_scan_policy = NestedOutputScanPolicy(self.config)
+        self.nested_extraction_policy = NestedExtractionPolicy(self.config)
+        self.rename_scheduler = RenameScheduler(
+            services.output_reservations,
+            submission.request_id,
+        )
+        performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
+        self.extractor = ExtractionScheduler(
+            cli_passwords=submission.user_passwords,
+            builtin_passwords=submission.builtin_passwords,
+            max_retries=self.config.get("max_retries", 3),
+            process_config=performance,
+            output_config=self.config.get("output", {}),
+            extraction_config={
+                **(self.config.get("extraction", {}) if isinstance(self.config.get("extraction"), dict) else {}),
+                "language": self.language,
+            },
+            sevenzip_runner=services.sevenzip_runner.fork(),
+        )
+        self.extractor.ensure_space = self.space_guard.ensure_space
+        self.extractor.set_progress_callback(self.reporter.task_progress)
+        self.batch_runner = ExtractionBatchRunner(
+            self.context,
+            self.extractor,
+            self.output_scan_policy,
+            services.resource_scheduler,
+            self.rename_scheduler,
+            self.config,
+            repair_inspection_service=services.repair_inspection_service,
+            progress_reporter=self.reporter,
+            executor_pool=services.executor_pool,
+            request_id=submission.request_id,
+        )
 
     def _execute_input_planning_workload(
         self,
@@ -396,86 +580,86 @@ class _PipelineRuntime:
         workload_label: str,
     ):
         executor = TaskExecutor(
-            self.resource_scheduler,
+            self.services.resource_scheduler,
             max_workers=max_workers,
-            executor_pool=self.input_planning_executor_pool,
+            executor_pool=self.services.input_planning_executor_pool,
+            request_id=self.submission.request_id,
         )
         return executor.execute_all(tasks, worker, workload_label=workload_label)
 
-    def execute(self, submissions: list[_Submission], *, direct: bool) -> None:
+    def execute(self) -> PipelineResponse:
         start_time = time.time()
-        context = RunContext()
-        reporter = self._new_reporter()
-        postprocess = PostProcessActions(self.config, context, language=self.language)
-        space_guard = ExtractionSpaceGuard(context, postprocess)
-        self.task_scanner.context = context
-        self.batch_runner.context = context
-        self.batch_runner.progress_reporter = reporter
-        self.extractor.ensure_space = space_guard.ensure_space
-        self.extractor.set_progress_callback(reporter.task_progress)
-
-        all_targets = [target.path for submission in submissions for target in submission.targets]
+        submission = self.submission
+        all_targets = [target.path for target in submission.targets]
         first_target = all_targets[0] if all_targets else os.getcwd()
         monitor_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
-        space_guard.bind_root(monitor_root)
-        ownership = _RequestOwnership(submissions, self.config)
+        self.space_guard.bind_root(monitor_root)
+        ownership = _RequestOwnership([submission], self.config)
         recursion = self._new_recursion()
         round_index = 1
         current_roots = list(dict.fromkeys(all_targets))
-        current_tasks = self.task_scanner.direct_file_tasks(current_roots) if direct else None
+        current_tasks = self.task_scanner.direct_file_tasks(current_roots) if submission.direct else None
         current_scan_session = None
 
-        while current_tasks if direct else current_roots:
-            if direct:
-                tasks = current_tasks or []
-            else:
-                reporter.scan_started(round_index)
-                tasks = self.task_scanner.scan_targets(
+        try:
+            while current_tasks if submission.direct else current_roots:
+                if submission.direct:
+                    tasks = current_tasks or []
+                else:
+                    self.reporter.scan_started(round_index)
+                    tasks = self.task_scanner.scan_targets(
+                        current_roots,
+                        scan_session=current_scan_session,
+                        is_recursive_scan=(round_index > 1),
+                    )
+                authorization = self.nested_extraction_policy.authorize_batch(
+                    tasks,
                     current_roots,
-                    scan_session=current_scan_session,
-                    is_recursive_scan=(round_index > 1),
+                    current_scan_session or self.task_scanner.last_scan_session,
+                    round_index=round_index,
                 )
-            authorization = self.nested_extraction_policy.authorize_batch(
-                tasks,
-                current_roots,
-                current_scan_session or self.task_scanner.last_scan_session,
-                round_index=round_index,
-            )
-            tasks = authorization.allowed_tasks
-            tasks = self.input_planning_stage.plan_tasks(tasks)
-            context.policy_skips.extend(authorization.skipped)
-            ownership.remember_tasks(tasks)
-            self.batch_runner.set_progress_round(round_index, direct=direct and round_index == 1)
-            before_results = len(context.target_results)
-            new_roots = self.batch_runner.execute(
-                tasks,
-                default_output_dir_for_task=ownership.output_dir_for_task,
-            )
-            next_scan_session = self.output_scan_policy.take_scan_session(new_roots)
-            ownership.remember_results(context.target_results[before_results:])
-            if not recursion.should_continue(round_index, bool(new_roots)):
-                break
-            if recursion.mode == "prompt" and not recursion.prompt_continue(round_index):
-                break
-            current_roots = new_roots
-            current_scan_session = next_scan_session
-            current_tasks = (
-                self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session, is_recursive_scan=True)
-                if direct
-                else None
-            )
-            round_index += 1
+                tasks = self.input_planning_stage.plan_tasks(authorization.allowed_tasks)
+                self.context.policy_skips.extend(authorization.skipped)
+                ownership.remember_tasks(tasks)
+                member_paths = [
+                    path
+                    for task in tasks
+                    for path in (task.all_parts or [task.main_path])
+                ]
+                self.path_leases.replace(
+                    submission.request_id,
+                    [*all_targets, *member_paths],
+                )
+                self.batch_runner.set_progress_round(
+                    round_index,
+                    direct=submission.direct and round_index == 1,
+                )
+                before_results = len(self.context.target_results)
+                new_roots = self.batch_runner.execute(
+                    tasks,
+                    default_output_dir_for_task=ownership.output_dir_for_task,
+                )
+                next_scan_session = self.output_scan_policy.take_scan_session(new_roots)
+                ownership.remember_results(self.context.target_results[before_results:])
+                if not recursion.should_continue(round_index, bool(new_roots)):
+                    break
+                if recursion.mode == "prompt" and not recursion.prompt_continue(round_index):
+                    break
+                current_roots = new_roots
+                current_scan_session = next_scan_session
+                current_tasks = (
+                    self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session, is_recursive_scan=True)
+                    if submission.direct
+                    else None
+                )
+                round_index += 1
 
-        responses = ownership.responses(context, recent_passwords=self.extractor.recent_passwords)
-        for submission in submissions:
-            response = responses[submission.request_id]
-            first_request_target = submission.targets[0].path
-            request_log_root = (
-                first_request_target
-                if os.path.isdir(first_request_target)
-                else os.path.dirname(first_request_target)
-            )
-            reporter.log_final_summary(
+            response = ownership.responses(
+                self.context,
+                recent_passwords=self.extractor.recent_passwords,
+            )[submission.request_id]
+            request_log_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
+            self.reporter.log_final_summary(
                 request_log_root,
                 start_time,
                 response.summary.success_count,
@@ -484,66 +668,12 @@ class _PipelineRuntime:
                 failures=response.summary.failures,
             )
             if not submission.defer_postprocess:
-                self.finalize(response)
-            submission.future.set_result(response)
-
-    def finalize(
-        self,
-        response: PipelineResponse,
-        *,
-        output_path_map: Mapping[str, str] | None = None,
-    ) -> None:
-        mapping = {path_key(old): os.path.abspath(new) for old, new in (output_path_map or {}).items()}
-
-        def remap(path: str) -> str:
-            normalized = os.path.abspath(path)
-            exact = mapping.get(path_key(normalized))
-            if exact:
-                return exact
-            ancestors = [
-                (old, new)
-                for old, new in (output_path_map or {}).items()
-                if _is_relative_to(normalized, old)
-            ]
-            if not ancestors:
-                return path
-            old, new = max(ancestors, key=lambda item: len(os.path.abspath(item[0])))
-            return os.path.join(os.path.abspath(new), os.path.relpath(normalized, os.path.abspath(old)))
-
-        archives_to_clean = [
-            [remap(path) for path in archive_parts]
-            for archive_parts in response.artifacts.archives_to_clean
-        ]
-        flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
-        shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
-        PostProcessActions(self.config).apply(
-            archives_to_clean=archives_to_clean,
-            flatten_targets=flatten_targets,
-        )
-        notify_shell_directories_updated(shell_refresh_paths)
-
-    def close(self) -> None:
-        self.resource_scheduler.set_pipeline_request_backlog(0)
-        self.resource_scheduler.stop()
-        self.extractor.close()
-        self.executor_pool.shutdown(wait=True, cancel_futures=False)
-        self.input_planning_executor_pool.shutdown(wait=True, cancel_futures=False)
-        self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
-
-    def release_request_state(self) -> None:
-        """Drop references that are valid only for one compatible request group."""
-        context = RunContext()
-        self.task_scanner.context = context
-        self.batch_runner.context = context
-        self.batch_runner.progress_reporter = None
-        self.batch_runner.directory_password_contexts.clear()
-        self.extractor.ensure_space = lambda _required_gb: True
-        self.extractor.set_progress_callback(None)
-        self.input_planning_stage.clear_report_cache()
-        clear_archive_sessions()
-
-    def _new_reporter(self) -> RunReporter:
-        return RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)
+                _finalize_response(self.config, response)
+            return response
+        finally:
+            self.extractor.set_progress_callback(None)
+            self.extractor.close()
+            self.input_planning_stage.clear_report_cache()
 
     def _new_recursion(self) -> RecursionController:
         config = self.config.get("recursive_extract", {"mode": "fixed", "max_rounds": 1})
@@ -554,6 +684,42 @@ class _PipelineRuntime:
             max_rounds=int(config.get("max_rounds", 1)),
             language=self.language,
         )
+
+
+def _finalize_response(
+    config: dict,
+    response: PipelineResponse,
+    *,
+    output_path_map: Mapping[str, str] | None = None,
+) -> None:
+    mapping = {path_key(old): os.path.abspath(new) for old, new in (output_path_map or {}).items()}
+
+    def remap(path: str) -> str:
+        normalized = os.path.abspath(path)
+        exact = mapping.get(path_key(normalized))
+        if exact:
+            return exact
+        ancestors = [
+            (old, new)
+            for old, new in (output_path_map or {}).items()
+            if _is_relative_to(normalized, old)
+        ]
+        if not ancestors:
+            return path
+        old, new = max(ancestors, key=lambda item: len(os.path.abspath(item[0])))
+        return os.path.join(os.path.abspath(new), os.path.relpath(normalized, os.path.abspath(old)))
+
+    archives_to_clean = [
+        [remap(path) for path in archive_parts]
+        for archive_parts in response.artifacts.archives_to_clean
+    ]
+    flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
+    shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
+    PostProcessActions(config).apply(
+        archives_to_clean=archives_to_clean,
+        flatten_targets=flatten_targets,
+    )
+    notify_shell_directories_updated(shell_refresh_paths)
 
 
 class _RequestOwnership:

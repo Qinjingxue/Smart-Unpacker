@@ -45,8 +45,9 @@ class ConcurrencyScheduler:
         self.active_memory_tokens = 0
         self.pending_task_estimate = 0
         self.pipeline_request_backlog = 0
-        self._workloads: dict[int, tuple[int, int, str]] = {}
+        self._workloads: dict[int, tuple[int, int, str, str]] = {}
         self._workload_ids = count(1)
+        self._request_turns: list[str] = []
         self.idle_decay_seconds = max(1.0, float(config.get("scheduler_idle_decay_seconds", 30.0) or 30.0))
         self._last_activity_at = time.monotonic()
         self._last_idle_decay_at = self._last_activity_at
@@ -234,10 +235,15 @@ class ConcurrencyScheduler:
             self.pipeline_request_backlog = max(0, int(request_count or 0))
             self._refresh_pending_estimate_locked()
 
-    def register_workload(self, pending_count: int, *, label: str = "") -> int:
+    def register_workload(self, pending_count: int, *, label: str = "", request_id: str = "") -> int:
         with self.cond:
             workload_id = next(self._workload_ids)
-            self._workloads[workload_id] = (max(0, int(pending_count or 0)), 0, str(label or ""))
+            request_key = str(request_id or f"workload:{workload_id}")
+            self._workloads[workload_id] = (
+                max(0, int(pending_count or 0)), 0, str(label or ""), request_key
+            )
+            if request_key not in self._request_turns:
+                self._request_turns.append(request_key)
             self._refresh_pending_estimate_locked()
             self._mark_activity_locked()
             return workload_id
@@ -247,17 +253,23 @@ class ConcurrencyScheduler:
             if workload_id not in self._workloads:
                 raise RuntimeError(f"unknown scheduler workload: {workload_id}")
             label = self._workloads[workload_id][2]
+            request_key = self._workloads[workload_id][3]
             self._workloads[workload_id] = (
                 max(0, int(pending_count or 0)),
                 max(0, int(futures_count or 0)),
                 label,
+                request_key,
             )
             self._refresh_pending_estimate_locked()
             self._mark_activity_locked()
 
     def unregister_workload(self, workload_id: int) -> None:
         with self.cond:
-            self._workloads.pop(workload_id, None)
+            removed = self._workloads.pop(workload_id, None)
+            if removed is not None:
+                request_key = removed[3]
+                if not any(item[3] == request_key for item in self._workloads.values()):
+                    self._request_turns = [item for item in self._request_turns if item != request_key]
             self._refresh_pending_estimate_locked()
 
     def pressure_snapshot(self) -> dict:
@@ -278,8 +290,8 @@ class ConcurrencyScheduler:
                     "current": self.current_limit,
                 },
                 "workloads": {
-                    workload_id: {"pending": pending, "running": running, "label": label}
-                    for workload_id, (pending, running, label) in self._workloads.items()
+                    workload_id: {"pending": pending, "running": running, "label": label, "request_id": request_id}
+                    for workload_id, (pending, running, label, request_id) in self._workloads.items()
                 },
             }
 
@@ -333,11 +345,17 @@ class ConcurrencyScheduler:
         with self.cond:
             return self.feedback.apply_profile_calibration(demand_value, profile_key, current_limit=self.current_limit)
 
-    def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
+    def acquire_slot(
+        self,
+        token_cost: int = 1,
+        demand: ResourceDemand | dict | None = None,
+        workload_id: int | None = None,
+    ):
         demand_value = demand_from_value(demand or token_cost)
         with self.cond:
-            while not self._can_acquire_locked(demand_value):
+            while not self._can_acquire_locked(demand_value) or not self._fair_turn_locked(workload_id):
                 self.cond.wait()
+            self._advance_turn_locked(workload_id)
             was_sampling = self._sampling_needed_locked()
             if not was_sampling:
                 self._decay_idle_locked(time.monotonic())
@@ -347,11 +365,17 @@ class ConcurrencyScheduler:
             if not was_sampling:
                 self._wake_event.set()
 
-    def try_acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None) -> bool:
+    def try_acquire_slot(
+        self,
+        token_cost: int = 1,
+        demand: ResourceDemand | dict | None = None,
+        workload_id: int | None = None,
+    ) -> bool:
         demand_value = demand_from_value(demand or token_cost)
         with self.cond:
-            if not self._can_acquire_locked(demand_value):
+            if not self._can_acquire_locked(demand_value) or not self._fair_turn_locked(workload_id):
                 return False
+            self._advance_turn_locked(workload_id)
             was_sampling = self._sampling_needed_locked()
             if not was_sampling:
                 self._decay_idle_locked(time.monotonic())
@@ -389,7 +413,9 @@ class ConcurrencyScheduler:
 
     def _refresh_pending_estimate_locked(self) -> None:
         was_sampling = self._sampling_needed_locked()
-        workload_pressure = sum(pending + running for pending, running, _label in self._workloads.values())
+        workload_pressure = sum(
+            pending + running for pending, running, _label, _request in self._workloads.values()
+        )
         next_pending_estimate = self.pipeline_request_backlog + workload_pressure
         if not was_sampling and next_pending_estimate > 0:
             self._decay_idle_locked(time.monotonic())
@@ -450,6 +476,27 @@ class ConcurrencyScheduler:
             and self.active_io_tokens + demand.io <= budget.io
             and self.active_memory_tokens + demand.memory <= budget.memory
         )
+
+    def _fair_turn_locked(self, workload_id: int | None) -> bool:
+        if workload_id is None or workload_id not in self._workloads:
+            return True
+        runnable = {
+            request_id
+            for pending, _running, _label, request_id in self._workloads.values()
+            if pending > 0
+        }
+        if len(runnable) <= 1:
+            return True
+        request_id = self._workloads[workload_id][3]
+        return next((item for item in self._request_turns if item in runnable), request_id) == request_id
+
+    def _advance_turn_locked(self, workload_id: int | None) -> None:
+        if workload_id is None or workload_id not in self._workloads:
+            return
+        request_id = self._workloads[workload_id][3]
+        if request_id in self._request_turns:
+            self._request_turns.remove(request_id)
+            self._request_turns.append(request_id)
 
     def _add_demand_locked(self, demand: ResourceDemand) -> None:
         demand = demand.normalized()

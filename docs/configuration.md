@@ -85,15 +85,16 @@ CLI 可用 `--recur` 临时覆盖。
 
 ## pipeline
 
-`pipeline` 控制进程级常驻 Engine 的入口队列和自动微批，不改变单个压缩包的检测、验证或修复策略。
+`pipeline` 控制进程级常驻 Engine 的入口队列和 request-level 并发，不改变单个压缩包的检测、验证或修复策略。不同请求拥有独立上下文、密码会话和后处理生命周期，但共享全局 CPU/IO/内存调度器与 7-Zip worker pool。
 
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `batch_window_seconds` | `float` | `0` | 首个请求到达后继续收集兼容请求的最大时间；`0` 表示到达后立即调度。 |
-| `max_batch_requests` | `int` | `64` | 一个微批最多包含的提交请求数。 |
+| `batch_window_seconds` | `float` | `0` | 兼容字段；request-level 并发启用后不再生效。 |
+| `max_batch_requests` | `int` | `64` | 兼容字段；不同 submission 不再合并为微批。 |
+| `max_active_pipeline_requests` | `int/null` | `null` | 同时推进的请求数；`null` 自动取 `max(2, min(4, max_workers))`，`1` 可恢复串行。 |
 | `queue_capacity` | `int` | `4096` | 入口队列上限；达到上限时提交方产生背压。 |
 
-CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine、资源调度器和 7-Zip worker pool。入口队列、分析、预检、资源分析和解压共享同一份 CPU/IO/内存预算；调度反馈跨微批保留，到 Engine 关闭时统一保存。
+CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine、资源调度器和 7-Zip worker pool。入口队列、分析、预检、资源分析和解压共享同一份 CPU/IO/内存预算；调度反馈跨请求保留，到 Engine 关闭时统一保存。
 
 ## post_extract
 

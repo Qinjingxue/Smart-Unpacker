@@ -1,6 +1,6 @@
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.rename.scheduler import RenameScheduler
+from sunpack.rename.scheduler import OutputReservationRegistry, RenameScheduler
 from sunpack.rename.conflicts import next_available_path
 from sunpack.coordinator.task_scan import direct_file_task
 
@@ -91,4 +91,20 @@ def test_output_dir_resolver_avoids_existing_output_directory(tmp_path):
     resolver = RenameScheduler().build_output_dir_resolver([task], lambda item: str(tmp_path / item.logical_name))
 
     assert resolver(task) == str(tmp_path / "photos(2)")
+
+
+def test_output_reservations_disambiguate_concurrent_requests_before_directories_exist(tmp_path):
+    registry = OutputReservationRegistry()
+    first_task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(tmp_path / "a.zip"))
+    second_task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(tmp_path / "b.zip"))
+    default = lambda _task: str(tmp_path / "shared")
+
+    first = RenameScheduler(registry, "first").build_output_dir_resolver([first_task], default)
+    second = RenameScheduler(registry, "second").build_output_dir_resolver([second_task], default)
+
+    assert first(first_task) == str(tmp_path / "shared")
+    assert second(second_task) == str(tmp_path / "shared(1)")
+    registry.release("first")
+    third = RenameScheduler(registry, "third").build_output_dir_resolver([first_task], default)
+    assert third(first_task) == str(tmp_path / "shared")
 

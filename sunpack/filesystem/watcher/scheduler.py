@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -99,11 +100,31 @@ class _ActivePipelineRequest:
     predicted_final_dirs: list[str]
 
 
+@dataclass
+class _ActiveCompletion:
+    request: _ActivePipelineRequest
+    future: Future
+
+
 def _handle_done(handle: object) -> bool:
     done = getattr(handle, "done", None)
     # Older embedders and synchronous test doubles predate the asynchronous
     # handle contract; their result is already available when submit returns.
     return bool(done()) if callable(done) else True
+
+
+def _paths_overlap(first: str, second: str) -> bool:
+    first_abs = os.path.abspath(first)
+    second_abs = os.path.abspath(second)
+    if path_key(first_abs) == path_key(second_abs):
+        return True
+    try:
+        return (
+            os.path.commonpath((first_abs, second_abs)) == first_abs
+            or os.path.commonpath((first_abs, second_abs)) == second_abs
+        )
+    except ValueError:
+        return False
 
 
 class WatchScheduler:
@@ -164,9 +185,21 @@ class WatchScheduler:
             os.path.abspath(str(log_path)),
         }
         self._lock = threading.Lock()
-        self._password_source_lock = threading.Lock()
+        self._password_source_lock = threading.RLock()
         self._pending: dict[str, WatchCandidate] = {}
         self._inflight_requests: list[_ActivePipelineRequest] = []
+        self._completion_requests: list[_ActiveCompletion] = []
+        pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+        configured_completions = pipeline_config.get("max_active_pipeline_requests")
+        self._completion_workers = (
+            max(1, int(configured_completions))
+            if configured_completions is not None
+            else max(2, min(4, os.cpu_count() or 1))
+        )
+        self._completion_pool = ThreadPoolExecutor(
+            max_workers=self._completion_workers,
+            thread_name_prefix="sunpack-watch-completion",
+        )
         self._active_states: dict[str, _ActiveCandidateState] = {}
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
@@ -236,6 +269,11 @@ class WatchScheduler:
     def start(self):
         if self._started:
             return
+        if getattr(self._completion_pool, "_shutdown", False):
+            self._completion_pool = ThreadPoolExecutor(
+                max_workers=self._completion_workers,
+                thread_name_prefix="sunpack-watch-completion",
+            )
         self._ensure_directory_password_files()
         self._recover_probe_workspaces()
         handler = _WatchEventHandler(self)
@@ -289,6 +327,7 @@ class WatchScheduler:
         self._observer.stop()
         self._observer.join(timeout=self.observer_stop_timeout_seconds)
         self._clipboard_monitor.stop()
+        self._completion_pool.shutdown(wait=True, cancel_futures=False)
         self._started = False
 
     def run_forever(self):
@@ -317,6 +356,8 @@ class WatchScheduler:
             state=self.state,
             prepare_candidate=self._prepare_group_head,
         )
+        dispatches, output_deferred = self._filter_output_conflicts(dispatches)
+        deferred.extend(output_deferred)
         for candidate in deferred:
             # A different member of this split group is still pending or in
             # flight.  Preserve this content event so the changed group
@@ -341,6 +382,35 @@ class WatchScheduler:
         result.pending = self.pending_count
         return result
 
+    def _filter_output_conflicts(self, dispatches):
+        with self._lock:
+            active = [
+                path
+                for request in [
+                    *self._inflight_requests,
+                    *(item.request for item in self._completion_requests),
+                ]
+                for path in request.predicted_final_dirs
+            ]
+        selected = []
+        deferred = []
+        reserved = list(active)
+        for dispatch in dispatches:
+            candidate = dispatch.candidate
+            output_config = dict(self.config)
+            output_config["output"] = {
+                **(output_config.get("output", {}) if isinstance(output_config.get("output"), dict) else {}),
+                "root": self._output_root_for(candidate.path),
+                "common_root": self._common_root_for(candidate.path),
+            }
+            predicted = self._predicted_output_dirs(candidate.path, output_config)
+            if any(_paths_overlap(path, current) for path in predicted for current in reserved):
+                deferred.append(candidate)
+                continue
+            selected.append(dispatch)
+            reserved.extend(predicted)
+        return selected, deferred
+
     def _harvest_completed_requests(self) -> WatchRunResult:
         with self._lock:
             completed = [request for request in self._inflight_requests if _handle_done(request.handle)]
@@ -350,30 +420,54 @@ class WatchScheduler:
                     request for request in self._inflight_requests if id(request) not in completed_ids
                 ]
         result = WatchRunResult()
+        scheduled_futures = []
         for request in completed:
-            try:
-                single = self._complete_candidate(request)
-            except Exception as exc:
-                single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
-                self.log.write(
-                    "error",
-                    path=request.candidate.path,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    phase="pipeline_completion",
-                )
-                # Preserve crash-recovery state and put the candidate back into
-                # the live queue.  A completion/finalization exception must not
-                # silently acknowledge durable work that never finished.
-                self.enqueue(
-                    request.candidate.path,
-                    force=True,
-                    event_type="pipeline_completion_error",
-                )
-            else:
-                self.state.complete_work_if_matches(request.candidate)
-            self._merge_run_result(result, single)
+            done_method = getattr(request.handle, "done", None)
+            if not callable(done_method):
+                self._merge_run_result(result, self._finish_active_request(request))
+                continue
+            future = self._completion_pool.submit(self._finish_active_request, request)
+            scheduled_futures.append(future)
+            future.add_done_callback(lambda _future: self._wake_service())
+            with self._lock:
+                self._completion_requests.append(_ActiveCompletion(request=request, future=future))
+
+        if scheduled_futures:
+            # Preserve prompt completion for cheap harvests while bounding how
+            # long a slow promotion/finalizer can hold the scheduler turn.
+            wait(scheduled_futures, timeout=0.05)
+
+        with self._lock:
+            finished = [item for item in self._completion_requests if item.future.done()]
+            if finished:
+                finished_ids = {id(item) for item in finished}
+                self._completion_requests = [
+                    item for item in self._completion_requests if id(item) not in finished_ids
+                ]
+        for item in finished:
+            self._merge_run_result(result, item.future.result())
         return result
+
+    def _finish_active_request(self, request: _ActivePipelineRequest) -> WatchRunResult:
+        try:
+            single = self._complete_candidate(request)
+        except Exception as exc:
+            single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
+            self.log.write(
+                "error",
+                path=request.candidate.path,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                phase="pipeline_completion",
+            )
+            self.enqueue(
+                request.candidate.path,
+                force=True,
+                event_type="pipeline_completion_error",
+            )
+        else:
+            self.state.complete_work_if_matches(request.candidate)
+        return single
 
     @staticmethod
     def _merge_run_result(target: WatchRunResult, source: WatchRunResult) -> None:
@@ -384,7 +478,11 @@ class WatchScheduler:
 
     def _inflight_path_keys_locked(self) -> set[str]:
         paths: set[str] = set()
-        for request in self._inflight_requests:
+        requests = [
+            *self._inflight_requests,
+            *(item.request for item in self._completion_requests),
+        ]
+        for request in requests:
             paths.add(os.path.normcase(os.path.abspath(request.candidate.path)))
             if request.group is not None:
                 paths.update(
@@ -597,17 +695,18 @@ class WatchScheduler:
             self.enqueue(path)
 
     def notify_password_source_changed(self, reason: str, path: str = "") -> None:
-        previous_signature = self._password_source_signature
-        signature = self._refresh_password_sources()
-        if reason in {"builtin_password_file", "clipboard"} and signature == previous_signature:
-            return
-        self._password_source_signature = signature
-        generation = self.state.mark_password_source_changed(signature)
-        self.log.write("password_source_changed", reason=reason, path=path, password_generation=generation)
-        if path:
-            self.notify_password_table_changed(path, bump_generation=False)
-            return
-        self._mark_all_password_failures_dirty()
+        with self._password_source_lock:
+            previous_signature = self._password_source_signature
+            signature = self._refresh_password_sources()
+            if reason in {"builtin_password_file", "clipboard"} and signature == previous_signature:
+                return
+            self._password_source_signature = signature
+            generation = self.state.mark_password_source_changed(signature)
+            self.log.write("password_source_changed", reason=reason, path=path, password_generation=generation)
+            if path:
+                self.notify_password_table_changed(path, bump_generation=False)
+                return
+            self._mark_all_password_failures_dirty()
 
     def notify_password_table_changed(self, path: str, *, bump_generation: bool = True) -> None:
         if bump_generation:
@@ -1276,23 +1375,24 @@ class WatchScheduler:
                     self._recent_output_roots.pop(root, None)
 
     def _refresh_password_sources(self) -> str:
-        builtin_passwords = dedupe_passwords([*self._configured_builtin_passwords, *get_builtin_passwords()])
-        user_passwords = dedupe_passwords([*self._recent_passwords, *self._configured_user_passwords])
-        signature = _password_source_signature(
-            self._configured_user_passwords,
-            builtin_passwords,
-        )
         with self._password_source_lock:
+            builtin_passwords = dedupe_passwords([*self._configured_builtin_passwords, *get_builtin_passwords()])
+            user_passwords = dedupe_passwords([*self._recent_passwords, *self._configured_user_passwords])
+            signature = _password_source_signature(
+                self._configured_user_passwords,
+                builtin_passwords,
+            )
             self.config["user_passwords"] = user_passwords
             self.config["builtin_passwords"] = builtin_passwords
         return signature
 
     def _remember_recent_passwords(self, passwords: Iterable[str] | None) -> None:
         incoming = dedupe_passwords([str(value) for value in list(passwords or []) if str(value)])
-        updated = dedupe_passwords([*incoming, *self._recent_passwords])
-        if updated == self._recent_passwords:
-            return
-        self._recent_passwords = updated
+        with self._password_source_lock:
+            updated = dedupe_passwords([*incoming, *self._recent_passwords])
+            if updated == self._recent_passwords:
+                return
+            self._recent_passwords = updated
         self.notify_password_source_changed("recent_password")
 
     def _mark_all_password_failures_dirty(self) -> None:

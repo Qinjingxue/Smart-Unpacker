@@ -132,6 +132,7 @@ class ExtractionBatchRunner:
         repair_inspection_service: RepairInspectionService | None = None,
         progress_reporter: Any | None = None,
         executor_pool=None,
+        request_id: str = "",
     ):
         self.context = context
         self.extractor = extractor
@@ -146,6 +147,7 @@ class ExtractionBatchRunner:
         self.repair_inspection_service = repair_inspection_service or RepairInspectionService(self.config)
         self.progress_reporter = progress_reporter
         self.executor_pool = executor_pool
+        self.request_id = str(request_id or "")
         self.progress_round_index = 1
         self.progress_direct_mode = False
         self.relation_stage = ArchiveRelationStage()
@@ -249,6 +251,7 @@ class ExtractionBatchRunner:
             self.runtime_scheduler,
             max_workers=self.max_workers,
             executor_pool=self.executor_pool,
+            request_id=self.request_id,
         )
         def execute_one(task, runtime_scheduler):
             planned_out_dir = output_dir_resolver(task)
@@ -410,6 +413,7 @@ class ExtractionBatchRunner:
             self.runtime_scheduler,
             max_workers=max_workers,
             executor_pool=self.executor_pool,
+            request_id=self.request_id,
         )
         return executor.execute_all(tasks, worker, workload_label=workload_label)
 

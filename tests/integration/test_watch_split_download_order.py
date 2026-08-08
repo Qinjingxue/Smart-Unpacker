@@ -342,6 +342,7 @@ def test_watch_extracts_real_split_download_once_after_chaotic_arrival(
         final_stable_at = time.perf_counter()
         watcher.enqueue(str(final_destination))
         submits_before_completion = len(engine.submit_times)
+        active_request_spans_final_write = any(not handle.done() for handle in engine.handles)
         final_result = _drive_watch_until(
             watcher,
             lambda: bool(list(output_root.rglob(case.marker_name))),
@@ -349,8 +350,15 @@ def test_watch_extracts_real_split_download_once_after_chaotic_arrival(
         completed_at = time.perf_counter()
 
         final_submit_times = engine.submit_times[submits_before_completion:]
-        assert len(final_submit_times) >= 1, final_submit_times
-        dispatch_latency = min(final_submit_times) - final_stable_at
+        assert final_submit_times or active_request_spans_final_write, (
+            final_submit_times,
+            active_request_spans_final_write,
+        )
+        dispatch_latency = (
+            min(final_submit_times) - final_stable_at
+            if final_submit_times
+            else 0.0
+        )
         completion_latency = completed_at - final_stable_at
 
         extracted = list(output_root.rglob(case.marker_name))

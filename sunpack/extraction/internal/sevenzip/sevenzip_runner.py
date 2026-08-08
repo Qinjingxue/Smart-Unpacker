@@ -143,13 +143,22 @@ class _PersistentWorkerPool:
 
 
 class SevenZipRunner:
-    def __init__(self, process_config: dict):
+    def __init__(self, process_config: dict, *, shared_worker_pool: _PersistentWorkerPool | None = None):
         self.process_config = process_config
         self.progress_callback = None
         self.worker_path = None
         self.seven_zip_dll_path = None
-        self._worker_pool: _PersistentWorkerPool | None = None
+        self._worker_pool: _PersistentWorkerPool | None = shared_worker_pool
+        self._owns_worker_pool = shared_worker_pool is None
         self._worker_pool_lock = threading.Lock()
+
+    def fork(self) -> "SevenZipRunner":
+        """Create request-local callback state while sharing native workers."""
+        shared_pool = self._pool() if self._persistent_workers_enabled() else None
+        runner = SevenZipRunner(self.process_config, shared_worker_pool=shared_pool)
+        runner.worker_path = self.worker_path
+        runner.seven_zip_dll_path = self.seven_zip_dll_path
+        return runner
 
     def run_extract(
         self,
@@ -765,6 +774,8 @@ class SevenZipRunner:
         return self.worker_path
 
     def close(self) -> None:
+        if not self._owns_worker_pool:
+            return
         with self._worker_pool_lock:
             pool = self._worker_pool
             self._worker_pool = None

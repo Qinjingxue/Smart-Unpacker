@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import zipfile
 from concurrent.futures import Future
 from pathlib import Path
@@ -281,6 +283,57 @@ def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path
     engine.handles[2].complete_no_tasks()
     final = watcher.run_once()
     assert final.processed == 2
+
+
+def test_watch_completion_pool_does_not_let_slow_finalize_block_other_harvests(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+    _write_zip(first)
+    _write_zip(second)
+    release_first = threading.Event()
+
+    class Runner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.output_root = Path(config["output"]["root"])
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+            self.path = ""
+
+        def run_targets(self, paths):
+            self.path = paths[0]
+            output = self.output_root / Path(self.path).stem
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "payload.bin").write_bytes(b"payload")
+            self.context.flatten_candidates = {str(output)}
+            return _watch_summary(self.path, OutcomeKind.COMPLETE_SUCCESS, {"decision_hint": "accept"})
+
+        def apply_deferred_postprocess(self, _output_path_map):
+            if Path(self.path).name == "first.zip":
+                assert release_first.wait(timeout=5)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(Runner),
+    )
+    watcher.enqueue(str(first))
+    watcher.enqueue(str(second))
+
+    harvested = watcher.run_once()
+    assert harvested.succeeded == 1
+    release_first.set()
+    deadline = time.monotonic() + 5
+    while harvested.succeeded < 2 and time.monotonic() < deadline:
+        next_result = watcher.run_once()
+        harvested.succeeded += next_result.succeeded
+        time.sleep(0.01)
+    assert harvested.succeeded == 2
 
 
 def _watch_summary(path: str, kind: OutcomeKind, verification: dict):

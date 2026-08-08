@@ -67,7 +67,7 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
             "child_count": len(children),
             "snapshots": len(watcher.state.snapshots),
             "known_output_roots": len(watcher._known_output_roots),
-            "password_contexts": len(engine.batch_runner.directory_password_contexts._contexts),
+            "active_requests": engine._active_request_count,
             "feedback_samples": len(engine.resource_scheduler.feedback.feedback_window),
         })
 
@@ -110,7 +110,7 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
         assert max(item["child_count"] for item in warm) == min(item["child_count"] for item in warm)
         assert warm[-1]["snapshots"] == ARCHIVE_COUNT
         assert warm[-1]["known_output_roots"] <= 2
-        assert all(item["password_contexts"] == 0 for item in warm)
+        assert all(item["active_requests"] == 0 for item in warm)
         assert all(item["feedback_samples"] <= engine.resource_scheduler.feedback.feedback_window_size for item in warm)
 
     shutil.rmtree(output_root, ignore_errors=True)

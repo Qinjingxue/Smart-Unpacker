@@ -1,4 +1,3 @@
-from pathlib import Path
 import queue
 import threading
 import time
@@ -7,13 +6,10 @@ import pytest
 
 import sunpack.coordinator.engine as engine_module
 from sunpack.config.schema import normalize_config
-from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 from sunpack.contracts.results import RunSummary
 from sunpack.coordinator.engine import PipelineEngine
-from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.fs_builder import make_zip
 
 
 def _config(**pipeline):
@@ -24,8 +20,16 @@ def _config(**pipeline):
         "repair": {"enabled": False},
         "verification": {"enabled": False, "methods": []},
         "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
-        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }))
+
+
+def _response(submission, *, passwords=()):
+    return PipelineResponse(
+        request_id=submission.request_id,
+        summary=RunSummary(success_count=0, failed_tasks=[], processed_keys=[]),
+        artifacts=PipelineArtifacts(),
+        recent_passwords=tuple(passwords),
+    )
 
 
 def test_engine_idle_state_includes_active_and_queued_requests():
@@ -62,8 +66,6 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
         "notify_shell_directories_updated",
         lambda paths: call_order.append("notify") or captured.update(shell_refresh_paths=list(paths)),
     )
-    runtime = object.__new__(engine_module._PipelineRuntime)
-    runtime.config = {}
     response = PipelineResponse(
         request_id="request",
         summary=RunSummary(success_count=1, failed_tasks=[], processed_keys=[]),
@@ -74,7 +76,7 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
         ),
     )
 
-    runtime.finalize(response, output_path_map={str(probe_outer): str(final_outer)})
+    engine_module._finalize_response({}, response, output_path_map={str(probe_outer): str(final_outer)})
 
     assert captured["archives_to_clean"] == [[str(final_outer / "inner.7z")]]
     assert captured["flatten_targets"] == [str(final_outer / "inner")]
@@ -82,173 +84,175 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
     assert call_order == ["postprocess", "notify"]
 
 
-def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated(tmp_path, monkeypatch):
-    first = tmp_path / "first.zip"
-    second = tmp_path / "second.zip"
-    first.write_bytes(make_zip({"first.txt": "first"}))
-    second.write_bytes(make_zip({"second.txt": "second"}))
-    engine = PipelineEngine(_config())
-    batch_sizes = []
-    shell_refresh_calls = []
-    execute_batch = engine._runtime.execute
+def test_independent_submission_completes_while_another_request_is_blocked(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=2))
+    first_entered = threading.Event()
+    release_first = threading.Event()
 
-    def measured_execute(submissions, **kwargs):
-        batch_sizes.append(len(submissions))
-        return execute_batch(submissions, **kwargs)
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
 
-    monkeypatch.setattr(engine._runtime, "execute", measured_execute)
-    monkeypatch.setattr(
-        engine_module,
-        "notify_shell_directories_updated",
-        lambda paths: shell_refresh_calls.append(list(paths)) or [],
-    )
-    monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
-    monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda task: task)
+        def execute(self):
+            if self.submission.targets[0].path.endswith("first.zip"):
+                first_entered.set()
+                assert release_first.wait(timeout=5)
+            return _response(self.submission)
 
-    def fake_extract(task, out_dir, runtime_scheduler=None, **_kwargs):
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        (Path(out_dir) / "payload.txt").write_text(task.logical_name, encoding="utf-8")
-        return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
-
-    monkeypatch.setattr(engine.extractor, "extract", fake_extract)
+    engine._request_runtime_factory = Runtime
     engine.start()
-    first_handle = engine.submit([str(first)])
-    second_handle = engine.submit([str(second)])
-    first_response = first_handle.result(timeout=10)
-    second_response = second_handle.result(timeout=10)
+    first = engine.submit([str(tmp_path / "first.zip")])
+    assert first_entered.wait(timeout=5)
+    second = engine.submit([str(tmp_path / "second.zip")])
+
+    assert second.result(timeout=2).request_id == second.request_id
+    assert not first.done()
+    release_first.set()
+    first.result(timeout=5)
     engine.close()
 
-    assert batch_sizes == [2]
-    assert first_response.summary.success_count == 1
-    assert second_response.summary.success_count == 1
-    assert [item.input_path for item in first_response.summary.target_results] == [str(first)]
-    assert [item.input_path for item in second_response.summary.target_results] == [str(second)]
-    assert len(shell_refresh_calls) == 2
-    assert any(str(first) in paths and any(Path(path).name == "first" for path in paths) for paths in shell_refresh_calls)
-    assert any(str(second) in paths and any(Path(path).name == "second" for path in paths) for paths in shell_refresh_calls)
 
+def test_same_input_path_is_serialized_by_engine_lease(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=2))
+    entered = []
+    first_release = threading.Event()
 
-def test_engine_only_closes_resident_extractor_when_engine_closes(tmp_path, monkeypatch):
-    engine = PipelineEngine(_config(batch_window_seconds=0))
-    executor_pool = engine._runtime.executor_pool
-    planning_pool = engine._runtime.input_planning_executor_pool
-    close_calls = []
-    monkeypatch.setattr(engine.extractor, "close", lambda: close_calls.append(True))
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
+
+        def execute(self):
+            entered.append(self.submission.request_id)
+            if len(entered) == 1:
+                assert first_release.wait(timeout=5)
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
     engine.start()
-    engine.submit([str(tmp_path)]).result(timeout=10)
-    engine.submit([str(tmp_path)]).result(timeout=10)
-
-    assert close_calls == []
-    assert engine.batch_runner.executor_pool is executor_pool
-    assert executor_pool._shutdown is False
-    assert planning_pool._shutdown is False
-    assert engine.resource_scheduler.is_running is True
-
-    engine.close()
-    assert close_calls == [True]
-    assert executor_pool._shutdown is True
-    assert planning_pool._shutdown is True
-    assert engine.resource_scheduler.is_running is False
-    with pytest.raises(RuntimeError, match="started"):
-        engine.submit([str(tmp_path)])
-
-
-def test_watch_submits_all_quiet_files_to_one_engine_micro_batch(tmp_path, monkeypatch):
-    watch_root = tmp_path / "watch"
-    watch_root.mkdir()
-    first = watch_root / "first.zip"
-    second = watch_root / "second.zip"
-    first.write_bytes(make_zip({"first.txt": "first"}))
-    second.write_bytes(make_zip({"second.txt": "second"}))
-    config = _config()
-    config["watch"] = {"clipboard_monitor_enabled": False}
-    engine = PipelineEngine(config)
-    batch_sizes = []
-    execute_batch = engine._runtime.execute
-
-    def measured_execute(submissions, **kwargs):
-        batch_sizes.append(len(submissions))
-        return execute_batch(submissions, **kwargs)
-
-    monkeypatch.setattr(engine._runtime, "execute", measured_execute)
-    monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
-    monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda task: task)
-
-    def fake_extract(task, out_dir, runtime_scheduler=None, **_kwargs):
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        (Path(out_dir) / "payload.txt").write_text(task.logical_name, encoding="utf-8")
-        return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
-
-    monkeypatch.setattr(engine.extractor, "extract", fake_extract)
-    engine.start()
-    watcher = WatchScheduler(
-        config,
-        [str(watch_root)],
-        out_dir=str(tmp_path / "out"),
-        state_path=str(tmp_path / "watch-state.json"),
-        quiet_seconds=0,
-        initial_scan=False,
-        pipeline_engine=engine,
-    )
-    watcher.enqueue(str(first))
-    watcher.enqueue(str(second))
-    result = watcher.run_once()
-    deadline = time.monotonic() + 10
-    while not result.processed and time.monotonic() < deadline:
+    path = str(tmp_path / "same.zip")
+    first = engine.submit([path])
+    deadline = time.monotonic() + 5
+    while not entered and time.monotonic() < deadline:
         time.sleep(0.01)
-        result = watcher.run_once()
+    second = engine.submit([path])
+    time.sleep(0.1)
+    assert len(entered) == 1
+    first_release.set()
+    first.result(timeout=5)
+    second.result(timeout=5)
+    assert len(entered) == 2
     engine.close()
 
-    assert batch_sizes == [2]
-    assert result.succeeded == 2
-    assert len(list((tmp_path / "out").rglob("payload.txt"))) == 2
+
+def test_split_member_lease_expansion_is_serialized_without_deadlock(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=2))
+    first_part = str(tmp_path / "archive.part1.rar")
+    second_part = str(tmp_path / "archive.part2.rar")
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    class Runtime:
+        def __init__(self, _services, submission, _options, path_leases):
+            self.submission = submission
+            self.path_leases = path_leases
+
+        def execute(self):
+            nonlocal active, maximum_active
+            self.path_leases.replace(self.submission.request_id, [first_part, second_part])
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
+    engine.start()
+    first = engine.submit([first_part])
+    second = engine.submit([second_part])
+    first.result(timeout=5)
+    second.result(timeout=5)
+    assert maximum_active == 1
+    engine.close()
 
 
-def test_engine_scheduler_keeps_feedback_across_separate_micro_batches(tmp_path, monkeypatch):
-    engine = PipelineEngine(_config(batch_window_seconds=0))
-    scheduler = engine.resource_scheduler
+def test_reconfigure_only_changes_future_request_snapshots(tmp_path):
+    config = _config(max_active_pipeline_requests=2)
+    config["cli"]["quiet"] = True
+    engine = PipelineEngine(config)
+    observed = {}
+    first_entered = threading.Event()
+    release_first = threading.Event()
 
-    def record_batch(submissions, **_kwargs):
-        for submission in submissions:
-            scheduler.record_task_feedback(
-                demand={"cpu": 1, "io": 1, "memory": 1},
-                duration_seconds=1.0,
-                estimated_bytes=1024,
-                active_workers_at_start=1,
-                success=True,
-                profile_key="zip:test",
-            )
-            submission.future.set_result(None)
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
 
-    monkeypatch.setattr(engine._runtime, "execute", record_batch)
+        def execute(self):
+            observed[self.submission.targets[0].path] = self.submission.config["cli"]["quiet"]
+            if self.submission.targets[0].path.endswith("first.zip"):
+                first_entered.set()
+                assert release_first.wait(timeout=5)
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
+    engine.start()
+    first_path = str(tmp_path / "first.zip")
+    second_path = str(tmp_path / "second.zip")
+    first = engine.submit([first_path])
+    assert first_entered.wait(timeout=5)
+    updated = _config(max_active_pipeline_requests=2)
+    updated["cli"]["quiet"] = False
+    engine.reconfigure_request(updated)
+    second = engine.submit([second_path])
+    second.result(timeout=5)
+    release_first.set()
+    first.result(timeout=5)
+
+    assert observed == {first_path: True, second_path: False}
+    engine.close()
+
+
+def test_engine_aggregates_recent_passwords_per_completed_request(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=2))
+
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
+
+        def execute(self):
+            password = "first" if self.submission.targets[0].path.endswith("first.zip") else "second"
+            return _response(self.submission, passwords=[password])
+
+    engine._request_runtime_factory = Runtime
     engine.start()
     engine.submit([str(tmp_path / "first.zip")]).result(timeout=5)
     engine.submit([str(tmp_path / "second.zip")]).result(timeout=5)
-
-    assert engine.resource_scheduler is scheduler
-    assert scheduler.is_running is True
-    assert len(scheduler.feedback.feedback_window) == 2
-    assert len(scheduler.feedback.profile_feedback_windows["zip:test"]) == 2
+    assert engine.recent_passwords == ["second", "first"]
     engine.close()
 
 
-def test_engine_queue_and_active_batch_feed_pipeline_pressure(tmp_path, monkeypatch):
-    engine = PipelineEngine(_config(batch_window_seconds=0))
+def test_engine_pressure_counts_active_and_waiting_requests(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=1))
     entered = threading.Event()
     release = threading.Event()
 
-    def blocked_batch(submissions, **_kwargs):
-        entered.set()
-        assert release.wait(timeout=5)
-        for submission in submissions:
-            submission.future.set_result(None)
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
 
-    monkeypatch.setattr(engine._runtime, "execute", blocked_batch)
+        def execute(self):
+            entered.set()
+            assert release.wait(timeout=5)
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
     engine.start()
     first = engine.submit([str(tmp_path / "first.zip")])
     assert entered.wait(timeout=5)
     second = engine.submit([str(tmp_path / "second.zip")])
-
     assert engine.resource_scheduler.pressure_snapshot()["pipeline_requests"] >= 2
     release.set()
     first.result(timeout=5)
@@ -256,23 +260,54 @@ def test_engine_queue_and_active_batch_feed_pipeline_pressure(tmp_path, monkeypa
     engine.close()
 
 
-def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch):
-    engine = PipelineEngine(_config(batch_window_seconds=0))
-    archive_session_clear_calls = []
-    monkeypatch.setattr(engine_module, "clear_archive_sessions", lambda: archive_session_clear_calls.append(True))
+def test_archive_sessions_are_cleared_only_when_engine_closes(tmp_path, monkeypatch):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=2))
+    clear_calls = []
+    monkeypatch.setattr(engine_module, "clear_archive_sessions", lambda: clear_calls.append(True))
 
-    def complete_batch(submissions, **_kwargs):
-        engine.batch_runner.directory_password_contexts._contexts[str(tmp_path)] = ["secret"]
-        engine._runtime.input_planning_stage._report_cache[("source", "archive")] = object()
-        for submission in submissions:
-            submission.future.set_result(None)
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
 
-    monkeypatch.setattr(engine._runtime, "execute", complete_batch)
+        def execute(self):
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
     engine.start()
     engine.submit([str(tmp_path / "archive.zip")]).result(timeout=5)
-
-    assert engine.batch_runner.directory_password_contexts._contexts == {}
-    assert engine.batch_runner.progress_reporter is None
-    assert engine._runtime.input_planning_stage._report_cache == {}
-    assert archive_session_clear_calls == [True]
+    assert clear_calls == []
     engine.close()
+    assert clear_calls == [True]
+
+
+def test_non_graceful_close_cancels_requests_that_have_not_started(tmp_path):
+    engine = PipelineEngine(_config(max_active_pipeline_requests=1))
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Runtime:
+        def __init__(self, _services, submission, *_args):
+            self.submission = submission
+
+        def execute(self):
+            entered.set()
+            release.wait(timeout=5)
+            return _response(self.submission)
+
+    engine._request_runtime_factory = Runtime
+    engine.start()
+    first = engine.submit([str(tmp_path / "first.zip")])
+    assert entered.wait(timeout=5)
+    second = engine.submit([str(tmp_path / "second.zip")])
+    closer = threading.Thread(target=lambda: engine.close(graceful=False))
+    closer.start()
+    deadline = time.monotonic() + 2
+    while not second._submission.future.cancelled() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert second._submission.future.cancelled()
+    release.set()
+    first.result(timeout=5)
+    closer.join(timeout=5)
+    assert not closer.is_alive()
+    with pytest.raises(RuntimeError, match="started"):
+        engine.submit([str(tmp_path / "third.zip")])

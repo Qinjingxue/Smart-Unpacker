@@ -9,6 +9,17 @@ from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
 
+def _configure_request_runtime(engine, callback):
+    factory = engine._request_runtime_factory
+
+    def configured(*args):
+        runtime = factory(*args)
+        callback(runtime)
+        return runtime
+
+    engine._request_runtime_factory = configured
+
+
 def test_pipeline_runner_passes_performance_scheduler_overrides():
     config = normalize_config(with_detection_pipeline({
         "recursive_extract": "1",
@@ -20,12 +31,18 @@ def test_pipeline_runner_passes_performance_scheduler_overrides():
     }))
 
     engine = PipelineEngine(config)
+    captured = {}
+    _configure_request_runtime(engine, lambda runtime: captured.update(
+        extractor=runtime.extractor.process_config,
+        batch=runtime.batch_runner.scheduler_config,
+    ))
+    with engine:
+        engine.submit(["missing.zip"]).result(timeout=5)
 
-    assert engine.extractor.process_config["max_extract_task_seconds"] == 1800
-    assert engine.extractor.process_config["process_no_progress_timeout_seconds"] == 180
-    assert engine.batch_runner.scheduler_config["max_extract_task_seconds"] == 1800
-    assert engine.batch_runner.scheduler_config["process_no_progress_timeout_seconds"] == 180
-    engine.close()
+    assert captured["extractor"]["max_extract_task_seconds"] == 1800
+    assert captured["extractor"]["process_no_progress_timeout_seconds"] == 180
+    assert captured["batch"]["max_extract_task_seconds"] == 1800
+    assert captured["batch"]["process_no_progress_timeout_seconds"] == 180
 
 
 def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path, monkeypatch):
@@ -50,9 +67,6 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
 
     engine = PipelineEngine(config)
 
-    monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
-    monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda task: task)
-
     def fake_extract(task, out_dir, runtime_scheduler=None):
         out_path = tmp_path / "payload" / "inside.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +78,12 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
             all_parts=task.all_parts,
         )
 
-    monkeypatch.setattr(engine.extractor, "extract", fake_extract)
+    def configure(runtime):
+        monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+        monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda task: task)
+        monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
+
+    _configure_request_runtime(engine, configure)
 
     with engine:
         summary = engine.submit([str(tmp_path)]).result().summary
@@ -88,10 +107,13 @@ def test_pipeline_runner_exposes_recent_passwords_without_password_manager():
         "user_passwords": ["secret"],
         "builtin_passwords": [],
     })))
-    engine.extractor.password_store.remember_success("secret")
-
-    assert engine.recent_passwords == ["secret"]
-    engine.close()
+    _configure_request_runtime(
+        engine,
+        lambda runtime: runtime.extractor.password_store.remember_success("secret"),
+    )
+    with engine:
+        engine.submit(["missing.zip"]).result(timeout=5)
+        assert engine.recent_passwords == ["secret"]
 
 
 def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, monkeypatch):
@@ -116,17 +138,22 @@ def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, m
         bag = FactBag()
         return ArchiveTask(fact_bag=bag, score=10, main_path=str(path), all_parts=[str(path)])
 
-    monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
-    monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda task: task)
-
     def fake_extract(task, out_dir, runtime_scheduler=None):
         extracted.append(task.main_path)
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
-    monkeypatch.setattr(engine.extractor, "extract", fake_extract)
+    captured = {}
+    def configure(runtime):
+        captured["runtime"] = runtime
+        monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+        monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda task: task)
+        monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
+
+    _configure_request_runtime(engine, configure)
     engine.start()
     try:
-        engine.batch_runner.execute([task_for(archive), task_for(nested)])
+        engine.submit([str(tmp_path / "missing.zip")]).result(timeout=5)
+        captured["runtime"].batch_runner.execute([task_for(archive), task_for(nested)])
     finally:
         engine.close()
 
@@ -157,20 +184,25 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
     engine = PipelineEngine(config)
     task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), all_parts=[str(archive)], logical_name="payload")
 
-    monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
-    monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda item: item)
-
     def fake_extract(item, out_dir, runtime_scheduler=None):
         nested = Path(out_dir) / "nested.zip"
         nested.parent.mkdir(parents=True, exist_ok=True)
         nested.write_bytes(b"nested")
         return ExtractionResult(success=True, archive=item.main_path, out_dir=out_dir, all_parts=item.all_parts)
 
-    monkeypatch.setattr(engine.extractor, "extract", fake_extract)
+    captured = {}
+    def configure(runtime):
+        captured["runtime"] = runtime
+        monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+        monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda item: item)
+        monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
+
+    _configure_request_runtime(engine, configure)
 
     engine.start()
     try:
-        scan_roots = engine.batch_runner.execute([task])
+        engine.submit([str(input_root / "missing.zip")]).result(timeout=5)
+        scan_roots = captured["runtime"].batch_runner.execute([task])
     finally:
         engine.close()
 

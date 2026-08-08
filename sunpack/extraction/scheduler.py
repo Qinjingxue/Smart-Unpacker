@@ -23,6 +23,7 @@ class ExtractionScheduler:
         process_config: dict | None = None,
         output_config: dict | None = None,
         extraction_config: dict | None = None,
+        sevenzip_runner: SevenZipRunner | None = None,
     ):
         self.password_store = PasswordStore.from_sources(
             cli_passwords=cli_passwords or [],
@@ -46,7 +47,7 @@ class ExtractionScheduler:
             if key != "scheduler_profile" and value is not None
         }
         self.retry_policy = ExtractRetryPolicy(self.max_retries)
-        self.sevenzip_runner = SevenZipRunner(self.process_config)
+        self.sevenzip_runner = sevenzip_runner or SevenZipRunner(self.process_config)
 
     def set_progress_callback(self, callback: Callable[[ArchiveTask, dict], None] | None) -> None:
         self.sevenzip_runner.progress_callback = callback

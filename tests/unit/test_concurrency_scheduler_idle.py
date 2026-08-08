@@ -63,3 +63,18 @@ def test_direct_worker_activity_wakes_idle_resource_scheduler(monkeypatch):
         scheduler.release_slot()
     finally:
         scheduler.stop()
+
+
+def test_scheduler_rotates_slot_admission_between_runnable_requests():
+    scheduler = ConcurrencyScheduler({}, current_limit=2, max_workers=2)
+    first = scheduler.register_workload(2, request_id="first")
+    second = scheduler.register_workload(2, request_id="second")
+
+    assert scheduler.try_acquire_slot(workload_id=first)
+    scheduler.release_slot()
+    assert not scheduler.try_acquire_slot(workload_id=first)
+    assert scheduler.try_acquire_slot(workload_id=second)
+    scheduler.release_slot()
+
+    scheduler.unregister_workload(first)
+    scheduler.unregister_workload(second)
