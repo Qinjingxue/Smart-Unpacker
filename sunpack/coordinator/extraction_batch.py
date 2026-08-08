@@ -1,7 +1,7 @@
 import os
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, List
 
@@ -35,6 +35,7 @@ from sunpack.coordinator.scheduling import (
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.support.output_inventory import OutputInventory
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
@@ -46,6 +47,7 @@ from sunpack.repair.knowledge import (
     write_repair_candidate_log,
     write_repair_result,
 )
+from sunpack.repair.terminal_status import terminal_repair_status
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from sunpack.verification.comparison import score_verification_payload
 from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
@@ -1352,6 +1354,29 @@ class ExtractionBatchRunner:
         )
         diagnostics = res.diagnostics if isinstance(res.diagnostics, dict) else {}
         res.diagnostics = {**diagnostics, "failed_output_cleanup": cleanup.to_dict()}
+
+        if outcome.outcome_kind == OutcomeKind.FAILURE:
+            repair_status = terminal_repair_status(
+                task,
+                decision_hint=str(getattr(outcome.verification, "decision_hint", "") or ""),
+                repair_enabled=bool(getattr(getattr(self, "repair_stage", None), "enabled", False)),
+                attempt_source=outcome.attempt_source,
+                repair_module=outcome.repair_module,
+                selected_attempt=outcome.recovery_rank,
+            )
+            if repair_status:
+                failure = res.failure or FailureInfo(
+                    kind=FailureKind.DAMAGED,
+                    stage="verification",
+                    message=self._verification_failure_summary(outcome),
+                    message_key="failure.verification_failed",
+                    user_action="not_recovered",
+                    repairable=True,
+                )
+                res.failure = replace(
+                    failure,
+                    details={**dict(failure.details), "repair": repair_status},
+                )
 
         with self.context.lock:
             if outcome.outcome_kind == OutcomeKind.COMPLETE_SUCCESS:

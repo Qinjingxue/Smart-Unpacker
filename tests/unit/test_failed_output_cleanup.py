@@ -176,3 +176,5 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, 
     assert task.fact_bag.get(REPAIR_ENTERED_FACT) is True
     assert output.is_dir()
     assert outcome.result.diagnostics["failed_output_cleanup"]["reason"] == "repair_entered"
+    assert outcome.result.failure is not None
+    assert outcome.result.failure.details["repair"]["status"] == "attempted_no_recovery"

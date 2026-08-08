@@ -7,7 +7,6 @@ from typing import Any, List
 
 from sunpack.contracts.failures import FailureInfo
 from sunpack.i18n import I18nContext
-from sunpack.repair.config import repair_system_mode
 
 
 class RunReporter:
@@ -220,8 +219,14 @@ class RunReporter:
                     print(self.i18n.t("report.failed", task=failed_task))
                 if structured_failures and all(failure.is_password_failure for failure in structured_failures):
                     print(self.i18n.t("report.password_failure"))
-                elif repair_system_mode() == "lite":
-                    print(self.i18n.t("report.lite_repair_unavailable"))
+                else:
+                    for repair in _terminal_repair_statuses(structured_failures):
+                        status = str(repair.get("status") or "")
+                        reason = str(repair.get("terminal_reason") or status)
+                        if status == "disabled_by_edition":
+                            print(self.i18n.t("report.lite_repair_unavailable"))
+                        else:
+                            print(self.i18n.t("report.repair_terminal", status=status, reason=reason))
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
                 with open(log_path, "w", encoding="utf-8") as handle:
@@ -360,6 +365,26 @@ class RunReporter:
 def _task_name(task: Any) -> str:
     path = str(getattr(task, "main_path", "") or "")
     return os.path.basename(path) or str(getattr(task, "logical_name", "") or path or "archive")
+
+
+def _terminal_repair_statuses(failures: list[FailureInfo]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for failure in failures:
+        details = failure.details if isinstance(failure.details, dict) else {}
+        repair = details.get("repair") if isinstance(details.get("repair"), dict) else {}
+        if not repair:
+            continue
+        key = (
+            str(repair.get("system") or ""),
+            str(repair.get("status") or ""),
+            str(repair.get("terminal_reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        statuses.append(dict(repair))
+    return statuses
 
 
 def _absolute_key(path: str) -> str:
