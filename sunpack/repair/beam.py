@@ -165,7 +165,6 @@ class RepairBeamLoop:
         score_assessment: AssessmentScoreFn | None = None,
         min_improvement: float = 0.0,
         patience_rounds: int = 3,
-        return_best_partial: bool = True,
     ):
         self.scheduler = scheduler
         self.beam_width = max(1, int(beam_width or 1))
@@ -178,7 +177,6 @@ class RepairBeamLoop:
         self.score_assessment = score_assessment or _default_assessment_score
         self.min_improvement = max(0.0, float(min_improvement or 0.0))
         self.patience_rounds = max(0, int(patience_rounds or 0))
-        self.return_best_partial = bool(return_best_partial)
 
     @classmethod
     def from_config(
@@ -204,7 +202,6 @@ class RepairBeamLoop:
             score_assessment=score_assessment,
             min_improvement=float(beam.get("min_improvement", 0.0) or 0.0),
             patience_rounds=int(beam.get("patience_rounds", 3) or 0),
-            return_best_partial=bool(beam.get("return_best_partial", True)),
         )
 
     def run(self, states: list[RepairBeamState], *, max_rounds: int = 3) -> RepairBeamRunResult:
@@ -271,14 +268,14 @@ class RepairBeamLoop:
                 frontier_exhausted = True
                 stop_reason = "all_paths_repeated" if round_result.states_out else "frontier_exhausted"
                 break
-        result_states = frontier or ([best_state] if best_state is not None and self.return_best_partial else [])
+        result_states = frontier or ([best_state] if best_state is not None else [])
         return RepairBeamRunResult(
             rounds=rounds,
             states=result_states,
             accepted_states=_top_states(accepted, self.beam_width),
             terminal_results=terminal_results,
             best_complete_state=best_complete_state,
-            best_partial_state=best_partial_state if self.return_best_partial else None,
+            best_partial_state=best_partial_state,
             stop_reason=stop_reason,
             rounds_without_global_improvement=rounds_without_global_improvement,
             frontier_exhausted=frontier_exhausted,

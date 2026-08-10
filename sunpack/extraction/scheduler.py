@@ -60,7 +60,11 @@ class ExtractionScheduler:
         return default_output_dir_for_task(task, self.output_config)
 
     def inspect(self, task: ArchiveTask, out_dir: str):
-        return PreExtractInspector(self.password_resolver, self.rename_scheduler).inspect(task, out_dir)
+        return PreExtractInspector(
+            self.password_resolver,
+            self.rename_scheduler,
+            self.extraction_config,
+        ).inspect(task, out_dir)
 
     def extract(
         self,

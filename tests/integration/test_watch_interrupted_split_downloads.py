@@ -97,7 +97,6 @@ def _watch_config() -> dict:
     config["watch"] = {
         **(config.get("watch") or {}),
         "clipboard_monitor_enabled": False,
-        "partial_output_policy": "discard",
         "password_retry_debounce_seconds": 0,
     }
     config["detection"] = {

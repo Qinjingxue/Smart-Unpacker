@@ -4,12 +4,14 @@ import ctypes
 import hashlib
 import os
 import time
+from copy import deepcopy
 from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from pathlib import Path
 
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.config.loader import ADVANCED_CONFIG_FILENAME, SIMPLE_CONFIG_FILENAME, load_config
+from sunpack.contracts.content_recovery import require_complete_content
 from sunpack.filesystem.watcher.config_observer import ConfigFileObserver
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
@@ -302,7 +304,8 @@ class WatchService:
         configured_out_dir = str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or ".")
         out_dir = resolve_service_path(configured_out_dir) if Path(configured_out_dir).expanduser().is_absolute() else configured_out_dir
         state_path = os.path.join(self.state_dir, SERVICE_STATE)
-        run_config = dict(self.config)
+        run_config = deepcopy(self.config)
+        require_complete_content(run_config)
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
         watch_config["clipboard_monitor_enabled"] = bool(self.service_config.get("clipboard_monitor_enabled", True))
         run_config["watch"] = watch_config

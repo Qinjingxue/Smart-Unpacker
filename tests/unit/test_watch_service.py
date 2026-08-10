@@ -21,6 +21,50 @@ class FakeRunner:
     pass
 
 
+def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {
+            "extraction": {"content_requirement": "allow_partial"},
+            "watch": {
+                "state_dir": str(tmp_path / "state"),
+                "roots": [str(tmp_path)],
+                "tray_enabled": False,
+                "clipboard_monitor_enabled": False,
+            },
+        },
+    )
+    monkeypatch.setattr(service_module, "read_watch_roots", lambda: [str(tmp_path)])
+
+    class Engine:
+        def start(self):
+            pass
+
+        def close(self, graceful=True):
+            pass
+
+    class Scheduler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(service_module, "WatchScheduler", Scheduler)
+
+    def engine_factory(config):
+        captured["config"] = config
+        return Engine()
+
+    service = WatchService(engine_factory=engine_factory)
+    service._start_scheduler()
+
+    assert captured["config"]["extraction"]["content_requirement"] == "complete"
+    assert service.config["extraction"]["content_requirement"] == "allow_partial"
+
+
 def test_watch_runtime_uses_neutral_cwd_and_restores_caller_cwd(tmp_path, monkeypatch):
     caller = tmp_path / "caller"
     neutral = tmp_path / "neutral"

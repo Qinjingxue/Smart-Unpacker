@@ -17,10 +17,13 @@ PASSWORD_789 = "789"
 FACTORY = ArchiveFixtureFactory()
 
 
-def edge_config(passwords: list[str] | None = None) -> dict:
+def edge_config(passwords: list[str] | None = None, *, allow_partial: bool = False) -> dict:
     return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
+        "extraction": {
+            "content_requirement": "allow_partial" if allow_partial else "complete",
+        },
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
@@ -76,8 +79,11 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
     })
 
 
-def run_pipeline(target: Path, passwords: list[str] | None = None):
-    return execute_pipeline(edge_config(passwords=passwords), str(target))
+def run_pipeline(target: Path, passwords: list[str] | None = None, *, allow_partial: bool = False):
+    return execute_pipeline(
+        edge_config(passwords=passwords, allow_partial=allow_partial),
+        str(target),
+    )
 
 
 def run_pipeline_detection_disabled(target: Path, passwords: list[str] | None = None):
@@ -139,7 +145,7 @@ def assert_failure_contains(
 
 
 def assert_partial_success_without_marker(case: ArchiveCase):
-    summary = run_pipeline(case.archive_dir)
+    summary = run_pipeline(case.archive_dir, allow_partial=True)
 
     assert summary.success_count == 1
     assert summary.failed_tasks == []
@@ -147,7 +153,7 @@ def assert_partial_success_without_marker(case: ArchiveCase):
 
 
 def assert_partial_recovery(case: ArchiveCase):
-    summary = run_pipeline(case.archive_dir)
+    summary = run_pipeline(case.archive_dir, allow_partial=True)
 
     assert summary.success_count == 1
     assert summary.failed_tasks == []
@@ -312,13 +318,8 @@ def test_real_archive_edge_missing_tail_reports_missing_volume(tmp_path, archive
     missing = [failure for failure in summary.failures if failure.contains(FailureKind.MISSING_VOLUME)]
 
     assert missing
-    if archive_format == "zip":
-        assert summary.partial_success_count == 1
-        assert summary.failed_tasks == []
-        assert missing[0].details["missing_volume_confirmed"] is False
-        assert summary.recovered_outputs[0]["warning"]["kind"] == "missing_volume"
-    else:
-        assert summary.failed_tasks
+    assert summary.partial_success_count == 0
+    assert summary.failed_tasks
 
 
 @pytest.mark.parametrize("archive_format", archive_format_params(set()))
@@ -335,7 +336,7 @@ def test_real_archive_edge_missing_middle_reports_possible_missing_volume(tmp_pa
     assert len(parts) >= 5
     parts[len(parts) // 2].unlink()
 
-    summary = run_pipeline(case.archive_dir)
+    summary = run_pipeline(case.archive_dir, allow_partial=True)
     possible = [
         failure
         for failure in summary.failures

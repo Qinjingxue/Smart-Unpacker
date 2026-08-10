@@ -35,7 +35,7 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
     config["stagnation_patience_rounds"] = _int_at_least(config, "stagnation_patience_rounds", 0)
     config["min_recovery_improvement"] = _float_at_least(config, "min_recovery_improvement", 0.0)
-    config["continue_after_partial"] = _bool_value(config["continue_after_partial"], "repair.continue_after_partial")
+    config.pop("continue_after_partial", None)
     config["safety"] = _normalize_safety(config.get("safety"))
     config["module_limits"] = _normalize_module_limits(config.get("module_limits"))
     config["beam"] = _normalize_beam(config.get("beam"))
@@ -64,12 +64,15 @@ def _normalize_safety(value: Any) -> dict[str, bool]:
     if not isinstance(value, dict):
         raise ValueError("repair.safety must be an object")
     allow_unsafe = value.get("allow_unsafe", value.get("allow_unsafe_modules", False))
-    allow_partial = value.get("allow_partial", value.get("allow_partial_results", True))
     allow_lossy = value.get("allow_lossy", value.get("allow_lossy_repair", False))
+    normalized = {
+        key: item
+        for key, item in value.items()
+        if key not in {"allow_partial", "allow_partial_results"}
+    }
     return {
-        **value,
+        **normalized,
         "allow_unsafe": _bool_value(allow_unsafe, "repair.safety.allow_unsafe"),
-        "allow_partial": _bool_value(allow_partial, "repair.safety.allow_partial"),
         "allow_lossy": _bool_value(allow_lossy, "repair.safety.allow_lossy"),
     }
 
@@ -96,8 +99,9 @@ def _normalize_module_limits(value: Any) -> dict[str, Any]:
 def _normalize_beam(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("repair.beam must be an object")
+    normalized = {key: item for key, item in value.items() if key != "return_best_partial"}
     return {
-        **value,
+        **normalized,
         "enabled": _bool_value(value.get("enabled", True), "repair.beam.enabled"),
         "beam_width": _int_at_least(value, "beam_width", 1),
         "max_candidates_per_state": _int_at_least(value, "max_candidates_per_state", 1),
@@ -106,7 +110,6 @@ def _normalize_beam(value: Any) -> dict[str, Any]:
         "max_rounds": _int_at_least(value, "max_rounds", 0),
         "min_improvement": _float_at_least(value, "min_improvement", 0.0),
         "patience_rounds": _int_at_least(value, "patience_rounds", 0),
-        "return_best_partial": _bool_value(value["return_best_partial"], "repair.beam.return_best_partial"),
     }
 
 

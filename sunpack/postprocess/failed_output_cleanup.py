@@ -30,13 +30,14 @@ def cleanup_failed_output_if_eligible(
     planned_output_dir: str,
     failed: bool,
     repair_entered: bool,
+    force_owned_output_cleanup: bool = False,
 ) -> FailedOutputCleanupResult:
     """Apply the postprocess cleanup policy to a terminal extraction output."""
     path = os.path.abspath(str(output_dir or "")) if output_dir else ""
     planned = os.path.abspath(str(planned_output_dir or "")) if planned_output_dir else ""
     if not failed:
         return FailedOutputCleanupResult(reason="task_not_failed", output_dir=path)
-    if repair_entered:
+    if repair_entered and not force_owned_output_cleanup:
         return FailedOutputCleanupResult(reason="repair_entered", output_dir=path)
     if not path or not planned or os.path.normcase(path) != os.path.normcase(planned):
         return FailedOutputCleanupResult(reason="unowned_output_dir", output_dir=path)
@@ -47,7 +48,7 @@ def cleanup_failed_output_if_eligible(
     if inventory is None:
         return FailedOutputCleanupResult(reason="output_inventory_failed", output_dir=path)
     file_count, byte_count = inventory
-    if byte_count > 0:
+    if byte_count > 0 and not force_owned_output_cleanup:
         return FailedOutputCleanupResult(
             reason="nonempty_payload",
             output_dir=path,
@@ -65,11 +66,11 @@ def cleanup_failed_output_if_eligible(
             payload_file_count=file_count,
             payload_bytes=byte_count,
         )
-    LOGGER.info("cleaned empty failed output: %s", path)
+    LOGGER.info("cleaned failed output: %s", path)
     return FailedOutputCleanupResult(
         cleaned=True,
         eligible=True,
-        reason="cleaned",
+        reason="policy_rejected_partial_cleaned" if force_owned_output_cleanup else "cleaned",
         output_dir=path,
         payload_file_count=file_count,
         payload_bytes=byte_count,

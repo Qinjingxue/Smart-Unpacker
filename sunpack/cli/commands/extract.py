@@ -1,6 +1,6 @@
 import json
 
-from sunpack.cli.cli_constants import EXIT_PARTIAL, EXIT_TASK_FAILED, EXIT_USAGE
+from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
     build_common_parser,
@@ -174,8 +174,6 @@ def handle(args, ctx):
     )
     if failed_tasks:
         return EXIT_TASK_FAILED, result
-    if getattr(summary, "partial_success_count", 0):
-        return EXIT_PARTIAL, result
     return 0, result
 
 

@@ -46,7 +46,6 @@ class RepairLoopLimits:
     stagnation_patience_rounds: int = DEFAULT_STAGNATION_PATIENCE_ROUNDS
     comparison_no_improvement_patience_rounds: int = DEFAULT_COMPARISON_NO_IMPROVEMENT_PATIENCE_ROUNDS
     min_recovery_improvement: float = DEFAULT_MIN_RECOVERY_IMPROVEMENT
-    continue_after_partial: bool = True
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "RepairLoopLimits":
@@ -67,7 +66,6 @@ class RepairLoopLimits:
                 ),
             ),
             min_recovery_improvement=max(0.0, float(config.get("min_recovery_improvement", DEFAULT_MIN_RECOVERY_IMPROVEMENT) or 0.0)),
-            continue_after_partial=bool(config.get("continue_after_partial", True)),
         )
 
 

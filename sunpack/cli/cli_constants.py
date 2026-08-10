@@ -2,6 +2,5 @@ EXIT_OK = 0
 EXIT_TASK_FAILED = 1
 EXIT_USAGE = 2
 EXIT_RUNTIME = 3
-EXIT_PARTIAL = 4
 
 SCHEDULER_PROFILES = {"auto", "conservative", "aggressive"}

@@ -8,8 +8,6 @@ REQUIRED_VERIFICATION_KEYS = (
     "enabled",
     "max_retries",
     "cleanup_failed_output",
-    "accept_partial_when_source_damaged",
-    "partial_min_completeness",
     "complete_accept_threshold",
     "partial_accept_threshold",
     "recovery_min_improvement",
@@ -29,8 +27,8 @@ def normalize_verification_config(value: Any) -> dict[str, Any]:
     config["enabled"] = bool(config["enabled"])
     config["max_retries"] = max(0, _int_field(config, "max_retries"))
     config["cleanup_failed_output"] = bool(config["cleanup_failed_output"])
-    config["accept_partial_when_source_damaged"] = bool(config["accept_partial_when_source_damaged"])
-    config["partial_min_completeness"] = _float_field(config, "partial_min_completeness")
+    config.pop("accept_partial_when_source_damaged", None)
+    config.pop("partial_min_completeness", None)
     config["complete_accept_threshold"] = _float_field(config, "complete_accept_threshold")
     config["partial_accept_threshold"] = _float_field(config, "partial_accept_threshold")
     config["recovery_min_improvement"] = _float_field(config, "recovery_min_improvement")

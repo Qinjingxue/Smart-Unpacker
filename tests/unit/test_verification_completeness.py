@@ -4,11 +4,16 @@ from pathlib import Path
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.coordinator.extraction_batch import ExtractionBatchRunner, _proves_content_loss
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.results import OutcomeKind
 from sunpack.repair.result import RepairResult
 from sunpack.verification import VerificationScheduler
+from sunpack.contracts.verification import (
+    CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED,
+    DECISION_REPAIR,
+    VerificationResult,
+)
 
 
 def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path):
@@ -64,12 +69,12 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
         extractor,
         _FakeOutputScanPolicy(),
         pipeline_resource_scheduler,
-        config={
-            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
+            config={
+                "extraction": {"content_requirement": "allow_partial"},
+                "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
-                "partial_min_completeness": 0.1,
                 "recovery_min_improvement": 0.0,
             },
         },
@@ -141,12 +146,12 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
         _SingleResultExtractor(result),
         _FakeOutputScanPolicy(),
         pipeline_resource_scheduler,
-        config={
-            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
+            config={
+                "extraction": {"content_requirement": "allow_partial"},
+                "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}],
-                "partial_min_completeness": 0.1,
                 "recovery_min_improvement": 0.0,
             },
         },
@@ -183,6 +188,111 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert "\n" not in manifest_text
     manifest_payload = json.loads(manifest_text)
     assert manifest_payload["recovery"]["verification"]["decision_hint"] == "accept_partial"
+
+
+def test_complete_mode_stops_before_repair_on_proven_payload_damage_and_cleans_output(
+    tmp_path,
+    pipeline_resource_scheduler,
+):
+    archive = tmp_path / "broken.zip"
+    archive.write_bytes(b"broken")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    recovered = out_dir / "recovered.txt"
+    recovered.write_text("partial", encoding="utf-8")
+    manifest = _write_manifest(
+        out_dir,
+        archive,
+        [{
+            "path": str(recovered),
+            "archive_path": "recovered.txt",
+            "status": "complete",
+            "bytes_written": 7,
+            "expected_size": 7,
+        }, {
+            "path": str(out_dir / "lost.bin"),
+            "archive_path": "lost.bin",
+            "status": "failed",
+            "bytes_written": 0,
+            "expected_size": 10,
+        }],
+    )
+    result = ExtractionResult(
+        success=False,
+        archive=str(archive),
+        out_dir=str(out_dir),
+        all_parts=[str(archive)],
+        error="crc error",
+        partial_outputs=True,
+        progress_manifest=str(manifest),
+        diagnostics={
+            "result": {
+                "failure_stage": "item_extract",
+                "failure_kind": "checksum_error",
+            }
+        },
+    )
+
+    class CountingRepairStage(_NoCandidateRepairStage):
+        def __init__(self):
+            self.calls = 0
+
+        def repair_after_verification_assessment_result(self, task, result, verification):
+            self.calls += 1
+            return None
+
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        _SingleResultExtractor(result),
+        _FakeOutputScanPolicy(),
+        pipeline_resource_scheduler,
+        config={
+            "extraction": {"content_requirement": "complete"},
+            "repair": {
+                "enabled": True,
+                "workspace": str(tmp_path / "repair"),
+                "max_repair_rounds_per_task": 5,
+            },
+            "verification": {
+                "enabled": True,
+                "methods": [{"name": "extraction_exit_signal"}],
+            },
+        },
+    )
+    repair_stage = CountingRepairStage()
+    runner.repair_stage = repair_stage
+    task = _task(archive)
+
+    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+
+    assert repair_stage.calls == 0
+    assert outcome.outcome_kind == OutcomeKind.FAILURE
+    outcome.planned_out_dir = str(out_dir)
+    assert runner.collect_result(task, outcome) is None
+    assert not out_dir.exists()
+
+
+def test_structural_container_error_alone_does_not_prove_content_loss(tmp_path):
+    archive = tmp_path / "broken.zip"
+    result = ExtractionResult(
+        success=False,
+        archive=str(archive),
+        out_dir=str(tmp_path / "out"),
+        all_parts=[str(archive)],
+        error="headers error",
+        diagnostics={
+            "result": {
+                "failure_stage": "archive_open",
+                "failure_kind": "headers_error",
+            }
+        },
+    )
+    verification = VerificationResult(
+        container_integrity=CONTAINER_INTEGRITY_STRUCTURALLY_DAMAGED,
+        decision_hint=DECISION_REPAIR,
+    )
+
+    assert _proves_content_loss(result, verification) is False
 
 
 class _SingleResultExtractor:

@@ -110,7 +110,6 @@
     "output_suppression_seconds": 120.0,
     "password_retry_debounce_seconds": 0.5,
     "password_retry_include_subtree": true,
-    "partial_output_policy": "discard",
     "clipboard_monitor_enabled": true,
     "clipboard_builtin_max_entries": 30,
     "enabled": false,
@@ -127,7 +126,8 @@
     "directory_passwords_max_password_length": 512
   },
   "extraction": {
-    "write_progress_manifest": false
+    "write_progress_manifest": false,
+    "content_requirement": "complete"
   },
   "embedded_scan": {
     "enabled": true
@@ -240,8 +240,6 @@
     "enabled": true,
     "max_retries": 2,
     "cleanup_failed_output": true,
-    "accept_partial_when_source_damaged": true,
-    "partial_min_completeness": 0.2,
     "complete_accept_threshold": 0.999,
     "partial_accept_threshold": 0.2,
     "recovery_min_improvement": 0.0,
@@ -300,14 +298,12 @@
     "max_repair_generated_mb_per_task": 2048,
     "stagnation_patience_rounds": 3,
     "min_recovery_improvement": 0.01,
-    "continue_after_partial": true,
     "runtime_cache": {
       "enabled": true,
       "max_entries": 512
     },
     "safety": {
       "allow_unsafe": false,
-      "allow_partial": true,
       "allow_lossy": false
     },
     "module_limits": {
@@ -331,8 +327,7 @@
       "max_assess_candidates": 4,
       "max_rounds": 3,
       "min_improvement": 0.01,
-      "patience_rounds": 3,
-      "return_best_partial": true
+      "patience_rounds": 3
     },
     "policy": {
       "enabled": true,

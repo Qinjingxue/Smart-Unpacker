@@ -7,6 +7,10 @@ from typing import Any, List
 
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
+from sunpack.contracts.content_recovery import (
+    CONTENT_REQUIREMENT_COMPLETE,
+    ContentRecoveryPolicy,
+)
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair_inspection import RepairInspectionService
@@ -51,6 +55,15 @@ from sunpack.repair.terminal_status import terminal_repair_status
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from sunpack.verification.comparison import score_verification_payload
 from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
+from sunpack.contracts.verification import (
+    CONTENT_INTEGRITY_PAYLOAD_DAMAGED,
+    CONTENT_INTEGRITY_UNKNOWN,
+    CONTENT_INTEGRITY_VERIFIED_PARTIAL,
+    VERIFICATION_STRENGTH_CRC,
+    VERIFICATION_STRENGTH_MANIFEST,
+    VERIFICATION_STRENGTH_ORACLE,
+)
+from sunpack.verification.error_classification import classify_verification_error
 from sunpack.support.path_keys import absolute_path_key
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -74,16 +87,31 @@ class BatchExtractionOutcome:
     comparison: dict[str, Any] = field(default_factory=dict)
     rejected_attempts: list[dict[str, Any]] = field(default_factory=list)
     planned_out_dir: str = ""
+    content_requirement: str = CONTENT_REQUIREMENT_COMPLETE
 
     @property
     def outcome_kind(self) -> OutcomeKind:
-        if terminal_failure_reason(self.result):
-            return OutcomeKind.FAILURE
-        if _verification_accepts_partial(self.verification):
-            return OutcomeKind.PARTIAL_SUCCESS
         if self.result.success and _verification_accepts_complete_strict(self.verification):
             return OutcomeKind.COMPLETE_SUCCESS
+        if (
+            self.content_requirement != CONTENT_REQUIREMENT_COMPLETE
+            and _verification_accepts_partial(self.verification)
+            and _partial_result_is_acceptable(self.result)
+        ):
+            return OutcomeKind.PARTIAL_SUCCESS
         return OutcomeKind.FAILURE
+
+    @property
+    def policy_rejected_partial_output(self) -> bool:
+        if self.content_requirement != CONTENT_REQUIREMENT_COMPLETE:
+            return False
+        verification = self.verification
+        return bool(
+            self.result.partial_outputs
+            or _verification_accepts_partial(verification)
+            or getattr(verification, "content_integrity", "")
+            in {CONTENT_INTEGRITY_VERIFIED_PARTIAL, CONTENT_INTEGRITY_PAYLOAD_DAMAGED}
+        )
 
 
 @dataclass
@@ -140,6 +168,7 @@ class ExtractionBatchRunner:
         self.runtime_scheduler = runtime_scheduler
         self.rename_scheduler = rename_scheduler or RenameScheduler()
         self.config = config or {}
+        self.content_policy = ContentRecoveryPolicy.from_config(self.config)
         cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
         self.i18n = I18nContext(cli_config.get("language"))
         self.scheduler_config = self._build_scheduler_config(self.config)
@@ -476,6 +505,9 @@ class ExtractionBatchRunner:
                     incumbent_outcome,
                     current_outcome,
                 )
+                if self._must_stop_for_proven_content_loss(task, result, verification):
+                    cleanup_shelved_outcome(incumbent_outcome, keep=current_outcome)
+                    return current_outcome
                 if _verification_accepts_complete(verification):
                     selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
                     if selected is not None:
@@ -517,6 +549,9 @@ class ExtractionBatchRunner:
             verification = verify_and_project(self.verifier, task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
             self._annotate_recovery_outcome(task, outcome, source="original", round_index=current_sequence)
+            if self._must_stop_for_proven_content_loss(task, result, verification):
+                cleanup_shelved_outcome(incumbent_outcome, keep=outcome)
+                return outcome
             if _verification_accepts_complete(verification):
                 selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir) or outcome
                 cleanup_shelved_outcome(incumbent_outcome, keep=selected)
@@ -599,17 +634,25 @@ class ExtractionBatchRunner:
         )
 
     def _accept_partial_output(self, result: ExtractionResult, verification: VerificationResult) -> bool:
-        config = self.verifier.config
-        if not bool(config.get("accept_partial_when_source_damaged", True)):
+        if not self.content_policy.allows_partial:
             return False
-        if terminal_failure_reason(result):
+        if not _partial_result_is_acceptable(result):
             return False
         if verification.decision_hint != DECISION_ACCEPT_PARTIAL:
             return False
-        min_completeness = float(config.get("partial_min_completeness", 0.2) or 0.0)
-        if float(verification.completeness or 0.0) < min_completeness:
-            return False
         return bool(result.partial_outputs or verification.partial_files or verification.complete_files or verification.unverified_files)
+
+    def _must_stop_for_proven_content_loss(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+    ) -> bool:
+        if self.content_policy.allows_partial:
+            return False
+        if bool(task.fact_bag.get(REPAIR_ENTERED_FACT)):
+            return False
+        return _proves_content_loss(result, verification)
 
     def _refresh_inspection_after_repair(self, task: ArchiveTask) -> None:
         try:
@@ -652,6 +695,7 @@ class ExtractionBatchRunner:
         round_index: int = 0,
         repair_module: str = "",
     ) -> None:
+        outcome.content_requirement = self.content_policy.requirement
         if outcome.verification is None:
             return
         if outcome.archive_state_payload is None:
@@ -736,15 +780,11 @@ class ExtractionBatchRunner:
         verification = outcome.verification
         if verification is None:
             return False
-        if outcome.result.success and _verification_accepts_complete(verification):
+        if outcome.result.success and _verification_accepts_complete_strict(verification):
             return True
-        if self._repair_continue_after_partial() and not final:
+        if not final:
             return False
         return self._accept_partial_output(outcome.result, verification)
-
-    def _repair_continue_after_partial(self) -> bool:
-        repair_config = self.repair_stage.config if isinstance(getattr(self.repair_stage, "config", None), dict) else {}
-        return bool(repair_config.get("continue_after_partial", True))
 
     def _recovery_min_improvement(self) -> float:
         verification_config = self.verifier.config
@@ -1056,7 +1096,7 @@ class ExtractionBatchRunner:
             )})
             return False
 
-        if _verification_accepts_complete(evaluation.verification):
+        if _verification_accepts_complete_strict(evaluation.verification):
             _append_repair_candidate_log(task, {
                 "phase": "beam_selected",
                 "reason": "complete_repair",
@@ -1070,7 +1110,10 @@ class ExtractionBatchRunner:
             promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
-        if _verification_accepts_partial(evaluation.verification) and not loop_state.can_attempt(trigger="verification_beam_best_partial"):
+        if (
+            self._accept_partial_output(evaluation.result, evaluation.verification)
+            and not loop_state.can_attempt(trigger="verification_beam_best_partial")
+        ):
             _append_repair_candidate_log(task, {
                 "phase": "beam_selected",
                 "reason": "repair_budget_best_partial",
@@ -1326,8 +1369,13 @@ class ExtractionBatchRunner:
         return filtered
 
     def collect_result(self, task: ArchiveTask, outcome: BatchExtractionOutcome | ExtractionResult) -> str | None:
+        content_policy = getattr(self, "content_policy", None) or ContentRecoveryPolicy.from_config(
+            getattr(self, "config", {})
+        )
         if isinstance(outcome, ExtractionResult):
-            outcome = BatchExtractionOutcome(outcome)
+            outcome = BatchExtractionOutcome(outcome, content_requirement=content_policy.requirement)
+        else:
+            outcome.content_requirement = content_policy.requirement
         path = task.main_path
         res = outcome.result
         out_dir = res.out_dir
@@ -1355,6 +1403,7 @@ class ExtractionBatchRunner:
             planned_output_dir=outcome.planned_out_dir,
             failed=outcome.outcome_kind == OutcomeKind.FAILURE,
             repair_entered=bool(task.fact_bag.get(REPAIR_ENTERED_FACT)),
+            force_owned_output_cleanup=outcome.policy_rejected_partial_output,
         )
         diagnostics = res.diagnostics if isinstance(res.diagnostics, dict) else {}
         res.diagnostics = {**diagnostics, "failed_output_cleanup": cleanup.to_dict()}
@@ -1486,9 +1535,7 @@ def _verification_accepts(verification: VerificationResult | Any) -> bool:
 
 
 def _verification_accepts_complete(verification: VerificationResult | Any) -> bool:
-    decision = getattr(verification, "decision_hint", "")
-    status = getattr(verification, "assessment_status", "")
-    return decision == DECISION_ACCEPT or status == "complete"
+    return _verification_accepts_complete_strict(verification)
 
 
 def _verification_accepts_complete_strict(verification: VerificationResult | Any) -> bool:
@@ -1502,6 +1549,53 @@ def _verification_accepts_complete_strict(verification: VerificationResult | Any
 
 def _verification_accepts_partial(verification: VerificationResult | Any) -> bool:
     return getattr(verification, "decision_hint", "") == DECISION_ACCEPT_PARTIAL
+
+
+def _partial_result_is_acceptable(result: ExtractionResult) -> bool:
+    """Reject execution/authentication failures, while allowing damaged sources to yield verified content."""
+    reason = terminal_failure_reason(result)
+    return not reason or reason in {"damaged", "missing_volume"}
+
+
+def _proves_content_loss(result: ExtractionResult, verification: VerificationResult) -> bool:
+    """Return true only for content evidence, never for container-structure evidence alone."""
+    failure = result.failure
+    if failure is not None and failure.contains(FailureKind.MISSING_VOLUME):
+        return True
+
+    for payload in _nested_diagnostic_payloads(result):
+        failure_kind = str(payload.get("failure_kind") or "")
+        failure_stage = str(payload.get("failure_stage") or "")
+        if not failure_kind:
+            continue
+        classified = classify_verification_error(failure_kind, failure_stage)
+        if classified.content_integrity != CONTENT_INTEGRITY_UNKNOWN:
+            return True
+
+    content_integrity = str(getattr(verification, "content_integrity", "") or "")
+    strength = str(getattr(verification, "verification_strength", "") or "")
+    return (
+        content_integrity
+        in {CONTENT_INTEGRITY_VERIFIED_PARTIAL, CONTENT_INTEGRITY_PAYLOAD_DAMAGED}
+        and strength
+        in {VERIFICATION_STRENGTH_MANIFEST, VERIFICATION_STRENGTH_CRC, VERIFICATION_STRENGTH_ORACLE}
+    )
+
+
+def _nested_diagnostic_payloads(result: ExtractionResult):
+    roots: list[Any] = [result.diagnostics]
+    if result.failure is not None:
+        roots.append(result.failure.details)
+    pending = [value for value in roots if isinstance(value, dict)]
+    seen: set[int] = set()
+    while pending:
+        payload = pending.pop()
+        marker = id(payload)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield payload
+        pending.extend(value for value in payload.values() if isinstance(value, dict))
 
 
 def _resource_guard_violations(analysis: dict[str, Any], guard: dict[str, Any]) -> list[dict[str, Any]]:

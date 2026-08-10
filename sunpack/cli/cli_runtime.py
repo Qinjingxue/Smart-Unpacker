@@ -171,6 +171,9 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     if getattr(args, "write_progress_manifest", False):
         overrides["write_progress_manifest"] = True
         config.setdefault("extraction", {})["write_progress_manifest"] = True
+    if getattr(args, "allow_partial", False):
+        overrides["content_requirement"] = "allow_partial"
+        config.setdefault("extraction", {})["content_requirement"] = "allow_partial"
     if getattr(args, "directory_passwords", None) is not None:
         overrides["directory_passwords"] = bool(args.directory_passwords)
         config.setdefault("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)

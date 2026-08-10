@@ -807,8 +807,6 @@ class RepairScheduler:
         reasons: list[str] = []
         if not bool(safety.get("allow_unsafe", False)) and not module.spec.safe:
             reasons.append("unsafe_module_blocked")
-        if not bool(safety.get("allow_partial", True)) and module.spec.partial:
-            reasons.append("partial_module_blocked")
         if not bool(safety.get("allow_lossy", False)) and module.spec.lossy:
             reasons.append("lossy_module_blocked")
         return reasons
@@ -1026,7 +1024,7 @@ def _module_selection_cache_key(
         job.archive_state.patch_depth() if job.archive_state is not None else 0,
         size_mb,
         tuple(sorted((str(key), str(value)) for key, value in safety.items())),
-        tuple(sorted((str(key), str(value)) for key, value in limits.items() if key in {"max_input_size_mb", "allow_partial", "allow_lossy"})),
+        tuple(sorted((str(key), str(value)) for key, value in limits.items() if key in {"max_input_size_mb", "allow_lossy"})),
         enabled,
     )
 

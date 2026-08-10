@@ -416,7 +416,7 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
             finalize_calls.append(dict(output_path_map))
 
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False, "partial_output_policy": "promote"}},
+        {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
@@ -493,7 +493,7 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     assert list(probe_root.iterdir()) == []
 
 
-def test_partial_result_can_promote_recovered_output_without_complete_success(tmp_path, monkeypatch):
+def test_partial_result_is_rejected_and_probe_output_is_discarded(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
@@ -520,7 +520,7 @@ def test_partial_result_can_promote_recovered_output_without_complete_success(tm
             postprocess_maps.append(dict(output_path_map))
 
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False, "partial_output_policy": "promote"}},
+        {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
@@ -534,10 +534,10 @@ def test_partial_result_can_promote_recovered_output_without_complete_success(tm
 
     assert result.processed == 1
     assert result.succeeded == 0
-    assert result.failed == 0
-    assert (tmp_path / "out" / "sample" / "recovered.bin").read_bytes() == b"partial"
-    assert len(postprocess_maps) == 1
-    assert postprocess_maps[0]
+    assert result.failed == 1
+    assert result.errors == ["watch extraction rejected partial content"]
+    assert not (tmp_path / "out" / "sample" / "recovered.bin").exists()
+    assert not postprocess_maps
     probe_root = tmp_path / ".sunpack_watch_probes"
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []

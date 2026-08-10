@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from sunpack.cli.cli_constants import EXIT_PARTIAL
 from sunpack.cli.cli_context import CliContext
 from sunpack.cli.cli_reporter import CliReporter
 from sunpack.cli.commands import extract
@@ -125,13 +124,14 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
         json=False,
         quiet=False,
         verbose=True,
+        allow_partial=True,
     )
     ctx = CliContext(language="en", reporter=CliReporter(verbose=True))
 
     exit_code, result = extract.handle(args, ctx)
 
     captured = capsys.readouterr()
-    assert exit_code == EXIT_PARTIAL
+    assert exit_code == 0
     assert result.summary["partial_success_count"] == 1
     assert "[complete] good.txt 2/2 B" in captured.out
     assert "[partial] partial.bin 4/8 B" in captured.out
@@ -188,13 +188,14 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
         json=False,
         quiet=False,
         verbose=False,
+        allow_partial=True,
     )
     ctx = CliContext(language="en", reporter=CliReporter(verbose=False))
 
     exit_code, result = extract.handle(args, ctx)
 
     captured = capsys.readouterr()
-    assert exit_code == EXIT_PARTIAL
+    assert exit_code == 0
     assert result.summary["partial_success_count"] == 1
     assert result.summary["recovered_outputs"][0]["recovery_report"] == str(report)
     assert "[partial]" not in captured.out
@@ -268,6 +269,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
         json=True,
         quiet=False,
         verbose=False,
+        allow_partial=True,
     )
     reporter = CliReporter(json_mode=True)
     ctx = CliContext(language="en", reporter=reporter)
@@ -278,7 +280,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
     payload = json.loads(capsys.readouterr().out)
     recovered = payload["summary"]["recovered_outputs"][0]
 
-    assert exit_code == EXIT_PARTIAL
+    assert exit_code == 0
     assert payload["command"] == "extract"
     assert payload["summary"]["partial_success_count"] == 1
     assert payload["summary"]["password_retry_count"] == 0

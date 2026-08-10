@@ -811,7 +811,10 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
         pipeline_resource_scheduler,
-        config={"verification": {"enabled": True, "methods": []}},
+        config={
+            "extraction": {"content_requirement": "allow_partial"},
+            "verification": {"enabled": True, "methods": []},
+        },
     )
 
     collected = runner.collect_result(task, BatchExtractionOutcome(result=result, verification=verification))
@@ -847,7 +850,10 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_r
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
         pipeline_resource_scheduler,
-        config={"verification": {"enabled": True, "methods": []}},
+        config={
+            "extraction": {"content_requirement": "allow_partial"},
+            "verification": {"enabled": True, "methods": []},
+        },
     )
 
     runner.collect_result(_task(archive, detected_ext="zip"), BatchExtractionOutcome(result=result, verification=verification))
@@ -1002,7 +1008,6 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
-                "partial_min_completeness": 0.2,
                 "partial_accept_threshold": 0.2,
                 "recovery_min_improvement": 0.0,
             },
@@ -1170,6 +1175,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
     repaired_archive = _zip_with_one_bad_payload(repaired_root)
     out_dir = input_root / archive.stem
     config = {
+        "extraction": {"content_requirement": "allow_partial"},
         "repair": {
             "enabled": True,
             "workspace": str(tmp_path / "repair"),
@@ -1183,7 +1189,6 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
                 {"name": "output_presence"},
                 {"name": "archive_test_crc"},
             ],
-            "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
             "recovery_min_improvement": 0.0,
         },
@@ -1397,6 +1402,7 @@ def _best_effort_pipeline_config(
 ) -> dict:
     return normalize_config(with_detection_pipeline({
         "recursive_extract": str(recursive_rounds),
+        "extraction": {"content_requirement": "allow_partial"},
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "post_extract": {
             "archive_cleanup_mode": "k",
@@ -1416,7 +1422,6 @@ def _best_effort_pipeline_config(
                 {"name": "output_presence", "enabled": True},
                 {"name": "archive_test_crc", "enabled": True},
             ],
-            "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
@@ -1430,6 +1435,7 @@ def _best_effort_pipeline_config(
 def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
     return normalize_config(with_detection_pipeline({
         "recursive_extract": "3",
+        "extraction": {"content_requirement": "allow_partial"},
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "post_extract": {
             "archive_cleanup_mode": "k",
@@ -1448,7 +1454,6 @@ def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
                 {"name": "output_presence", "enabled": True},
                 {"name": "archive_test_crc", "enabled": True},
             ],
-            "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
@@ -1484,7 +1489,6 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
                 {"name": "output_presence", "enabled": True},
                 {"name": "archive_test_crc", "enabled": True},
             ],
-            "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
@@ -1500,6 +1504,7 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
 def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
     return normalize_config(with_detection_pipeline({
         "recursive_extract": "3",
+        "extraction": {"content_requirement": "allow_partial"},
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "post_extract": {
             "archive_cleanup_mode": "k",
@@ -1518,7 +1523,6 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
                 {"name": "output_presence", "enabled": True},
                 {"name": "archive_test_crc", "enabled": True},
             ],
-            "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
