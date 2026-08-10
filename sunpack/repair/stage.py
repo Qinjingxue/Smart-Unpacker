@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -34,6 +33,7 @@ from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.contracts.verification import VerificationResult
 from sunpack.repair.loop import is_policy_stop_result
+from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent, OutputRole
 
 
 class ArchiveRepairStage:
@@ -123,19 +123,12 @@ class ArchiveRepairStage:
         for raw_path in result.workspace_paths or []:
             if not raw_path:
                 continue
-            try:
-                path = Path(raw_path).resolve()
-            except OSError:
-                continue
-            if path == workspace or workspace not in path.parents:
-                continue
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
-                elif path.exists():
-                    path.unlink()
-            except OSError:
-                continue
+            DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_scoped_path(
+                str(raw_path),
+                event=OutputCleanupEvent.REPAIR_POLICY_STOP,
+                role=OutputRole.REPAIR_WORKSPACE,
+                workspace_root=str(workspace),
+            )
 
     def _job_from_verification_assessment(
         self,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import inspect
 from copy import deepcopy
 from contextlib import nullcontext
@@ -21,6 +20,7 @@ from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.knowledge import write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, CONTENT_INTEGRITY_UNKNOWN
+from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent, OutputRole
 
 
 @dataclass
@@ -87,7 +87,12 @@ class RepairRuntimeTransitionEvaluator:
         original_knowledge = task.knowledge().to_dict()
         temp_dir = str(temp_dir)
         with _phase(phase_timer, "transition_cleanup", state_id=state_id, candidate_id=candidate_id):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_scoped_path(
+                temp_dir,
+                event=OutputCleanupEvent.BEAM_CANDIDATE_PREPARE,
+                role=OutputRole.BEAM_CANDIDATE,
+                workspace_root=str(Path(temp_dir).parent),
+            )
         with _phase(phase_timer, "transition_source_digest", state_id=state_id, candidate_id=candidate_id):
             digest = self._candidate_source_digest(candidate)
         try:

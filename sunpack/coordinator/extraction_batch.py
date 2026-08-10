@@ -43,6 +43,7 @@ from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
+from sunpack.support.output_cleanup import OutputCleanupEvent
 from sunpack.passwords.directory_context import DirectoryPasswordContextStore
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
@@ -616,7 +617,11 @@ class ExtractionBatchRunner:
             if verification.decision_hint not in {DECISION_RETRY_EXTRACT, DECISION_REPAIR} and not self._retry_on_verification_failure():
                 break
             if cleanup_failed_output:
-                remove_output(result.out_dir)
+                remove_output(
+                    result.out_dir,
+                    event=OutputCleanupEvent.VERIFICATION_RETRY,
+                    planned_output_dir=out_dir,
+                )
             attempt_index += 1
 
         selected = self._selected_acceptable_outcome(incumbent_outcome, last_outcome, out_dir, final=True)
@@ -682,7 +687,10 @@ class ExtractionBatchRunner:
             if result.progress_manifest:
                 result.progress_manifest_payload = filter_extraction_outputs(result.progress_manifest)
             elif isinstance(result.progress_manifest_payload, dict):
-                result.progress_manifest_payload = filter_extraction_manifest_payload(result.progress_manifest_payload)
+                result.progress_manifest_payload = filter_extraction_manifest_payload(
+                    result.progress_manifest_payload,
+                    output_root=result.out_dir,
+                )
         except Exception:
             return
 
@@ -1145,7 +1153,11 @@ class ExtractionBatchRunner:
                     evaluation.verification,
                     evaluation.temp_dir,
                 )})
-                remove_output(out_dir)
+                remove_output(
+                    out_dir,
+                    event=OutputCleanupEvent.BEAM_CONTINUE,
+                    planned_output_dir=out_dir,
+                )
                 return True
             _append_repair_candidate_log(task, {
                 "phase": "beam_stop",
@@ -1167,7 +1179,11 @@ class ExtractionBatchRunner:
             evaluation.verification,
             evaluation.temp_dir,
         )})
-        remove_output(out_dir)
+        remove_output(
+            out_dir,
+            event=OutputCleanupEvent.BEAM_CONTINUE,
+            planned_output_dir=out_dir,
+        )
         _append_repair_candidate_log(task, {
             "phase": "beam_continue",
             "candidate": candidate_feature_payload(evaluation.candidate),

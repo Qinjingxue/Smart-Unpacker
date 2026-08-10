@@ -70,3 +70,36 @@ def test_promote_beam_output_retargets_inventory_and_manifest(tmp_path):
     assert promoted.out_dir == str(output)
     assert promoted.output_inventory_payload["root"] == str(output.resolve())
     assert promoted.progress_manifest == str(output / ".sunpack" / "extraction_manifest.json")
+
+
+def test_promote_beam_output_missing_source_preserves_existing_output(tmp_path):
+    temporary = tmp_path / "missing-candidate"
+    output = tmp_path / "output"
+    output.mkdir()
+    payload = output / "payload.bin"
+    payload.write_bytes(b"incumbent")
+    result = ExtractionResult(
+        archive="archive.zip",
+        all_parts=["archive.zip"],
+        success=True,
+        out_dir=str(temporary),
+    )
+
+    promoted = promote_beam_output(result, str(temporary), str(output))
+
+    assert promoted.out_dir == str(temporary)
+    assert payload.read_bytes() == b"incumbent"
+
+
+def test_promote_recovery_missing_source_preserves_existing_output(tmp_path):
+    missing = tmp_path / "output.incumbent_missing"
+    output = tmp_path / "output"
+    output.mkdir()
+    payload = output / "payload.bin"
+    payload.write_bytes(b"incumbent")
+    outcome = _outcome(missing)
+
+    promote_recovery_outcome(outcome, str(output))
+
+    assert outcome.result.out_dir == str(missing)
+    assert payload.read_bytes() == b"incumbent"

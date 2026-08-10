@@ -1,5 +1,4 @@
 import os
-import shutil
 import subprocess
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
@@ -20,6 +19,7 @@ from sunpack.passwords.internal.local_files import directory_password_context_fr
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
 from sunpack.i18n import I18nContext
+from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent
 
 
 class SingleArchiveExtractor:
@@ -132,7 +132,7 @@ class SingleArchiveExtractor:
                 has_space = space_checked or self.ensure_space(5)
                 space_checked = False
             if not has_space:
-                shutil.rmtree(out_dir, ignore_errors=True)
+                self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACTION_ABORT)
                 failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
                 return self._failed(
                     archive,
@@ -171,7 +171,7 @@ class SingleArchiveExtractor:
                     resolution = self._resolve_password(task, run_archive, run_parts)
                 resolution_failure = self._password_resolution_failure(resolution)
                 if resolution_failure is not None:
-                    shutil.rmtree(out_dir, ignore_errors=True)
+                    self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACTION_ABORT)
                     self._log(self.i18n.t("extract.log.failed", archive=archive, error=self._localized_failure(resolution_failure)))
                     return self._failed(
                         archive,
@@ -261,7 +261,7 @@ class SingleArchiveExtractor:
                                 repairable=True,
                             )
                             self._log(self.i18n.t("extract.log.failed", archive=archive, error=self._localized_failure(failure)))
-                            shutil.rmtree(out_dir, ignore_errors=True)
+                            self._cleanup_output(out_dir, OutputCleanupEvent.EMPTY_REPAIR_OUTPUT)
                             diagnostics["failure_stage"] = "verification"
                             diagnostics["failure_kind"] = "empty_repair_output"
                             return self._failed(
@@ -327,13 +327,13 @@ class SingleArchiveExtractor:
                     if password_candidate_inconclusive is None:
                         password_candidate_inconclusive = candidate_failure
                     if self.password_resolver.has_pending_candidates(resolution.archive_key):
-                        shutil.rmtree(out_dir, ignore_errors=True)
+                        self._cleanup_output(out_dir, OutputCleanupEvent.PASSWORD_CANDIDATE_RETRY)
                         continue
                 elif candidate_failure.is_password_failure:
                     self.password_resolver.reject_extraction_candidate(resolution)
                     password_candidate_rejections += 1
                     if self.password_resolver.has_pending_candidates(resolution.archive_key):
-                        shutil.rmtree(out_dir, ignore_errors=True)
+                        self._cleanup_output(out_dir, OutputCleanupEvent.PASSWORD_CANDIDATE_RETRY)
                         if password_candidate_rejections == 1 or password_candidate_rejections % 50 == 0:
                             self._log(
                                 self.i18n.t("extract.log.password_rejections", count=password_candidate_rejections, archive=archive)
@@ -343,7 +343,7 @@ class SingleArchiveExtractor:
             if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
                 retry_count += 1
                 if self.retry_policy.needs_space_recheck(run_result, err) and not self.ensure_space(10):
-                    shutil.rmtree(out_dir, ignore_errors=True)
+                    self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACTION_ABORT)
                     failure = self._failure_info(FailureKind.PROCESS_ERROR, "retry_preflight", "failure.insufficient_space")
                     return self._failed(
                         archive,
@@ -353,7 +353,7 @@ class SingleArchiveExtractor:
                         failure=failure,
                         diagnostics={"failure_stage": "retry_preflight", "failure_kind": "disk_space"},
                     )
-                shutil.rmtree(out_dir, ignore_errors=True)
+                self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACT_RETRY)
                 self._log(self.i18n.t("extract.log.temp_retry", attempt=retry_count + 1, max_attempts=self.retry_policy.max_retries, archive=archive))
                 self.retry_policy.backoff(retry_count)
                 continue
@@ -406,7 +406,7 @@ class SingleArchiveExtractor:
                     progress_manifest=manifest_path,
                     progress_manifest_payload=manifest_payload,
                 )
-            shutil.rmtree(out_dir, ignore_errors=True)
+            self._cleanup_output(out_dir, OutputCleanupEvent.UNRECOVERABLE_FAILURE)
             return self._failed(
                 archive,
                 out_dir,
@@ -418,7 +418,7 @@ class SingleArchiveExtractor:
                 diagnostics=diagnostics,
             )
 
-        shutil.rmtree(out_dir, ignore_errors=True)
+        self._cleanup_output(out_dir, OutputCleanupEvent.RETRY_EXHAUSTED)
         failure = self._failure_info(FailureKind.PROCESS_ERROR, "retry_exhausted", "failure.insufficient_space")
         return self._failed(
             archive,
@@ -486,6 +486,14 @@ class SingleArchiveExtractor:
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return startupinfo
+
+    @staticmethod
+    def _cleanup_output(out_dir: str, event: OutputCleanupEvent) -> None:
+        DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
+            out_dir,
+            event=event,
+            planned_output_dir=out_dir,
+        )
 
     def _failed(
         self,

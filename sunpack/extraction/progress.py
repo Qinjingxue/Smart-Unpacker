@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from sunpack_native import scan_output_tree as _native_scan_output_tree
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_manifest_files
+from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER
 
 
 CONTENT_FAILURE_KINDS = {
@@ -144,13 +146,23 @@ def _compact_complete_progress_manifest(
 def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
     path = Path(manifest_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest = filter_extraction_manifest_payload(manifest, partial_keep_ratio=partial_keep_ratio)
+    manifest = filter_extraction_manifest_payload(
+        manifest,
+        partial_keep_ratio=partial_keep_ratio,
+        output_root=str(manifest.get("out_dir") or path.parent.parent),
+    )
     path.write_text(_json_text(manifest), encoding="utf-8")
     return manifest
 
 
-def filter_extraction_manifest_payload(manifest: dict[str, Any], *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
+def filter_extraction_manifest_payload(
+    manifest: dict[str, Any],
+    *,
+    partial_keep_ratio: float = 0.2,
+    output_root: str = "",
+) -> dict[str, Any]:
     files = [dict(item) for item in manifest.get("files") or [] if isinstance(item, dict)]
+    cleanup_root = _manifest_output_root(manifest, files, output_root=output_root)
     complete = [item for item in files if item.get("status") == "complete"]
     kept: list[dict[str, Any]] = []
     discarded: list[dict[str, Any]] = []
@@ -161,7 +173,7 @@ def filter_extraction_manifest_payload(manifest: dict[str, Any], *, partial_keep
             if str(item.get("path") or "") in keep_paths:
                 kept.append({**item, "retention": "kept_complete"})
             else:
-                _discard_file(item)
+                _discard_file(item, output_root=cleanup_root)
                 discarded.append({**item, "retention": "discarded_incomplete_after_complete_output"})
     else:
         partials = [item for item in files if item.get("status") in {"partial", "unverified"} and int(item.get("bytes_written", 0) or 0) > 0]
@@ -182,7 +194,7 @@ def filter_extraction_manifest_payload(manifest: dict[str, Any], *, partial_keep
             if item_path in keep_paths:
                 kept.append({**item, "retention": "kept_best_partial"})
             else:
-                _discard_file(item)
+                _discard_file(item, output_root=cleanup_root)
                 discarded.append({**item, "retention": "discarded_low_progress_partial"})
 
     manifest["files"] = kept
@@ -307,15 +319,36 @@ def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_in
     return items
 
 
-def _discard_file(item: dict[str, Any]) -> None:
-    path = Path(str(item.get("path") or ""))
-    if not path:
+def _discard_file(item: dict[str, Any], *, output_root: str) -> None:
+    path = str(item.get("path") or "")
+    if not path or not output_root:
         return
+    DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_partial_file(path, output_root=output_root)
+
+
+def _manifest_output_root(
+    manifest: dict[str, Any],
+    files: list[dict[str, Any]],
+    *,
+    output_root: str,
+) -> str:
+    explicit = str(output_root or manifest.get("out_dir") or "")
+    if explicit:
+        return os.path.abspath(explicit)
+    paths = [
+        os.path.abspath(str(item.get("path") or ""))
+        for item in files
+        if item.get("path") and Path(str(item.get("path"))).is_absolute()
+    ]
+    if not paths:
+        return ""
     try:
-        if path.is_file():
-            path.unlink()
-    except OSError:
-        return
+        common = os.path.commonpath(paths)
+    except ValueError:
+        return ""
+    if common in paths:
+        common = os.path.dirname(common)
+    return common
 
 
 def _iter_files(root: str):
