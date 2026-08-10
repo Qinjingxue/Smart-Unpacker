@@ -239,8 +239,8 @@ def test_compact_worker_manifest_is_parsed_into_native_storage():
 
     stdout = (
         '{"type":"result","status":"ok","verified_manifest":'
-        '{"version":2,"validated":true,"item_count":1,"file_count":1,'
-        '"inventory":[1,1,0,3,1],"rows":[[0,"a.txt","",3,3,1,1,1,1,1,1]]}}\n'
+        '{"version":3,"validated":true,"item_count":1,"file_count":1,'
+        '"inventory":[1,1,0,3,1],"rows":[[0,"a.txt","",3,3,1,1,1,1,1,1,1,123,"616263"]]}}\n'
     )
     result = build_worker_diagnostics(stdout=stdout, stderr="", returncode=0)["result"]
 
@@ -253,8 +253,23 @@ def test_compact_worker_manifest_is_parsed_into_native_storage():
     assert materialized["path"] == "a.txt"
     assert "output_path" not in materialized
     assert materialized["status"] == "complete"
+    assert materialized["magic"] == b"abc"
+    assert materialized["mtime_ns"] == 123
     assert result["verified_manifest"]["inventory"]["identity_paths"] is True
     assert "rows" not in manifest
+
+
+def test_worker_manifest_v2_is_not_accepted():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
+
+    payload = {
+        "type": "result",
+        "status": "ok",
+        "verified_manifest": {"version": 2, "validated": True, "rows": []},
+    }
+    result = build_worker_diagnostics(stdout="", stderr="", returncode=0, result_payload=payload)["result"]
+
+    assert "native_rows" not in result["verified_manifest"]
 
 
 def test_preparsed_worker_result_avoids_stdout_reparse_and_bounds_tail():
@@ -267,9 +282,9 @@ def test_preparsed_worker_result_avoids_stdout_reparse_and_bounds_tail():
         "type": "result",
         "status": "ok",
         "verified_manifest": {
-            "version": 2,
+            "version": 3,
             "validated": True,
-            "rows": [[0, "source.txt", "output.txt", 3, 3, 1, 7, 1, 7, 1, 1]],
+            "rows": [[0, "source.txt", "output.txt", 3, 3, 1, 7, 1, 7, 1, 1, 1, 123, "616263"]],
             "inventory": [1, 1, 0, 3, 0],
         },
     }
@@ -298,10 +313,10 @@ def test_complete_worker_inventory_drops_transient_native_rows_and_output_trace(
     result = {
         "status": "ok",
         "verified_manifest": {
-            "version": 2,
+            "version": 3,
             "validated": True,
             "inventory": [1, 1, 0, 3, 1],
-            "rows": [[0, "a.txt", "", 3, 3, 1, 7, 1, 7, 1, 1]],
+            "rows": [[0, "a.txt", "", 3, 3, 1, 7, 1, 7, 1, 1, 1, 123, "616263"]],
         },
         "diagnostics": {"output_trace": {"items": [{"path": "a.txt"}], "files_written": 1}},
     }
@@ -564,6 +579,13 @@ def test_worker_async_output_extracts_format_without_source_crc(tmp_path):
     assert worker_result["status"] == "ok"
     assert worker_result["files_written"] == 1
     assert worker_result["bytes_written"] == len(payload)
+    manifest = worker_result["verified_manifest"]
+    assert manifest["version"] == 3
+    row = manifest["rows"][0]
+    assert len(row) == 14
+    assert row[11] == 1
+    assert row[12] > 0
+    assert row[13] == payload[:16].hex()
     assert (out_dir / source.name).read_bytes() == payload
 
 

@@ -7,7 +7,7 @@ from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.output_inventory import OutputInventory
-from sunpack.support.path_keys import path_key
+from sunpack.support.path_keys import normalized_path, path_key
 
 
 class NestedOutputScanPolicy:
@@ -123,10 +123,21 @@ class NestedOutputScanPolicy:
         inventory: OutputInventory | None,
         scan_session: DetectionScanSession,
     ) -> DirectorySnapshot | None:
-        inventory_files = self._inventory_files(inventory)
-        if inventory_files is None or inventory is None:
+        if inventory is None or not inventory.stats.exists or not inventory.stats.is_dir:
             return None
         root = Path(os.path.abspath(inventory.root))
+        if inventory.worker_inventory_complete:
+            scan_session.prime_file_head_columns(*inventory.file_head_columns())
+            snapshot = DirectoryScanner.snapshot_from_output_inventory(
+                str(root),
+                inventory,
+                config=self._output_scan_config,
+            )
+            if snapshot is not None:
+                return snapshot
+        inventory_files = self._inventory_files(inventory)
+        if inventory_files is None:
+            return None
         inventory_rows = [
             (path, size)
             for path, size in inventory_files
@@ -180,10 +191,13 @@ class NestedOutputScanPolicy:
             config=self._output_scan_config,
             stop_before_filter="mtime_range",
         )
-        candidate_paths = [
-            path for path, _size, _mtime_ns in prefiltered.iter_file_columns()
-        ]
-        facts_by_key = scan_session.file_head_facts_for_paths(candidate_paths, magic_size=16)
+        candidate_paths = [normalized_path(path) for path, _size, _mtime_ns in prefiltered.iter_file_columns()]
+        facts_by_key = scan_session.file_head_facts_for_paths(
+            candidate_paths,
+            magic_size=16,
+            paths_normalized=True,
+            copy_results=False,
+        )
         hydrated_entries: list[FileEntry] = []
         for path, is_dir, size, mtime_ns in prefiltered.iter_columns():
             entry_path = Path(path)

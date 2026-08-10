@@ -34,7 +34,7 @@ def collect_magic_bytes_batch(context) -> None:
         return
     scan_session = getattr(context, "scan_session", None)
     facts_by_key = (
-        scan_session.file_head_facts_for_paths(paths, magic_size=16)
+        scan_session.file_head_facts_for_paths(paths, magic_size=16, copy_results=False)
         if scan_session is not None
         else {}
     )

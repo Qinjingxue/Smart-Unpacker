@@ -678,11 +678,13 @@ public:
         bool compute_crc
     ) : writer_(std::move(writer)),
         file_(std::move(file)),
-        compute_crc_(compute_crc) {}
+        compute_crc_(compute_crc) {
+        magic_.reserve(16);
+    }
 
     ~AsyncFileOutStream() {
         if (writer_ && file_) {
-            writer_->close_file(file_, crc32_ ^ 0xFFFFFFFFU, compute_crc_);
+            writer_->close_file(file_, crc32_ ^ 0xFFFFFFFFU, compute_crc_, std::move(magic_));
         }
     }
 
@@ -722,6 +724,11 @@ public:
         if (compute_crc_ && consumed != 0) {
             crc32_ = update_crc32(crc32_, data, consumed);
         }
+        if (consumed != 0 && magic_.size() < 16) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            const std::size_t take = std::min<std::size_t>(16 - magic_.size(), consumed);
+            magic_.insert(magic_.end(), bytes, bytes + take);
+        }
         if (processedSize) {
             *processedSize = consumed;
         }
@@ -734,6 +741,7 @@ private:
     AsyncFileWriter::FileStatePtr file_;
     bool compute_crc_ = false;
     UInt32 crc32_ = 0xFFFFFFFFU;
+    std::vector<unsigned char> magic_;
 };
 
 
@@ -1042,6 +1050,9 @@ public:
                 auto& item = output_trace_->items[state->trace_index];
                 item.bytes_written = state->written_bytes;
                 item.operation_result = state->operation_result;
+                item.magic = state->magic;
+                item.has_mtime_ns = state->has_mtime_ns;
+                item.mtime_ns = state->mtime_ns;
                 item.failed = item.failed || !decoder_ok || !output_ok;
                 item.done = decoder_ok && output_ok;
                 if (item.done && item.has_source_crc32) {

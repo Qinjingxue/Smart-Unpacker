@@ -49,6 +49,26 @@ class DetectionScanSession:
         """Seed a complete recursive snapshot without touching the directory again."""
         self._snapshots[self._snapshot_key(directory, max_depth=None)] = snapshot
 
+    def prime_file_head_columns(
+        self,
+        paths: list[str],
+        sizes: list[int],
+        mtimes_ns: list[int | None],
+        magics: list[bytes],
+    ) -> None:
+        """Seed trusted worker inventory without reopening extracted files."""
+        for path, size, mtime_ns, magic in zip(paths, sizes, mtimes_ns, magics):
+            normalized = normalized_path(path)
+            self._file_head_facts[path_key(normalized)] = {
+                "path": normalized,
+                "exists": True,
+                "is_file": True,
+                "size": int(size),
+                "mtime_ns": int(mtime_ns) if mtime_ns is not None else None,
+                "magic": bytes(magic),
+                "magic_complete": True,
+            }
+
     def is_within_scan_scope(self, path: str) -> bool:
         if not self._scan_roots:
             return True
@@ -98,12 +118,17 @@ class DetectionScanSession:
     def logical_name_for_archive(self, filename: str) -> str:
         return self.relations.logical_name_for_archive(filename)
 
-    def file_head_facts_for_paths(self, paths: list[str], *, magic_size: int = 16) -> dict[str, dict[str, Any]]:
-        requested = [normalized_path(path) for path in paths if path]
-        missing = [
-            path for path in requested
-            if self._file_head_fetch_needed(path, magic_size=magic_size)
-        ]
+    def file_head_facts_for_paths(
+        self,
+        paths: list[str],
+        *,
+        magic_size: int = 16,
+        paths_normalized: bool = False,
+        copy_results: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        requested = [str(path) if paths_normalized else normalized_path(path) for path in paths if path]
+        keyed = [(path, path_key(path)) for path in requested]
+        missing = [path for path, key in keyed if self._file_head_fetch_needed_key(key, magic_size=magic_size)]
         if missing:
             rows = _native_batch_file_head_facts(missing, max(0, int(magic_size or 0)))
             seen = set()
@@ -112,13 +137,16 @@ class DetectionScanSession:
                     continue
                 key = path_key(row.get("path"))
                 seen.add(key)
+                existing = self._file_head_facts.get(key, {})
+                magic = row.get("magic") if isinstance(row.get("magic"), bytes) else b""
                 self._file_head_facts[key] = {
                     "path": str(row.get("path") or ""),
                     "exists": bool(row.get("exists")),
                     "is_file": bool(row.get("is_file")),
                     "size": row.get("size"),
                     "mtime_ns": row.get("mtime_ns"),
-                    "magic": row.get("magic") if isinstance(row.get("magic"), bytes) else b"",
+                    "magic": magic if magic_size > 0 else existing.get("magic", b""),
+                    "magic_complete": bool(magic_size > 0) or bool(existing.get("magic_complete")),
                 }
             for path in missing:
                 key = path_key(path)
@@ -130,11 +158,11 @@ class DetectionScanSession:
                         "size": None,
                         "mtime_ns": None,
                         "magic": b"",
+                        "magic_complete": True,
                     }
-        return {
-            path_key(path): dict(self._file_head_facts.get(path_key(path), {}))
-            for path in requested
-        }
+        if copy_results:
+            return {key: dict(self._file_head_facts.get(key, {})) for _path, key in keyed}
+        return {key: self._file_head_facts.get(key, {}) for _path, key in keyed}
 
     def file_head_facts_for_path(self, path: str, *, magic_size: int = 16) -> dict[str, Any]:
         return self.file_head_facts_for_paths([path], magic_size=magic_size).get(path_key(path), {})
@@ -163,7 +191,10 @@ class DetectionScanSession:
         return f"{self._directory_key(directory)}::{max_depth}"
 
     def _file_head_fetch_needed(self, path: str, *, magic_size: int) -> bool:
-        facts = self._file_head_facts.get(path_key(path))
+        return self._file_head_fetch_needed_key(path_key(path), magic_size=magic_size)
+
+    def _file_head_fetch_needed_key(self, key: str, *, magic_size: int) -> bool:
+        facts = self._file_head_facts.get(key)
         if facts is None:
             return True
-        return bool(magic_size > 0 and facts.get("is_file") and not facts.get("magic"))
+        return bool(magic_size > 0 and facts.get("is_file") and not facts.get("magic_complete"))

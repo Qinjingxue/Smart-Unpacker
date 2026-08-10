@@ -79,11 +79,23 @@ class AnalysisEngine:
         })
         if not prepass and needs_prepass and prepass_config.get("enabled", True):
             prepass = run_signature_prepass(view, prepass_config)
-        fuzzy = self._run_fuzzy_pipeline(view, prepass) if AnalysisCapability.FUZZY_PROFILE in requested else {}
-        structure_context = {**prepass, "fuzzy": fuzzy}
+        fuzzy_requested = AnalysisCapability.FUZZY_PROFILE in requested
+        # Structure modules already expose the information needed to decide
+        # whether fuzzy profiling can add anything: selected status, segment
+        # boundaries and damage flags.  Run those modules first and only pay
+        # for byte-distribution profiling when that shared evidence is not a
+        # complete, clean, whole-input archive proof.
+        fuzzy = {}
+        structure_context = dict(prepass)
         modules = self._selected_structure_modules(structure_context) if AnalysisCapability.FORMAT_STRUCTURE in requested else []
         evidences = self._run_structure_modules(view, structure_context, modules) if modules else []
         selected = self._selected_evidences(evidences)
+        if fuzzy_requested and self._structure_requires_fuzzy(selected, int(view.size)):
+            fuzzy = self._run_fuzzy_pipeline(view, prepass)
+            if fuzzy and modules and self._fuzzy_affects_structure(fuzzy) and any(item.segments for item in evidences):
+                structure_context = {**prepass, "fuzzy": fuzzy}
+                evidences = self._run_structure_modules(view, structure_context, modules)
+                selected = self._selected_evidences(evidences)
         if (
             not selected
             and AnalysisCapability.EMBEDDED_SCAN in requested
@@ -119,6 +131,48 @@ class AnalysisEngine:
             fuzzy=fuzzy,
             read_bytes=stats.read_bytes,
             cache_hits=stats.cache_hits,
+        )
+
+    @staticmethod
+    def _structure_requires_fuzzy(selected: list[ArchiveFormatEvidence], file_size: int) -> bool:
+        """Use format-module evidence; never perform an independent read/probe here."""
+        if len(selected) != 1:
+            return True
+        evidence = selected[0]
+        if evidence.status != "extractable" or len(evidence.segments) != 1:
+            return True
+        segment = evidence.segments[0]
+        if segment.role != "primary" or segment.start_offset != 0:
+            return True
+        if segment.end_offset is None or int(segment.end_offset) < file_size:
+            return True
+        if segment.damage_flags:
+            return True
+        boundary_confidence = str(evidence.details.get("boundary_confidence") or "").lower()
+        if boundary_confidence in {"none", "low", "unknown"}:
+            return True
+        return False
+
+    @staticmethod
+    def _fuzzy_affects_structure(fuzzy: dict[str, Any]) -> bool:
+        profile = fuzzy.get("binary_profile") if isinstance(fuzzy.get("binary_profile"), dict) else fuzzy
+        route_hints = {
+            "carrier_prefix_likely",
+            "trailing_text_junk_likely",
+            "trailing_padding_likely",
+            "entropy_boundary_shift",
+        }
+        if route_hints.intersection(str(item) for item in profile.get("hints") or []):
+            return True
+        return any(
+            isinstance(item, dict)
+            and item.get("kind") in {
+                "carrier_prefix_end",
+                "entropy_boundary",
+                "trailing_junk_start",
+                "tail_padding_start",
+            }
+            for item in profile.get("offset_hints") or []
         )
 
     def _embedded_scan_enabled(self) -> bool:

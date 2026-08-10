@@ -46,6 +46,7 @@ fixtures/*.bin
 **/tools/
 !/tools/
 /tools/*
+!/tools/profile_large_archive.py
 !/tools/watch_validation.py
 
 # Temporary workspaces created by acceptance tests

@@ -53,6 +53,26 @@ class OutputInventory:
         paths, sizes = self._native.file_columns()
         return list(paths), [int(item) for item in sizes]
 
+    def file_head_columns(self) -> tuple[list[str], list[int], list[int | None], list[bytes]]:
+        paths, sizes, mtimes_ns, magics = self._native.file_head_columns()
+        return (
+            list(paths),
+            [int(item) for item in sizes],
+            [int(item) if item is not None else None for item in mtimes_ns],
+            [bytes(item) for item in magics],
+        )
+
+    def build_directory_snapshots(self, options: dict[str, Any]):
+        return self._native.build_directory_snapshots(
+            options["patterns"],
+            options["prune_dir_globs"],
+            options["blocked_extensions"],
+            options["blocked_file_names"],
+            options["size_ranges"],
+            options["mtime_ranges"],
+            options["whitelist_rules"],
+        )
+
     def relative_paths(self) -> tuple[str, ...]:
         return tuple(self._native.relative_paths())
 

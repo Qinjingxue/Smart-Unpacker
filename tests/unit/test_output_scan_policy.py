@@ -2,6 +2,7 @@ from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as Out
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.support.output_inventory import collect_output_inventory
 from tests.helpers.detection_config import with_detection_pipeline
+from sunpack_native import worker_manifest_from_rows
 
 
 def _config():
@@ -79,3 +80,160 @@ def test_output_scan_policy_inventory_batch_primes_file_heads(tmp_path, monkeypa
     row = facts[next(iter(facts))]
     assert row["size"] == archive.stat().st_size
     assert row["magic"].startswith(b"PK\x03\x04")
+
+
+def test_output_scan_policy_uses_worker_magic_without_reopening_files(tmp_path, monkeypatch):
+    archive = tmp_path / "nested.bin"
+    payload = b"PK\x03\x04" + b"payload"
+    archive.write_bytes(payload)
+    stat = archive.stat()
+    worker_result = {
+        "status": "ok",
+        "verified_manifest": {
+            "version": 3,
+            "validated": True,
+            "inventory": {
+                "complete": True,
+                "file_count": 1,
+                "dir_count": 0,
+                "total_size": len(payload),
+                "identity_paths": True,
+            },
+            "native_rows": worker_manifest_from_rows(
+                [[0, archive.name, "", len(payload), len(payload), 0, 0, 0, 0, 1, 1,
+                  1, stat.st_mtime_ns, payload[:16].hex()]],
+                True, 1, 0, len(payload), True,
+            ),
+        },
+    }
+    inventory = collect_output_inventory(str(tmp_path), worker_result)
+    monkeypatch.setattr(
+        "sunpack.coordinator.scan_session._native_batch_file_head_facts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("worker facts must avoid reopen")),
+    )
+    monkeypatch.setattr(
+        "sunpack.coordinator.output_scan_policy.DirectoryScanner.inventory_file_indices",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python inventory filtering must be bypassed")),
+    )
+    monkeypatch.setattr(
+        "sunpack.coordinator.output_scan_policy.DirectoryScanner.snapshot_from_entries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python snapshot rebuilding must be bypassed")),
+    )
+
+    policy = OutputScanPolicy(_config())
+    roots = policy.scan_roots_from_outputs(
+        [str(tmp_path)],
+        inventories={str(tmp_path.resolve()).lower(): inventory},
+    )
+    session = policy.take_scan_session(roots)
+    facts = session.file_head_facts_for_paths([str(archive)], magic_size=16)
+
+    row = facts[next(iter(facts))]
+    assert row["magic"] == payload[:16]
+    assert row["mtime_ns"] == stat.st_mtime_ns
+
+
+def test_worker_inventory_fused_snapshot_preserves_raw_entries_and_rejects_escape(tmp_path):
+    allowed = tmp_path / "nested.bin"
+    allowed.write_bytes(b"PK\x03\x04payload")
+    stat = allowed.stat()
+    rows = [
+        [0, allowed.name, "", stat.st_size, stat.st_size, 0, 0, 0, 0, 1, 1,
+         1, stat.st_mtime_ns, b"PK\x03\x04payload".hex()],
+        [1, "ignored.tmp", "", 4, 4, 0, 0, 0, 0, 1, 1,
+         1, stat.st_mtime_ns, b"temp".hex()],
+        [2, "escape.bin", "../escape.bin", 4, 4, 0, 0, 0, 0, 1, 1,
+         1, stat.st_mtime_ns, b"evil".hex()],
+    ]
+    worker_result = {
+        "status": "ok",
+        "verified_manifest": {
+            "version": 3,
+            "validated": True,
+            "inventory": {
+                "complete": True,
+                "file_count": 3,
+                "dir_count": 0,
+                "total_size": stat.st_size + 8,
+                "identity_paths": True,
+            },
+            "native_rows": worker_manifest_from_rows(
+                rows, True, 3, 0, stat.st_size + 8, True,
+            ),
+        },
+    }
+    inventory = collect_output_inventory(str(tmp_path), worker_result)
+    config = with_detection_pipeline(precheck=[{
+        "name": "blacklist",
+        "enabled": True,
+        "blocked_extensions": [".tmp"],
+    }])
+    policy = OutputScanPolicy(config)
+
+    roots = policy.scan_roots_from_outputs(
+        [str(tmp_path)],
+        inventories={str(tmp_path.resolve()).lower(): inventory},
+    )
+    session = policy.take_scan_session(roots)
+    snapshot = session.snapshot_for_directory(str(tmp_path))
+    filtered_paths = set(snapshot.native_snapshot.materialize_columns()[0])
+    raw_paths = set(snapshot.raw_native_snapshot.materialize_columns()[0])
+
+    assert str(allowed) in filtered_paths
+    assert str(tmp_path / "ignored.tmp") not in filtered_paths
+    assert str(tmp_path / "ignored.tmp") in raw_paths
+    assert str(tmp_path.parent / "escape.bin") not in raw_paths
+
+
+def test_worker_inventory_fused_snapshot_applies_mtime_after_directory_projection(tmp_path):
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    old_file = old_dir / "old.zip"
+    new_file = new_dir / "new.zip"
+    old_file.write_bytes(b"old")
+    new_file.write_bytes(b"new")
+    cutoff_ns = 2_000_000_000
+    rows = [
+        [0, "old/old.zip", "", 3, 3, 0, 0, 0, 0, 1, 1, 1, cutoff_ns - 1, b"old".hex()],
+        [1, "new/new.zip", "", 3, 3, 0, 0, 0, 0, 1, 1, 1, cutoff_ns, b"new".hex()],
+    ]
+    worker_result = {
+        "status": "ok",
+        "verified_manifest": {
+            "version": 3,
+            "validated": True,
+            "inventory": {
+                "complete": True,
+                "file_count": 2,
+                "dir_count": 2,
+                "total_size": 6,
+                "identity_paths": True,
+            },
+            "native_rows": worker_manifest_from_rows(rows, True, 2, 2, 6, True),
+        },
+    }
+    inventory = collect_output_inventory(str(tmp_path), worker_result)
+    config = {
+        "filesystem": {
+            "scan_filters": [
+                {"name": "mtime_range", "enabled": True, "gte": cutoff_ns},
+            ],
+        },
+    }
+    policy = OutputScanPolicy(config)
+
+    roots = policy.scan_roots_from_outputs(
+        [str(tmp_path)],
+        inventories={str(tmp_path.resolve()).lower(): inventory},
+    )
+    snapshot = policy.take_scan_session(roots).snapshot_for_directory(str(tmp_path))
+    paths, is_dirs, _sizes, _mtimes = snapshot.native_snapshot.materialize_columns()
+    filtered = dict(zip(paths, is_dirs))
+    raw_paths = set(snapshot.raw_native_snapshot.materialize_columns()[0])
+
+    assert str(old_file) not in filtered
+    assert filtered[str(old_dir)] is True
+    assert filtered[str(new_file)] is False
+    assert {str(old_file), str(new_file)} <= raw_paths

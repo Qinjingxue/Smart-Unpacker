@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import shutil
+import statistics
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sunpack.coordinator.engine import PipelineEngine
+import sunpack.analysis.engine as analysis_engine_module
+import sunpack.analysis.structure_pipeline.modules.rar as rar_analysis_module
+import sunpack.coordinator.scan_session as scan_session_module
+from sunpack.analysis.config import enabled_fuzzy_module_configs
+from sunpack.analysis.fuzzy_pipeline.registry import get_fuzzy_analysis_module_registry
+from sunpack.coordinator.scan_session import DetectionScanSession
+from sunpack.filesystem.directory_scanner import DirectoryScanner
+from sunpack.support.output_inventory import OutputInventory
+from tests.performance_split_archives.split_archive_pressure import pressure_config
+
+
+TimingMap = dict[str, list[float]]
+
+
+def _measure(timings: TimingMap, label: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    started = time.perf_counter()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        timings[label].append(time.perf_counter() - started)
+
+
+def _wrap(
+    owner: Any,
+    name: str,
+    timings: TimingMap,
+    label: str | None = None,
+    *,
+    phase_timer: Callable[..., Any] | None = None,
+) -> None:
+    if owner is None or not hasattr(owner, name):
+        return
+    original = getattr(owner, name)
+
+    def measured(*args: Any, **kwargs: Any) -> Any:
+        if phase_timer is not None:
+            kwargs.setdefault("phase_timer", phase_timer)
+        return _measure(timings, label or name, original, *args, **kwargs)
+
+    setattr(owner, name, measured)
+
+
+def _child(owner: Any, name: str) -> Any | None:
+    return getattr(owner, name, None) if owner is not None else None
+
+
+class RequestRuntimeProfiler:
+    """Attach probes to the per-submission runtime used by current PipelineEngine."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.request_timings: list[TimingMap] = []
+        self._active_timings: TimingMap | None = None
+        self._factory_restore: tuple[Any, Callable[..., Any]] | None = None
+        self._global_restores: list[tuple[Any, str, Any]] = []
+        self._global_installed: set[tuple[int, str]] = set()
+
+    def install(self, runner: PipelineEngine) -> None:
+        original_factory = runner._request_runtime_factory
+        self._factory_restore = (runner, original_factory)
+
+        def profiled_factory(*args: Any, **kwargs: Any):
+            runtime = original_factory(*args, **kwargs)
+            if not self.enabled:
+                self._active_timings = None
+                return runtime
+            timings: TimingMap = defaultdict(list)
+            self.request_timings.append(timings)
+            self._active_timings = timings
+            self._instrument_runtime(runtime, timings)
+            return runtime
+
+        runner._request_runtime_factory = profiled_factory
+        self._install_global_method(DirectoryScanner, "inventory_file_indices", "output_inventory_filter")
+        self._install_global_method(DirectoryScanner, "snapshot_from_entries", "output_snapshot_filter")
+        self._install_global_method(
+            DirectoryScanner,
+            "snapshot_from_output_inventory",
+            "output_inventory_snapshot_fused",
+        )
+        self._install_global_method(DetectionScanSession, "file_head_facts_for_paths", "output_file_head_facts")
+        self._install_global_method(DetectionScanSession, "prime_snapshot", "output_prime_snapshot")
+        self._install_global_method(OutputInventory, "from_value", "output_inventory_from_value")
+        self._install_global_callable(
+            scan_session_module,
+            "_native_batch_file_head_facts",
+            "output_native_batch_file_head_facts",
+        )
+        self._install_global_callable(
+            analysis_engine_module,
+            "run_signature_prepass",
+            "planning_signature_prepass",
+        )
+        self._install_global_callable(
+            rar_analysis_module,
+            "probe_rar_view",
+            "planning_rar_native_probe",
+        )
+
+    def restore(self) -> None:
+        if self._factory_restore is not None:
+            runner, factory = self._factory_restore
+            runner._request_runtime_factory = factory
+            self._factory_restore = None
+        while self._global_restores:
+            owner, name, descriptor = self._global_restores.pop()
+            setattr(owner, name, descriptor)
+        self._global_installed.clear()
+        self._active_timings = None
+
+    def _install_global_method(self, owner: type, name: str, label: str) -> None:
+        descriptor = owner.__dict__[name]
+        original = getattr(owner, name)
+        self._global_restores.append((owner, name, descriptor))
+
+        if isinstance(descriptor, classmethod):
+            def measured_classmethod(_cls, *args: Any, **kwargs: Any):
+                return self._measure_active(label, original, *args, **kwargs)
+
+            setattr(owner, name, classmethod(measured_classmethod))
+            return
+        if isinstance(descriptor, staticmethod):
+            def measured_staticmethod(*args: Any, **kwargs: Any):
+                return self._measure_active(label, original, *args, **kwargs)
+
+            setattr(owner, name, staticmethod(measured_staticmethod))
+            return
+
+        def measured_method(instance, *args: Any, **kwargs: Any):
+            return self._measure_active(label, original, instance, *args, **kwargs)
+
+        setattr(owner, name, measured_method)
+
+    def _install_global_callable(self, owner: Any, name: str, label: str) -> None:
+        key = (id(owner), name)
+        if key in self._global_installed:
+            return
+        self._global_installed.add(key)
+        original = getattr(owner, name)
+        self._global_restores.append((owner, name, original))
+
+        def measured(*args: Any, **kwargs: Any):
+            return self._measure_active(label, original, *args, **kwargs)
+
+        setattr(owner, name, measured)
+
+    def _measure_active(self, label: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        timings = self._active_timings
+        if timings is None:
+            return function(*args, **kwargs)
+        return _measure(timings, label, function, *args, **kwargs)
+
+    def _instrument_runtime(self, runtime: Any, timings: TimingMap) -> None:
+        @contextlib.contextmanager
+        def phase(name: str, **_details: Any):
+            started = time.perf_counter()
+            try:
+                yield
+            finally:
+                timings[f"phase_{name}"].append(time.perf_counter() - started)
+
+        scanner = runtime.task_scanner
+        planning = runtime.input_planning_stage
+        batch = runtime.batch_runner
+        extractor = runtime.extractor
+        output_scan = runtime.output_scan_policy
+
+        _wrap(scanner, "direct_file_tasks", timings, "pipeline_direct_scan")
+        _wrap(scanner, "scan_targets", timings, "pipeline_nested_scan")
+
+        _wrap(planning, "plan_tasks", timings, "input_planning")
+        for name, label in (
+            ("_planning_task_groups", "planning_group_tasks"),
+            ("_task_max_workers", "planning_worker_count"),
+            ("_plan_task_group", "planning_plan_group"),
+            ("_plan_task_to_tasks", "planning_plan_task"),
+            ("_report_cache_key", "planning_cache_key"),
+            ("_get_or_create_report", "planning_get_report"),
+            ("_analyze_task", "planning_analyze_task"),
+            ("_tasks_from_report", "planning_tasks_from_report"),
+            ("_record_report", "planning_record_report"),
+            ("_record_planning_state", "planning_record_state"),
+        ):
+            _wrap(planning, name, timings, label)
+        _wrap(_child(planning, "analyzer"), "analyze", timings, "planning_analyzer_analyze")
+        analyzer = _child(planning, "analyzer")
+        _wrap(analyzer, "_view_for_source", timings, "planning_analyzer_build_view")
+        analysis_engine = _child(analyzer, "_engine")
+        for name, label in (
+            ("analyze_path", "planning_engine_analyze_path"),
+            ("analyze_view", "planning_engine_analyze_view"),
+            ("_build_single_view", "planning_engine_build_view"),
+            ("_run_fuzzy_pipeline", "planning_fuzzy_pipeline"),
+            ("_selected_structure_modules", "planning_select_structure_modules"),
+            ("_run_structure_modules", "planning_structure_modules"),
+            ("_selected_evidences", "planning_select_evidences"),
+            ("_embedded_scan_enabled", "planning_embedded_scan_check"),
+        ):
+            _wrap(analysis_engine, name, timings, label)
+        if analysis_engine is not None:
+            fuzzy_registry = get_fuzzy_analysis_module_registry()
+            for module_name in enabled_fuzzy_module_configs(analysis_engine.config):
+                module = fuzzy_registry.get(module_name)
+                if module is not None:
+                    self._install_global_callable(
+                        module,
+                        "analyze",
+                        f"planning_fuzzy_module_{module_name}",
+                    )
+        if analysis_engine is not None and hasattr(analysis_engine, "_run_module"):
+            original_run_module = analysis_engine._run_module
+
+            def timed_run_module(module, *args: Any, **kwargs: Any):
+                module_name = str(getattr(getattr(module, "spec", None), "name", "unknown") or "unknown")
+                return _measure(
+                    timings,
+                    f"planning_structure_module_{module_name}",
+                    original_run_module,
+                    module,
+                    *args,
+                    **kwargs,
+                )
+
+            analysis_engine._run_module = timed_run_module
+
+        _wrap(batch, "execute", timings, "batch_execute")
+        for name, label in (
+            ("prepare_tasks", "batch_prepare"),
+            ("_skip_tasks_inside_batch_outputs", "batch_skip_inside_outputs"),
+            ("_execute_ready_tasks", "batch_execute_ready"),
+            ("collect_result", "batch_collect_result"),
+            ("_inspect_tasks_before_extract", "batch_password_preflight"),
+            ("_inspect_resource_profiles", "batch_resource_profiles"),
+        ):
+            _wrap(batch, name, timings, label)
+        _wrap(_child(batch, "relation_stage"), "resolve_tasks", timings, "batch_relation_resolve")
+        _wrap(runtime.rename_scheduler, "build_output_dir_resolver", timings, "batch_output_dir_resolver")
+        password_contexts = _child(batch, "directory_password_contexts")
+        _wrap(password_contexts, "annotate", timings, "batch_directory_password_annotate")
+        _wrap(password_contexts, "remember", timings, "batch_directory_password_remember")
+        resource_inspector = _child(batch, "resource_inspector")
+        _wrap(resource_inspector, "inspect", timings, "batch_resource_inspect")
+        _wrap(resource_inspector, "record_estimated_single_task_profile", timings, "batch_resource_record")
+        reporter = runtime.reporter
+        _wrap(reporter, "begin_round", timings, "batch_report_begin_round")
+        _wrap(reporter, "task_finished", timings, "batch_report_task_finished")
+
+        _wrap(output_scan, "scan_roots_from_outputs", timings, "output_scan")
+        _wrap(output_scan, "_snapshot_from_inventory", timings, "output_snapshot_from_inventory")
+        _wrap(output_scan, "_inventory_files", timings, "output_inventory_files")
+        _wrap(output_scan, "_is_within_root", timings, "output_inventory_path_check")
+        _wrap(output_scan, "take_scan_session", timings, "output_take_scan_session")
+
+        _wrap(extractor, "inspect", timings, "health_password_preflight")
+        _wrap(extractor, "extract", timings, "extract_total", phase_timer=phase)
+        _wrap(extractor, "close", timings, "extractor_close")
+        _wrap(_child(extractor, "password_resolver"), "resolve", timings, "password_resolver")
+        password_tester = _child(extractor, "password_tester")
+        _wrap(password_tester, "test_without_password", timings, "password_without")
+        _wrap(_child(password_tester, "native_password_tester"), "try_passwords", timings, "password_candidates")
+        metadata_scanner = _child(extractor, "metadata_scanner")
+        _wrap(metadata_scanner, "scan", timings, "filename_metadata")
+        _wrap(metadata_scanner, "scan_for_task", timings, "filename_metadata_for_task")
+        sevenzip = _child(extractor, "sevenzip_runner")
+        _wrap(sevenzip, "run_extract", timings, "sevenzip_worker")
+        _wrap(sevenzip, "_run_persistent_worker", timings, "worker_persistent_roundtrip")
+        _wrap(sevenzip, "_read_persistent_worker_result", timings, "worker_read_protocol")
+        _wrap(batch.verifier, "verify", timings, "verify_total", phase_timer=phase)
+
+
+def _generated_output_path(output_base: Path, kind: str, index: int) -> Path:
+    if kind not in {"warmup", "run"}:
+        raise ValueError(f"unsupported output kind: {kind}")
+    return output_base.parent / f"{output_base.name}-{kind}-{index}"
+
+
+def _cleanup_generated_output(path: Path, output_base: Path) -> None:
+    resolved = path.resolve()
+    parent = output_base.resolve().parent
+    expected_prefix = f"{output_base.name}-"
+    if resolved.parent != parent or not resolved.name.startswith(expected_prefix):
+        raise ValueError(f"refusing to clean non-generated output: {resolved}")
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
+def _output_summary(root: Path) -> dict[str, int]:
+    files = [path for path in root.rglob("*") if path.is_file()]
+    return {"file_count": len(files), "total_bytes": sum(path.stat().st_size for path in files)}
+
+
+def _timing_medians(request_timings: list[TimingMap]) -> dict[str, float]:
+    labels = sorted({label for timings in request_timings for label in timings})
+    return {
+        label: round(statistics.median(sum(timings.get(label, [])) for timings in request_timings), 6)
+        for label in labels
+    }
+
+
+def _timing_totals(timings: TimingMap) -> dict[str, float]:
+    return {label: round(sum(values), 6) for label, values in sorted(timings.items())}
+
+
+def _derived_timing(timings: TimingMap) -> dict[str, float]:
+    total = lambda label: sum(timings.get(label, []))
+    batch_direct_children = sum(total(label) for label in (
+        "batch_report_begin_round",
+        "batch_prepare",
+        "batch_directory_password_annotate",
+        "batch_output_dir_resolver",
+        "batch_skip_inside_outputs",
+        "batch_execute_ready",
+        "batch_collect_result",
+        "batch_directory_password_remember",
+        "output_scan",
+    ))
+    output_snapshot_children = sum(total(label) for label in (
+        "output_inventory_files",
+        "output_inventory_path_check",
+        "output_inventory_filter",
+        "output_inventory_snapshot_fused",
+        "output_file_head_facts",
+        "output_snapshot_filter",
+    ))
+    planning_children = sum(total(label) for label in (
+        "planning_group_tasks",
+        "planning_worker_count",
+        "planning_plan_group",
+    ))
+    return {
+        "batch_overhead_excluding_extract": round(total("batch_execute") - total("extract_total"), 6),
+        "batch_parent_python_residual": round(total("batch_execute") - batch_direct_children, 6),
+        "execute_ready_overhead_excluding_extract_verify": round(
+            total("batch_execute_ready") - total("extract_total") - total("verify_total"),
+            6,
+        ),
+        "output_snapshot_python_residual": round(
+            total("output_snapshot_from_inventory") - output_snapshot_children,
+            6,
+        ),
+        "planning_parent_residual": round(total("input_planning") - planning_children, 6),
+        "planning_analysis_residual": round(
+            total("planning_analyzer_analyze") - total("planning_engine_analyze_path"),
+            6,
+        ),
+    }
+
+
+def _derived_timing_medians(request_timings: list[TimingMap]) -> dict[str, float]:
+    derived = [_derived_timing(timings) for timings in request_timings]
+    labels = sorted({label for row in derived for label in row})
+    return {
+        label: round(statistics.median(row[label] for row in derived), 6)
+        for label in labels
+    }
+
+
+def _run_profile_once(
+    runner: PipelineEngine,
+    archive: str,
+    output: Path,
+    output_base: Path,
+    config: dict[str, Any],
+    *,
+    keep_output: bool,
+):
+    _cleanup_generated_output(output, output_base)
+    config["output"]["root"] = str(output)
+    started = time.perf_counter()
+    try:
+        summary = runner.submit([os.path.abspath(archive)], direct=True).result().summary
+        return time.perf_counter() - started, summary, _output_summary(output)
+    finally:
+        if not keep_output:
+            _cleanup_generated_output(output, output_base)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("archive")
+    parser.add_argument("output")
+    parser.add_argument("--password", action="append", default=[])
+    parser.add_argument("--generated-wrong-passwords", type=int, default=0)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--recursive-rounds", type=int, default=2)
+    parser.add_argument("--keep-output", action="store_true")
+    parser.add_argument("--json-output", type=Path)
+    args = parser.parse_args()
+
+    passwords = [f"sunpack-wrong-{index:04d}" for index in range(max(0, args.generated_wrong_passwords))]
+    passwords.extend(args.password)
+    config = pressure_config(passwords=passwords, scheduler_profile="single")
+    config.setdefault("cli", {}).update({"quiet": True, "verbose": False})
+    config["recursive_extract"] = {"mode": "fixed", "max_rounds": max(1, args.recursive_rounds)}
+    output_base = Path(args.output).resolve()
+    config["output"] = {"root": str(output_base)}
+    runner = PipelineEngine(config).start()
+    profiler = RequestRuntimeProfiler()
+    profiler.install(runner)
+    generated_outputs: list[Path] = []
+
+    def run_once(output: Path):
+        generated_outputs.append(output)
+        return _run_profile_once(
+            runner,
+            args.archive,
+            output,
+            output_base,
+            config,
+            keep_output=args.keep_output,
+        )
+
+    elapsed_samples: list[float] = []
+    summaries = []
+    output_summaries = []
+    try:
+        for index in range(max(0, args.warmup)):
+            run_once(_generated_output_path(output_base, "warmup", index))
+        profiler.enabled = True
+        for index in range(max(1, args.repeat)):
+            elapsed, summary, output_summary = run_once(_generated_output_path(output_base, "run", index))
+            elapsed_samples.append(elapsed)
+            summaries.append(summary)
+            output_summaries.append(output_summary)
+    finally:
+        profiler.restore()
+        runner.close()
+        if not args.keep_output:
+            for output in generated_outputs:
+                _cleanup_generated_output(output, output_base)
+
+    last_summary = summaries[-1]
+    report = {
+        "elapsed_seconds": [round(value, 6) for value in elapsed_samples],
+        "elapsed_median_seconds": round(statistics.median(elapsed_samples), 6),
+        "successful_runs": sum(summary.success_count > 0 for summary in summaries),
+        "success_count": last_summary.success_count,
+        "failed_tasks": [str(item) for item in last_summary.failed_tasks],
+        "failures": [getattr(item, "to_dict", lambda: str(item))() for item in last_summary.failures],
+        "timing_medians_seconds": _timing_medians(profiler.request_timings),
+        "timing_seconds_by_run": [_timing_totals(timings) for timings in profiler.request_timings],
+        "derived_timing_seconds_by_run": [_derived_timing(timings) for timings in profiler.request_timings],
+        "derived_timing_medians_seconds": _derived_timing_medians(profiler.request_timings),
+        "timing_calls": {
+            label: [len(timings.get(label, [])) for timings in profiler.request_timings]
+            for label in sorted({label for timings in profiler.request_timings for label in timings})
+        },
+        "output_summaries": output_summaries,
+        "recursive_rounds": max(1, args.recursive_rounds),
+        "outputs_cleaned": not args.keep_output,
+        "output_base": str(output_base),
+    }
+    rendered = json.dumps(report, ensure_ascii=False, sort_keys=True, default=str)
+    print("PROFILE_JSON=" + rendered)
+    if args.json_output:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if all(summary.success_count > 0 for summary in summaries) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

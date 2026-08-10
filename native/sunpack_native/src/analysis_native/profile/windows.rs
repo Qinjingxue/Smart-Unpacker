@@ -14,14 +14,18 @@ where
         config.max_sample_bytes,
     );
     let mut samples = Vec::new();
-    let mut sample_data = Vec::new();
+    let mut ngram_profile = NgramProfile::new();
     for (offset, size) in windows {
         let data = read_at(offset, size)?;
         if data.is_empty() {
             continue;
         }
-        samples.push(window_profile(offset, &data));
-        sample_data.push((offset, data));
+        samples.push(window_profile(
+            offset,
+            &data,
+            &mut ngram_profile,
+            config.max_ngram_sample_bytes,
+        ));
     }
 
     let entropy_profile = entropy_profile_py(
@@ -40,7 +44,7 @@ where
     let run_profile = run_profile_py(py, &samples)?;
     let ngram_sketch = ngram_sketch_py(
         py,
-        &sample_data,
+        &ngram_profile,
         config.ngram_top_k.max(1),
         config.max_ngram_sample_bytes,
     )?;
@@ -107,11 +111,59 @@ fn sample_windows(
         .collect()
 }
 
-fn window_profile(offset: u64, data: &[u8]) -> WindowProfile {
+fn window_profile(
+    offset: u64,
+    data: &[u8],
+    ngram: &mut NgramProfile,
+    max_ngram_sample_bytes: usize,
+) -> WindowProfile {
     let mut counts = [0usize; 256];
-    for byte in data {
-        counts[*byte as usize] += 1;
+    let mut zero = empty_run();
+    let mut ff = empty_run();
+    let mut repeated = empty_run();
+    let mut current_byte = None;
+    let mut current_start = 0usize;
+    let mut current_len = 0usize;
+    let ngram_len = data
+        .len()
+        .min(max_ngram_sample_bytes.saturating_sub(ngram.sampled_bytes));
+    let mut previous_ngram_byte = None;
+    for (index, value) in data.iter().copied().enumerate() {
+        counts[value as usize] += 1;
+        if Some(value) == current_byte {
+            current_len += 1;
+        } else {
+            record_run(&mut repeated, current_byte, current_start, current_len, offset);
+            if current_byte == Some(0) {
+                record_run(&mut zero, current_byte, current_start, current_len, offset);
+            } else if current_byte == Some(0xff) {
+                record_run(&mut ff, current_byte, current_start, current_len, offset);
+            }
+            current_byte = Some(value);
+            current_start = index;
+            current_len = 1;
+        }
+        if index < ngram_len {
+            ngram.byte_counts[value as usize] += 1;
+            if let Some(previous) = previous_ngram_byte {
+                ngram.bigram_counts[(previous as usize) * 256 + value as usize] += 1;
+            }
+            previous_ngram_byte = Some(value);
+        }
     }
+    record_run(&mut repeated, current_byte, current_start, current_len, offset);
+    if current_byte == Some(0) {
+        record_run(&mut zero, current_byte, current_start, current_len, offset);
+    } else if current_byte == Some(0xff) {
+        record_run(&mut ff, current_byte, current_start, current_len, offset);
+    }
+    let ngram_chunk = &data[..ngram_len];
+    for (name, magic) in MAGIC_PATTERNS {
+        for relative in find_all(ngram_chunk, magic) {
+            ngram.magic_hits.push((*name, offset + relative as u64));
+        }
+    }
+    ngram.sampled_bytes += ngram_len;
     let size = data.len();
     let printable = (0x20..0x7f).map(|value| counts[value]).sum::<usize>();
     let controls = (0x00..0x20).map(|value| counts[value]).sum::<usize>() + counts[0x7f];
@@ -127,7 +179,16 @@ fn window_profile(offset: u64, data: &[u8]) -> WindowProfile {
         zero_ratio: counts[0] as f64 / size as f64,
         ff_ratio: counts[0xff] as f64 / size as f64,
         distinct_bytes: counts.iter().filter(|count| **count > 0).count(),
-        run_profile: window_run_profile(offset, data),
+        run_profile: WindowRunProfile {
+            longest_zero_run: zero,
+            longest_ff_run: ff,
+            longest_repeated_byte_run: repeated,
+            tail_run: RunRecord {
+                byte: current_byte,
+                offset: current_byte.map(|_| offset + current_start as u64),
+                length: current_len,
+            },
+        },
     }
 }
 

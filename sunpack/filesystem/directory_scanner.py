@@ -86,6 +86,25 @@ class DirectoryScanner:
             options["whitelist_rules"],
         ))
 
+    @classmethod
+    def snapshot_from_output_inventory(
+        cls,
+        root_path: str,
+        inventory,
+        *,
+        config: dict | None = None,
+    ) -> DirectorySnapshot | None:
+        scanner = cls(root_path, config=config)
+        options = scanner._native_inventory_filter_options()
+        if options is None:
+            return None
+        native_snapshot, raw_native_snapshot = inventory.build_directory_snapshots(options)
+        return DirectorySnapshot.from_native(
+            scanner.root_path,
+            native_snapshot,
+            raw_native_snapshot,
+        )
+
     def _native_inventory_filter_options(self) -> dict | None:
         return self._native_filter_options()
 

@@ -132,7 +132,7 @@ def _json_events(text: str) -> list[dict[str, Any]]:
 
 def _expand_manifest(payload: dict[str, Any]) -> None:
     manifest = payload.get("verified_manifest")
-    if not isinstance(manifest, dict) or int(manifest.get("version", 0) or 0) != 2:
+    if not isinstance(manifest, dict) or int(manifest.get("version", 0) or 0) != 3:
         return
     rows = manifest.get("rows")
     if not isinstance(rows, list):

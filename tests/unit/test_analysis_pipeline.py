@@ -84,6 +84,26 @@ def _tar_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def test_clean_whole_input_formats_skip_fuzzy_from_shared_structure_evidence(tmp_path):
+    payload = b"clean payload" * 32
+    cases = {
+        "zip": _zip_bytes(tmp_path),
+        "7z": _seven_zip_bytes(),
+        "rar4": _rar4_bytes(),
+        "rar5": _rar5_bytes(),
+        "gzip": gzip.compress(payload),
+        "bzip2": bz2.compress(payload),
+        "xz": lzma.compress(payload),
+        "zstd": zstandard.ZstdCompressor().compress(payload),
+    }
+    for name, data in cases.items():
+        path = _write_bytes(tmp_path / f"clean-{name}.bin", data)
+        report = AnalysisEngine().analyze_path(str(path))
+
+        assert report.selected, name
+        assert report.fuzzy == {}, name
+
+
 def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     zip_start = len(b"shell-a")
     zip_data = _zip_bytes(tmp_path)
@@ -388,7 +408,7 @@ def test_7z_next_header_crc_damage_keeps_boundary_but_lowers_integrity(tmp_path)
     ],
     ids=["zip", "seven-zip"],
 )
-def test_analysis_scheduler_reads_archives_across_split_volumes(
+def test_analysis_scheduler_skips_fuzzy_for_clean_archives_across_split_volumes(
     tmp_path, extension, build_data, split_at, expected_format, confidence
 ):
     data = build_data(tmp_path)
@@ -400,8 +420,7 @@ def test_analysis_scheduler_reads_archives_across_split_volumes(
     report = AnalysisEngine().analyze_paths([str(first), str(second)])
     evidence = {item.format: item for item in report.evidences}[expected_format]
 
-    assert report.fuzzy["binary_profile"]["sampled"] is True
-    assert "warnings" not in report.fuzzy
+    assert report.fuzzy == {}
     assert evidence.status == "extractable"
     assert evidence.confidence == confidence
     assert evidence.segments[0].start_offset == 0

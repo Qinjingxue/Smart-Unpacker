@@ -79,6 +79,9 @@ struct ExtractOutputItemTrace {
     bool crc_verified = false;
     bool done = false;
     bool failed = false;
+    bool has_mtime_ns = false;
+    unsigned long long mtime_ns = 0;
+    std::vector<unsigned char> magic;
     std::wstring path;
     std::wstring output_path;
 };

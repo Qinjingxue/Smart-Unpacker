@@ -68,7 +68,7 @@ class _FakeSevenZipRunner:
             "item_count": 1 if self.include_output_counts else 0,
             "archive_type": name,
             "verified_manifest": {
-                "version": 2,
+                "version": 3,
                 "validated": True,
                 "file_count": 1,
                 "item_count": 1,
@@ -80,7 +80,7 @@ class _FakeSevenZipRunner:
                     "identity_paths": True,
                 },
                 "native_rows": worker_manifest_from_rows(
-                    [[0, f"{name}.txt", "", 2, 2, 0, 0, 0, 0, 1, 1]],
+                    [[0, f"{name}.txt", "", 2, 2, 0, 0, 0, 0, 1, 1, 1, 1, "6f6b"]],
                     True, 1, 0, 2, True,
                 ),
             },

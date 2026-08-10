@@ -580,6 +580,17 @@ std::string hresult_hex(int value) {
     return stream.str();
 }
 
+std::string bytes_hex(const std::vector<unsigned char>& bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const unsigned char value : bytes) {
+        result.push_back(digits[value >> 4]);
+        result.push_back(digits[value & 0x0f]);
+    }
+    return result;
+}
+
 std::string input_trace_json(const sunpack::sevenzip::ExtractInputTrace& trace) {
     return std::string("{") +
         "\"mode\":\"" + json_escape(wide_to_utf8(trace.mode)) +
@@ -688,12 +699,15 @@ std::string verified_manifest_json(const sunpack::sevenzip::ExtractArchiveResult
             "," + std::string(item.has_output_crc32 ? "1" : "0") +
             "," + std::to_string(item.output_crc32) +
             "," + std::string(item.crc_verified ? "1" : "0") +
-            "," + std::string(item.done ? "1" : item.failed ? "2" : "0") + "]";
+            "," + std::string(item.done ? "1" : item.failed ? "2" : "0") +
+            "," + std::string(item.has_mtime_ns ? "1" : "0") +
+            "," + std::to_string(item.mtime_ns) +
+            ",\"" + bytes_hex(item.magic) + "\"]";
     }
     rows += "]";
     const bool inventory_complete = validated && result.output_inventory_complete && file_count == result.files_written;
     return std::string("{") +
-        "\"version\":2,\"source\":\"sevenzip_worker_extract\"" +
+        "\"version\":3,\"source\":\"sevenzip_worker_extract\"" +
         ",\"validated\":" + std::string(validated ? "true" : "false") +
         ",\"item_count\":" + std::to_string(result.item_count) +
         ",\"file_count\":" + std::to_string(file_count) +

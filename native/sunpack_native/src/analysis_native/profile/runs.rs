@@ -133,24 +133,6 @@ fn record_run(
     target.length = length;
 }
 
-fn tail_run(offset: u64, data: &[u8]) -> RunRecord {
-    let Some(byte) = data.last().copied() else {
-        return empty_run();
-    };
-    let mut length = 0usize;
-    for value in data.iter().rev() {
-        if *value != byte {
-            break;
-        }
-        length += 1;
-    }
-    RunRecord {
-        byte: Some(byte),
-        offset: Some(offset + data.len().saturating_sub(length) as u64),
-        length,
-    }
-}
-
 fn max_run(left: &RunRecord, right: &RunRecord) -> RunRecord {
     if right.length > left.length {
         right.clone()

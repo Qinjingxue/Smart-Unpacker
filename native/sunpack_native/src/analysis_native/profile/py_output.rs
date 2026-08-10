@@ -221,12 +221,12 @@ fn run_profile_py<'py>(py: Python<'py>, samples: &[WindowProfile]) -> PyResult<B
 
 fn ngram_sketch_py<'py>(
     py: Python<'py>,
-    sample_data: &[(u64, Vec<u8>)],
+    profile: &NgramProfile,
     top_k: usize,
     max_sample_bytes: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    if sample_data.is_empty() || max_sample_bytes == 0 {
+    if profile.sampled_bytes == 0 || max_sample_bytes == 0 {
         dict.set_item("sampled_bytes", 0usize)?;
         dict.set_item("byte_histogram_top", PyList::empty(py))?;
         dict.set_item("bigram_top", PyList::empty(py))?;
@@ -234,32 +234,10 @@ fn ngram_sketch_py<'py>(
         dict.set_item("magic_like_density_per_mb", 0.0)?;
         return Ok(dict);
     }
-    let mut byte_counts = [0usize; 256];
-    let mut bigram_counts: HashMap<[u8; 2], usize> = HashMap::new();
-    let mut magic_hits = Vec::new();
-    let mut scanned = 0usize;
-    for (offset, data) in sample_data {
-        if scanned >= max_sample_bytes {
-            break;
-        }
-        let read_len = data.len().min(max_sample_bytes - scanned);
-        let chunk = &data[..read_len];
-        for byte in chunk {
-            byte_counts[*byte as usize] += 1;
-        }
-        for pair in chunk.windows(2) {
-            *bigram_counts.entry([pair[0], pair[1]]).or_insert(0) += 1;
-        }
-        for (name, magic) in MAGIC_PATTERNS {
-            for relative in find_all(chunk, magic) {
-                magic_hits.push((*name, *offset + relative as u64));
-            }
-        }
-        scanned += read_len;
-    }
+    let scanned = profile.sampled_bytes;
 
     let byte_top = PyList::empty(py);
-    let mut byte_pairs = byte_counts
+    let mut byte_pairs = profile.byte_counts
         .iter()
         .copied()
         .enumerate()
@@ -276,20 +254,28 @@ fn ngram_sketch_py<'py>(
     }
 
     let bigram_top = PyList::empty(py);
-    let total_bigrams = bigram_counts.values().sum::<usize>();
-    let mut bigram_pairs = bigram_counts.into_iter().collect::<Vec<_>>();
+    let total_bigrams = profile.bigram_counts.iter().sum::<usize>();
+    let mut bigram_pairs = profile
+        .bigram_counts
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, count)| *count > 0)
+        .collect::<Vec<_>>();
     bigram_pairs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     for (value, count) in bigram_pairs.into_iter().take(top_k) {
         let item = PyDict::new(py);
-        item.set_item("ngram_hex", format!("{:02x}{:02x}", value[0], value[1]))?;
-        item.set_item("values", vec![value[0], value[1]])?;
+        let first = (value / 256) as u8;
+        let second = (value % 256) as u8;
+        item.set_item("ngram_hex", format!("{first:02x}{second:02x}"))?;
+        item.set_item("values", vec![first, second])?;
         item.set_item("count", count)?;
         item.set_item("ratio", count as f64 / total_bigrams.max(1) as f64)?;
         bigram_top.append(item)?;
     }
 
     let magic_list = PyList::empty(py);
-    for (name, offset) in magic_hits.iter().take(top_k) {
+    for (name, offset) in profile.magic_hits.iter().take(top_k) {
         let item = PyDict::new(py);
         item.set_item("name", name)?;
         item.set_item("offset", *offset)?;
@@ -302,7 +288,7 @@ fn ngram_sketch_py<'py>(
     dict.set_item(
         "magic_like_density_per_mb",
         if scanned > 0 {
-            magic_hits.len() as f64 * 1024.0 * 1024.0 / scanned as f64
+            profile.magic_hits.len() as f64 * 1024.0 * 1024.0 / scanned as f64
         } else {
             0.0
         },

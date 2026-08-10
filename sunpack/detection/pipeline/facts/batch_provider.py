@@ -35,6 +35,7 @@ class BatchFactProvider:
         facts_by_key = self.scan_session.file_head_facts_for_paths(
             paths,
             magic_size=16 if "file.magic_bytes" in fact_names else 0,
+            copy_results=False,
         )
         for bag in fact_bags:
             path = bag.get("file.path") or ""

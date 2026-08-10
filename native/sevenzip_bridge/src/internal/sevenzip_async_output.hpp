@@ -48,6 +48,9 @@ public:
         HRESULT hresult = S_OK;
         int win32_error = 0;
         bool has_output_crc32 = false;
+        bool has_mtime_ns = false;
+        UInt64 mtime_ns = 0;
+        std::vector<unsigned char> magic;
         bool failed = false;
         bool closed = false;
 
@@ -191,13 +194,15 @@ public:
     void close_file(
         const FileStatePtr& file,
         UInt32 output_crc32,
-        bool has_output_crc32
+        bool has_output_crc32,
+        std::vector<unsigned char> magic
     ) noexcept {
         if (!file) {
             return;
         }
         file->output_crc32 = output_crc32;
         file->has_output_crc32 = has_output_crc32;
+        file->magic = std::move(magic);
         try {
             std::unique_lock<std::mutex> lock(mutex_);
             producer_cv_.wait(lock, [this] {
@@ -394,6 +399,17 @@ private:
         if (file->handle != INVALID_HANDLE_VALUE) {
             const HANDLE handle = file->handle;
             file->handle = INVALID_HANDLE_VALUE;
+            FILETIME last_write{};
+            if (GetFileTime(handle, nullptr, nullptr, &last_write)) {
+                ULARGE_INTEGER ticks{};
+                ticks.LowPart = last_write.dwLowDateTime;
+                ticks.HighPart = last_write.dwHighDateTime;
+                constexpr UInt64 unix_epoch_100ns = 116444736000000000ULL;
+                if (ticks.QuadPart >= unix_epoch_100ns) {
+                    file->mtime_ns = (ticks.QuadPart - unix_epoch_100ns) * 100ULL;
+                    file->has_mtime_ns = true;
+                }
+            }
             if (!CloseHandle(handle)) {
                 const DWORD error = GetLastError();
                 record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));

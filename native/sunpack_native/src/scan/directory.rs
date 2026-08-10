@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use regex::{RegexSet, RegexSetBuilder};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -76,6 +76,8 @@ struct OutputFileRecord {
     output_crc32: Option<u32>,
     crc_ok: Option<bool>,
     status: u8,
+    mtime_ns: Option<u64>,
+    magic: Vec<u8>,
 }
 
 #[pyclass(module = "sunpack_native", frozen)]
@@ -228,6 +230,58 @@ impl NativeOutputInventory {
         (paths, sizes)
     }
 
+    fn file_head_columns(
+        &self,
+        py: Python<'_>,
+    ) -> (Vec<String>, Vec<u64>, Vec<Option<u64>>, Vec<Py<PyBytes>>) {
+        let mut paths = Vec::with_capacity(self.files.len());
+        let mut sizes = Vec::with_capacity(self.files.len());
+        let mut mtimes_ns = Vec::with_capacity(self.files.len());
+        let mut magics = Vec::with_capacity(self.files.len());
+        for item in self.files.iter() {
+            let path = item.abs_path.clone().unwrap_or_else(|| {
+                let relative = item.output_path.as_ref().unwrap_or(&item.path);
+                path_to_string(&Path::new(&self.root).join(relative))
+            });
+            paths.push(path);
+            sizes.push(item.size);
+            mtimes_ns.push(item.mtime_ns);
+            magics.push(PyBytes::new(py, &item.magic).unbind());
+        }
+        (paths, sizes, mtimes_ns, magics)
+    }
+
+    #[pyo3(signature = (
+        patterns, prune_dir_globs, blocked_extensions, blocked_file_names,
+        size_ranges, mtime_ranges, whitelist_rules
+    ))]
+    fn build_directory_snapshots(
+        &self,
+        py: Python<'_>,
+        patterns: Vec<String>,
+        prune_dir_globs: Vec<String>,
+        blocked_extensions: Vec<String>,
+        blocked_file_names: Vec<String>,
+        size_ranges: Vec<NumericRangeTuple>,
+        mtime_ranges: Vec<NumericRangeTuple>,
+        whitelist_rules: Vec<WhitelistRuleTuple>,
+    ) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
+        let options = DirectoryScanOptions::new(
+            patterns,
+            prune_dir_globs,
+            blocked_extensions,
+            blocked_file_names,
+            size_ranges,
+            mtime_ranges,
+            whitelist_rules,
+        )?;
+        let records = build_inventory_snapshot_views(&self.root, self.files.as_ref(), &options);
+        Ok((
+            Py::new(py, NativeDirectorySnapshot::from_records(records.filtered))?,
+            Py::new(py, NativeDirectorySnapshot::from_records(records.raw))?,
+        ))
+    }
+
     fn materialize_files(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
         self.files
             .iter()
@@ -270,6 +324,10 @@ fn output_file_dict(py: Python<'_>, item: &OutputFileRecord) -> PyResult<Py<PyDi
                 _ => "unverified",
             },
         )?;
+    }
+    dict.set_item("magic", PyBytes::new(py, &item.magic))?;
+    if let Some(mtime_ns) = item.mtime_ns {
+        dict.set_item("mtime_ns", mtime_ns)?;
     }
     Ok(dict.unbind())
 }
@@ -754,6 +812,164 @@ pub(crate) fn filter_inventory_file_indices(
         .collect())
 }
 
+fn build_inventory_snapshot_views(
+    root_path: &str,
+    files: &[OutputFileRecord],
+    options: &DirectoryScanOptions,
+) -> DirectoryScanRecords {
+    let root = lexical_normalize_path(Path::new(root_path));
+    let mut raw_files = Vec::with_capacity(files.len());
+    let mut pre_mtime_accepted = Vec::with_capacity(files.len());
+    let mut size_accepted_split_families = HashSet::new();
+    let mut size_deferred = Vec::new();
+    let mut directory_rejections = HashMap::new();
+
+    for item in files {
+        let Some(path) = inventory_file_path(&root, item) else {
+            continue;
+        };
+        let record = DirectoryEntryRecord {
+            path: path_to_string(&path),
+            is_dir: false,
+            size: Some(item.size),
+            mtime_ns: item.mtime_ns,
+        };
+        let index = raw_files.len();
+        raw_files.push(record);
+        pre_mtime_accepted.push(false);
+
+        if file_rejected_by_path(&path, &root, options)
+            || file_under_rejected_directory(&path, &root, options, &mut directory_rejections)
+        {
+            continue;
+        }
+        let family_keys = if options.size_ranges.is_empty() {
+            Vec::new()
+        } else {
+            crate::relations::relations_size_filter_split_family_keys(
+                path.to_string_lossy().as_ref(),
+            )
+        };
+        if numeric_ranges_allow(&options.size_ranges, Some(item.size)) {
+            pre_mtime_accepted[index] = true;
+            size_accepted_split_families.extend(family_keys);
+        } else if !family_keys.is_empty() {
+            size_deferred.push((index, family_keys));
+        }
+    }
+    for (index, family_keys) in size_deferred {
+        pre_mtime_accepted[index] = family_keys
+            .iter()
+            .any(|key| size_accepted_split_families.contains(key));
+    }
+
+    let mut raw = ancestor_directory_records(&root, raw_files.iter());
+    raw.extend(raw_files.iter().cloned());
+
+    // Directory entries are derived before mtime filtering to preserve the ordered
+    // Python filter semantics: a directory can remain after its last file is rejected
+    // by the final mtime stage.
+    let mut filtered = ancestor_directory_records(
+        &root,
+        raw_files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| pre_mtime_accepted[index].then_some(record)),
+    );
+    filtered.extend(
+        raw_files
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                (pre_mtime_accepted[index]
+                    && numeric_ranges_allow(&options.mtime_ranges, record.mtime_ns))
+                .then_some(record)
+            }),
+    );
+    DirectoryScanRecords { filtered, raw }
+}
+
+fn inventory_file_path(root: &Path, item: &OutputFileRecord) -> Option<PathBuf> {
+    let raw_path = item.output_path.as_ref().unwrap_or(&item.path);
+    let path = Path::new(raw_path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let normalized = lexical_normalize_path(&joined);
+    (normalized != root && path_is_within_root(&normalized, root)).then_some(normalized)
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+#[cfg(windows)]
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    let mut path_components = path.components();
+    root.components().all(|root_component| {
+        path_components.next().is_some_and(|path_component| {
+            path_component.as_os_str().to_string_lossy().to_lowercase()
+                == root_component.as_os_str().to_string_lossy().to_lowercase()
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+}
+
+fn ancestor_directory_records<'a>(
+    root: &Path,
+    files: impl Iterator<Item = &'a DirectoryEntryRecord>,
+) -> Vec<DirectoryEntryRecord> {
+    let mut directories = HashSet::new();
+    for file in files {
+        let mut parent = Path::new(&file.path).parent();
+        while let Some(directory) = parent {
+            if directory == root || !path_is_within_root(directory, root) {
+                break;
+            }
+            directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+    let mut directories: Vec<PathBuf> = directories.into_iter().collect();
+    directories.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| {
+                left.to_string_lossy()
+                    .to_lowercase()
+                    .cmp(&right.to_string_lossy().to_lowercase())
+            })
+    });
+    directories
+        .into_iter()
+        .map(|path| DirectoryEntryRecord {
+            path: path_to_string(&path),
+            is_dir: true,
+            size: None,
+            mtime_ns: None,
+        })
+        .collect()
+}
+
 #[pyfunction]
 pub(crate) fn list_regular_files_in_directory(
     py: Python<'_>,
@@ -881,6 +1097,12 @@ pub(crate) fn output_inventory_from_serialized(
             },
             crc_ok: py_dict_bool(dict, "crc_ok")?,
             status,
+            mtime_ns: py_dict_u64(dict, "mtime_ns")?,
+            magic: dict
+                .get_item("magic")?
+                .map(|value| value.extract::<Vec<u8>>())
+                .transpose()?
+                .unwrap_or_default(),
         });
     }
     Ok(NativeOutputInventory {
@@ -913,9 +1135,9 @@ pub(crate) fn worker_manifest_from_rows(
     let mut files = Vec::with_capacity(rows.len());
     for row in rows {
         let row = row.bind(py);
-        if row.len() != 11 {
+        if row.len() != 14 {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "worker manifest row must contain 11 columns",
+                "worker manifest v3 row must contain 14 columns",
             ));
         }
         let path = row.get_item(1)?.extract::<String>()?;
@@ -939,6 +1161,12 @@ pub(crate) fn worker_manifest_from_rows(
                 .transpose()?,
             crc_ok: Some(row.get_item(9)?.extract::<u8>()? != 0),
             status,
+            mtime_ns: if row.get_item(11)?.extract::<u8>()? != 0 {
+                Some(row.get_item(12)?.extract::<u64>()?)
+            } else {
+                None
+            },
+            magic: decode_hex_bytes(&row.get_item(13)?.extract::<String>()?)?,
         });
     }
     Ok(NativeWorkerManifest {
@@ -983,6 +1211,26 @@ fn py_dict_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String
         return Ok(None);
     }
     Ok(Some(value.str()?.to_string_lossy().into_owned()))
+}
+
+fn decode_hex_bytes(value: &str) -> PyResult<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "worker manifest magic must contain complete hex bytes",
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("worker manifest magic is not ASCII hex")
+            })?;
+            u8::from_str_radix(text, 16).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("worker manifest magic is not valid hex")
+            })
+        })
+        .collect()
 }
 
 fn py_dict_u64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>> {
@@ -1122,6 +1370,8 @@ fn walk_output_tree(root: &Path, current: &Path, stats: &mut OutputTreeStats) {
             output_crc32: None,
             crc_ok: None,
             status: 0,
+            mtime_ns: metadata_mtime_ns(&metadata),
+            magic: Vec::new(),
         });
     }
 }

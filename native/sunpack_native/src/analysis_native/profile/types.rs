@@ -41,6 +41,24 @@ struct WindowAnomaly {
     approximate: bool,
 }
 
+struct NgramProfile {
+    byte_counts: [usize; 256],
+    bigram_counts: Vec<usize>,
+    magic_hits: Vec<(&'static str, u64)>,
+    sampled_bytes: usize,
+}
+
+impl NgramProfile {
+    fn new() -> Self {
+        Self {
+            byte_counts: [0; 256],
+            bigram_counts: vec![0; 256 * 256],
+            magic_hits: Vec::new(),
+            sampled_bytes: 0,
+        }
+    }
+}
+
 struct LogicalVolume {
     path: String,
     start: u64,
