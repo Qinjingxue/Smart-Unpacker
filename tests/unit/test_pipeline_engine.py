@@ -9,6 +9,7 @@ from sunpack.config.schema import normalize_config
 from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 from sunpack.contracts.results import RunSummary
 from sunpack.coordinator.engine import PipelineEngine
+from sunpack.support.archive_sessions import get_archive_session
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -63,6 +64,11 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
     monkeypatch.setattr(engine_module, "PostProcessActions", FakePostProcessActions)
     monkeypatch.setattr(
         engine_module,
+        "release_archive_sessions_under",
+        lambda path: call_order.append("release") or captured.setdefault("released", []).append(path),
+    )
+    monkeypatch.setattr(
+        engine_module,
         "notify_shell_directories_updated",
         lambda paths: call_order.append("notify") or captured.update(shell_refresh_paths=list(paths)),
     )
@@ -80,8 +86,60 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
 
     assert captured["archives_to_clean"] == [[str(final_outer / "inner.7z")]]
     assert captured["flatten_targets"] == [str(final_outer / "inner")]
+    assert captured["released"] == [str(final_outer / "inner")]
     assert captured["shell_refresh_paths"] == [str(final_outer / "inner.7z"), str(final_outer / "inner")]
-    assert call_order == ["postprocess", "notify"]
+    assert call_order == ["release", "postprocess", "notify"]
+
+
+def test_finalize_does_not_release_output_sessions_when_flatten_is_disabled(tmp_path, monkeypatch):
+    target = tmp_path / "output"
+    release_calls = []
+
+    class FakePostProcessActions:
+        def __init__(self, _config):
+            pass
+
+        def apply(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(engine_module, "PostProcessActions", FakePostProcessActions)
+    monkeypatch.setattr(engine_module, "release_archive_sessions_under", release_calls.append)
+    monkeypatch.setattr(engine_module, "notify_shell_directories_updated", lambda _paths: None)
+    response = PipelineResponse(
+        request_id="request",
+        summary=RunSummary(success_count=1, failed_tasks=[], processed_keys=[]),
+        artifacts=PipelineArtifacts(flatten_targets=(str(target),)),
+    )
+
+    engine_module._finalize_response(
+        {"post_extract": {"flatten_single_directory": False}},
+        response,
+    )
+
+    assert release_calls == []
+
+
+def test_finalize_releases_cached_reader_before_flattening_output(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    wrapper = output / "wrapper"
+    wrapper.mkdir(parents=True)
+    payload = wrapper / "payload.bin"
+    payload.write_bytes(b"payload")
+    assert bytes(get_archive_session(str(payload)).read_at(0, 7)) == b"payload"
+    monkeypatch.setattr(engine_module, "notify_shell_directories_updated", lambda _paths: None)
+    response = PipelineResponse(
+        request_id="request",
+        summary=RunSummary(success_count=1, failed_tasks=[], processed_keys=[]),
+        artifacts=PipelineArtifacts(flatten_targets=(str(output),)),
+    )
+
+    engine_module._finalize_response(
+        {"post_extract": {"archive_cleanup_mode": "keep", "flatten_single_directory": True}},
+        response,
+    )
+
+    assert (output / "payload.bin").read_bytes() == b"payload"
+    assert not wrapper.exists()
 
 
 def test_independent_submission_completes_while_another_request_is_blocked(tmp_path):

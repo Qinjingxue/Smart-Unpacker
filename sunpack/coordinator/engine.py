@@ -38,7 +38,7 @@ from sunpack.rename.scheduler import OutputReservationRegistry, RenameScheduler
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
-from sunpack.support.archive_sessions import clear_archive_sessions
+from sunpack.support.archive_sessions import clear_archive_sessions, release_archive_sessions_under
 from sunpack.detection.options import DetectionOptions
 
 
@@ -600,6 +600,7 @@ class _RequestRuntime:
         current_roots = list(dict.fromkeys(all_targets))
         current_tasks = self.task_scanner.direct_file_tasks(current_roots) if submission.direct else None
         current_scan_session = None
+        extractor_closed = False
 
         try:
             while current_tasks if submission.direct else current_roots:
@@ -668,11 +669,15 @@ class _RequestRuntime:
                 failures=response.summary.failures,
             )
             if not submission.defer_postprocess:
+                self.extractor.set_progress_callback(None)
+                self.extractor.close()
+                extractor_closed = True
                 _finalize_response(self.config, response)
             return response
         finally:
-            self.extractor.set_progress_callback(None)
-            self.extractor.close()
+            if not extractor_closed:
+                self.extractor.set_progress_callback(None)
+                self.extractor.close()
             self.input_planning_stage.clear_report_cache()
 
     def _new_recursion(self) -> RecursionController:
@@ -715,6 +720,10 @@ def _finalize_response(
     ]
     flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
     shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
+    flatten_enabled = config.get("post_extract", {}).get("flatten_single_directory", True)
+    if flatten_enabled:
+        for target in flatten_targets:
+            release_archive_sessions_under(target)
     PostProcessActions(config).apply(
         archives_to_clean=archives_to_clean,
         flatten_targets=flatten_targets,

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import sunpack.coordinator.engine as engine_module
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.extraction import ExtractionResult
@@ -66,6 +67,18 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
     ]))
 
     engine = PipelineEngine(config)
+    call_order = []
+    postprocess_actions = engine_module.PostProcessActions
+
+    class TrackedPostProcessActions:
+        def __init__(self, *args, **kwargs):
+            self._delegate = postprocess_actions(*args, **kwargs)
+
+        def apply(self, **kwargs):
+            call_order.append("postprocess")
+            return self._delegate.apply(**kwargs)
+
+    monkeypatch.setattr(engine_module, "PostProcessActions", TrackedPostProcessActions)
 
     def fake_extract(task, out_dir, runtime_scheduler=None):
         out_path = tmp_path / "payload" / "inside.txt"
@@ -79,9 +92,16 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
         )
 
     def configure(runtime):
+        original_close = runtime.extractor.close
+
+        def tracked_close():
+            original_close()
+            call_order.append("close")
+
         monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
         monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda task: task)
         monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
+        monkeypatch.setattr(runtime.extractor, "close", tracked_close)
 
     _configure_request_runtime(engine, configure)
 
@@ -93,6 +113,7 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
     assert not archive.exists()
     assert (tmp_path / "payload" / "inside.txt").exists()
     assert (tmp_path / "failed_log.txt").exists() is False
+    assert call_order[:2] == ["close", "postprocess"]
 
 
 def test_pipeline_runner_exposes_recent_passwords_without_password_manager():

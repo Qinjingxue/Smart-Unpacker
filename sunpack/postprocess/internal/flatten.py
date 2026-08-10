@@ -8,4 +8,8 @@ class DirectoryFlattener:
 
     def flatten_dirs(self, base: str):
         print(self.i18n.t("cleanup.flatten"))
-        _native_flatten_single_branch_directories(str(base))
+        result = _native_flatten_single_branch_directories(str(base))
+        if isinstance(result, dict):
+            for error in result.get("errors") or []:
+                print(self.i18n.t("cleanup.flatten_failed", error=str(error)))
+        return result
