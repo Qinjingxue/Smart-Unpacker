@@ -112,7 +112,8 @@ def prompt_for_passwords(
         # carriage return behind.  That is still an empty submitted line, not
         # a password.  Do not strip other whitespace: it may intentionally be
         # part of a password.
-        if not line.rstrip("\r\n"):
+        line = line.rstrip("\r\n")
+        if not line:
             break
         passwords.append(line)
     return dedupe_passwords(passwords)
