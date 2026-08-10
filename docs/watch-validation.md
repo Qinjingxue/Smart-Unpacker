@@ -1,6 +1,6 @@
 # Watch validation
 
-`tools/watch_validation.py` exercises the real Windows observer, NTFS file identity/USN probes,
+`tests/integration/watch_validation.py` exercises the real Windows observer, NTFS file identity/USN probes,
 adaptive quiet policy, and exclusive-readiness gate. It does not run extraction; each candidate
 declared ready is validated as a complete ZIP instead.
 
@@ -12,7 +12,7 @@ writer handle, and a 5,000-event storm.
 Run both permission modes from a normal terminal:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\watch_validation.py `
+.\.venv\Scripts\python.exe tests\integration\watch_validation.py `
   --mode matrix `
   --output .sunpack_watch_validation\latest
 ```

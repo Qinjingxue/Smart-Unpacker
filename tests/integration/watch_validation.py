@@ -26,7 +26,7 @@ from typing import Callable
 _BASE_SITE_PACKAGES = Path(sys.base_prefix) / "Lib" / "site-packages"
 if _BASE_SITE_PACKAGES.is_dir() and str(_BASE_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(_BASE_SITE_PACKAGES))
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -699,7 +699,7 @@ def run_matrix(args: argparse.Namespace) -> int:
     report, _ = run_suite(non_elevated_args)
     elevated_output = output_dir / "elevated.json"
     elevated_output.unlink(missing_ok=True)
-    launched = relaunch_elevated(_elevated_argv(args, elevated_output), cwd=str(Path(__file__).resolve().parents[1]))
+    launched = relaunch_elevated(_elevated_argv(args, elevated_output), cwd=str(Path(__file__).resolve().parents[2]))
     elevated_report = None
     if launched:
         deadline = time.monotonic() + args.elevation_timeout

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def _load_tool():
-    path = Path(__file__).resolve().parents[2] / "tools" / "watch_validation.py"
+    path = Path(__file__).resolve().parents[2] / "tests" / "integration" / "watch_validation.py"
     spec = importlib.util.spec_from_file_location("sunpack_watch_validation_tool", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

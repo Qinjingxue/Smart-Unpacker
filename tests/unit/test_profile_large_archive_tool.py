@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.profile_large_archive import (
+from tests.performance.profile_large_archive import (
     RequestRuntimeProfiler,
     _cleanup_generated_output,
     _generated_output_path,
