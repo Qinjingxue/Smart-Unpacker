@@ -369,3 +369,11 @@ def test_real_archive_edge_disguised_single_archives_extract(tmp_path, archive_f
     case = FACTORY.create(tmp_path, f"disguised_single_{archive_format}", archive_format, disguise_ext=".mix")
 
     assert_success(case)
+
+
+@pytest.mark.parametrize("archive_format", archive_format_params({"7z"}))
+def test_real_archive_edge_numeric_extension_single_archives_extract(tmp_path, archive_format):
+    require_7z()
+    case = FACTORY.create(tmp_path, f"numeric_extension_single_{archive_format}", archive_format, disguise_ext=".456")
+
+    assert_success(case)

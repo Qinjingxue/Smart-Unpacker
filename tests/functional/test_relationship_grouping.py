@@ -6,7 +6,7 @@ import pytest
 
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.scanner import ScanOrchestrator
-from tests.helpers.pipeline_engine import execute_pipeline
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -106,9 +106,9 @@ def _scan_parts(root: Path) -> dict[str, list[str]]:
             },
         ),
         (
-            "missing first volume is not treated as an extractable group",
+            "missing first volume remains grouped for backend validation",
             ["losthead.7z.002", "losthead.7z.003"],
-            {},
+            {"losthead.7z.002": ["losthead.7z.002", "losthead.7z.003"]},
         ),
         (
             "fake disguised part files are ignored without real head",
@@ -152,7 +152,7 @@ def test_disguised_sfx_companion_groups_with_disguised_parts_not_noise(tmp_path)
     }
 
 
-def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
+def test_missing_middle_split_volume_remains_a_relation_hint_for_detection(tmp_path):
     root = tmp_path / "missing_middle"
     _write_files(root, ["gap.7z.001", "gap.7z.002", "gap.7z.004"])
 
@@ -163,14 +163,15 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
     assert gap.get("relation.split_missing_reason") == "missing_middle"
     assert gap.get("relation.split_missing_indices") == [3]
 
-    summary = execute_pipeline(SCAN_CONFIG, str(root))
+    provider = ArchiveTaskProvider(SCAN_CONFIG)
+    filtered = provider._filter_incomplete_split_groups([gap])
 
-    assert summary.success_count == 0
-    assert any("gap.7z.001" in item for item in summary.failed_tasks)
-    assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
+    assert filtered == [gap]
+    assert provider.failed_candidates == []
+    assert provider.failed_candidate_failures == []
 
 
-def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
+def test_missing_head_split_volume_remains_a_relation_hint_for_detection(tmp_path):
     root = tmp_path / "missing_head"
     _write_files(root, ["lost.7z.002", "lost.7z.003"])
 
@@ -181,11 +182,12 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
     assert lost.get("relation.split_missing_reason") == "missing_head"
     assert lost.get("relation.split_missing_indices") == [1]
 
-    summary = execute_pipeline(SCAN_CONFIG, str(root))
+    provider = ArchiveTaskProvider(SCAN_CONFIG)
+    filtered = provider._filter_incomplete_split_groups([lost])
 
-    assert summary.success_count == 0
-    assert any("lost.7z.002" in item for item in summary.failed_tasks)
-    assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
+    assert filtered == [lost]
+    assert provider.failed_candidates == []
+    assert provider.failed_candidate_failures == []
 
 
 def test_missing_head_split_volume_can_be_recovered_by_fuzzy_candidate(tmp_path):

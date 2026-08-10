@@ -3,7 +3,7 @@ from typing import Any
 
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
 from sunpack.contracts.detection import FactBag
-from sunpack.contracts.failures import FailureInfo, FailureKind
+from sunpack.contracts.failures import FailureInfo
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
@@ -13,7 +13,6 @@ from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task
 from sunpack.relations.knowledge import write_relation_task
 from sunpack.relations.scheduler import RelationsScheduler
-from sunpack.i18n import I18nContext
 
 
 STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst"}
@@ -25,8 +24,6 @@ class ArchiveTaskProvider:
     def __init__(self, config: dict[str, Any], detection_options: DetectionOptions | None = None):
         self.config = config
         self.detection_options = detection_options or DetectionOptions()
-        cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
-        self.i18n = I18nContext(cli_config.get("language"))
         self.detector = DetectionScheduler(config, options=self.detection_options)
         self._relations = RelationsScheduler()
         self.failed_candidates: list[str] = []
@@ -171,35 +168,8 @@ class ArchiveTaskProvider:
         return False
 
     def _filter_incomplete_split_groups(self, bags: list[FactBag]) -> list[FactBag]:
-        filtered = []
-        seen_failures = set()
-        for bag in bags:
-            if bag.get("relation.split_group_complete") is False:
-                message = self._incomplete_split_failure_message(bag)
-                if message not in seen_failures:
-                    seen_failures.add(message)
-                    self.failed_candidates.append(message)
-                    self.failed_candidate_failures.append(FailureInfo(
-                        kind=FailureKind.MISSING_VOLUME,
-                        stage="relation",
-                        message=message,
-                        message_key="failure.incomplete_split_suffix",
-                        user_action="Wait for or provide the missing split archive volumes.",
-                        details={
-                            "path": str(bag.get("candidate.entry_path") or bag.get("file.path") or ""),
-                            "split_family": str(bag.get("relation.split_family") or ""),
-                            "missing_reason": str(bag.get("relation.split_missing_reason") or ""),
-                            "missing_indices": list(bag.get("relation.split_missing_indices") or []),
-                        },
-                    ))
-                continue
-            filtered.append(bag)
-        return filtered
-
-    def _incomplete_split_failure_message(self, bag: FactBag) -> str:
-        path = bag.get("candidate.entry_path") or bag.get("file.path") or ""
-        name = os.path.basename(path) or str(bag.get("candidate.logical_name") or "split archive")
-        return self.i18n.t("failure.incomplete_split_suffix", name=name)
+        """Preserve relation hints without treating filename inference as failure evidence."""
+        return list(bags)
 
 
 def _write_initial_task_knowledge(task: ArchiveTask) -> None:

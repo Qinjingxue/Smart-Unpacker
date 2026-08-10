@@ -19,7 +19,8 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("candidate.entry_path", group.entry_path)
     bag.set("candidate.member_paths", all_paths)
     bag.set("candidate.logical_name", group.logical_name)
-    if group.split_volumes:
+    single_incomplete_volume = group.split_group_complete is False and len(group.split_volumes) == 1
+    if group.split_volumes and not single_incomplete_volume:
         format_hint = _split_format_hint(
             relation.split_family,
             group.split_volumes[0].style,
@@ -40,12 +41,22 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
             "strong" if format_hint_is_exact else "weak" if format_hint else "none",
         )
     else:
+        format_hint = (
+            _split_format_hint(
+                relation.split_family,
+                group.split_volumes[0].style,
+                group.split_volumes[0].prefix,
+            )
+            if group.split_volumes
+            else ""
+        )
         source_descriptor = ArchiveInputDescriptor.from_parts(
             archive_path=group.entry_path,
+            format_hint=format_hint,
             logical_name=group.logical_name,
         )
-        bag.set("relation.format_hint", "")
-        bag.set("relation.format_hint_confidence", "none")
+        bag.set("relation.format_hint", format_hint)
+        bag.set("relation.format_hint_confidence", "weak" if format_hint else "none")
     state = ArchiveState.from_archive_input(source_descriptor)
     bag.set("archive.input", source_descriptor.to_dict())
     bag.set("archive.state", state.to_dict())
