@@ -180,7 +180,11 @@ python -m pytest tests\unit\test_model_runtime.py
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Version 1.2.3
+.\scripts\build_windows.ps1 -RequireInstaller
 ```
+
+如果本机没有安装 Inno Setup 6，普通本地构建会给出警告并继续生成 portable ZIP；
+正式发行或需要安装器时使用 `-RequireInstaller`，缺少 `ISCC.exe` 将在耗时构建开始前失败。
 
 构建过程：
 

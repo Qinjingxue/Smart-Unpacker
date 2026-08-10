@@ -204,6 +204,7 @@ jobs:
           $buildArgs = @{
             SkipTests = $true
             NoPause = $true
+            RequireInstaller = $true
             Arch = "${{ matrix.arch }}"
             RepairSystem = "${{ matrix.repair_system }}"
           }

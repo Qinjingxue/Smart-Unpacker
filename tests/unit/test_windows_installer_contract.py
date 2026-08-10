@@ -107,9 +107,20 @@ def test_build_and_release_workflow_publish_portable_and_setup_packages():
 
     assert "-setup.exe" in build_script
     assert "Get-InnoSetupCompiler" in build_script
+    assert "-RequireInstaller" in build_script
+    assert "RequireInstaller = $true" in workflow
     assert "test_windows_installer.ps1" in workflow
     assert "Expected four lite release files" in workflow
     assert "*-setup.exe" in workflow
+
+
+def test_local_build_falls_back_to_portable_zip_when_inno_is_missing():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "if ($RequireInstaller)" in build_script
+    assert "Continuing with the portable ZIP only" in build_script
+    assert "$SkipInstaller = $true" in build_script
+    assert "-SkipInstaller and -RequireInstaller cannot be used together" in build_script
 
 
 def test_build_notes_handles_recreated_tags_and_noninteractive_log_output():

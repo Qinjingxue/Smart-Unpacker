@@ -2,6 +2,7 @@
 param(
     [switch]$SkipTests,
     [switch]$SkipInstaller,
+    [switch]$RequireInstaller,
     [switch]$Clean,
     [switch]$NoPause,
     [string]$Version,
@@ -15,6 +16,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $promptForAcceptanceTests = ($PSBoundParameters.Count -eq 0)
+
+if ($SkipInstaller -and $RequireInstaller) {
+    throw "-SkipInstaller and -RequireInstaller cannot be used together."
+}
 
 function Write-Step {
     param([string]$Message)
@@ -712,6 +717,7 @@ $releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $releaseInstallerName = "sunpack-windows-{0}-{1}-{2}-setup.exe" -f $buildArch, $repairSystemMode, $versionValue
 $releaseInstallerPath = Join-Path $releaseRoot $releaseInstallerName
 $runAcceptanceTests = -not $SkipTests
+$innoCompiler = $null
 
 if ($promptForAcceptanceTests) {
     $runAcceptanceTests = Confirm-AcceptanceTests
@@ -724,6 +730,15 @@ if ($repairSystemMode -eq "full") {
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
 if (-not $SkipInstaller) {
     Assert-PathExists -LiteralPath $installerScriptPath -Description "Inno Setup installer script"
+    try {
+        $innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath
+    } catch {
+        if ($RequireInstaller) {
+            throw
+        }
+        Write-Warning "Inno Setup 6 was not found. Continuing with the portable ZIP only. Install Inno Setup, pass -InnoCompilerPath, or use -RequireInstaller to make this a hard failure."
+        $SkipInstaller = $true
+    }
 }
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
@@ -909,7 +924,6 @@ Assert-PathExists -LiteralPath $releaseZipPath -Description "Release zip archive
 
 if (-not $SkipInstaller) {
     Write-Step "Creating Windows installer"
-    $innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath
     $installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
     Invoke-Native -FilePath $innoCompiler -Arguments @(
         "/Qp",
