@@ -16,6 +16,7 @@ use sha2::Sha256;
 
 const RAR4_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x00";
 const RAR5_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
+const RAR_INITIAL_PREFIX_SCAN: usize = 16 * 1024;
 const MAX_RAR_PREFIX_SCAN: usize = 1024 * 1024;
 const RAR3_KDF_ITERATIONS: u32 = 0x40000;
 const RAR4_MIN_HEADER_SIZE: usize = 7;
@@ -44,15 +45,32 @@ pub(crate) fn rar_fast_verify_passwords_with_reader(
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let data = match py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN)) {
+    let mut data = match py.detach(|| reader.read_at(0, RAR_INITIAL_PREFIX_SCAN)) {
         Ok(data) => data,
         Err(error) => {
-            let fault =
-                ReadFault::from_io(error, "read_at", 0, MAX_RAR_PREFIX_SCAN, 0, reader.len())
-                    .with_field("rar.header_prefix", FieldLocation::Head);
+            let fault = ReadFault::from_io(
+                error,
+                "read_at",
+                0,
+                RAR_INITIAL_PREFIX_SCAN,
+                0,
+                reader.len(),
+            )
+            .with_field("rar.header_prefix", FieldLocation::Head);
             return password_read_fault_status(py, &fault);
         }
     };
+    if rar5_prefix_needs_extended_scan(&data) {
+        data = match py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN)) {
+            Ok(data) => data,
+            Err(error) => {
+                let fault =
+                    ReadFault::from_io(error, "read_at", 0, MAX_RAR_PREFIX_SCAN, 0, reader.len())
+                        .with_field("rar.header_prefix", FieldLocation::Head);
+                return password_read_fault_status(py, &fault);
+            }
+        };
+    }
     verify_rar_data(py, &data, &candidates)
 }
 
@@ -88,11 +106,21 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let parsed = parse_ranges(ranges)?;
-    let data =
-        match read_prefix_from_ranges_field(&parsed, MAX_RAR_PREFIX_SCAN, "rar.header_prefix") {
+    let mut data =
+        match read_prefix_from_ranges_field(&parsed, RAR_INITIAL_PREFIX_SCAN, "rar.header_prefix") {
             Ok(data) => data,
             Err(fault) => return password_read_fault_status(py, &fault),
         };
+    if rar5_prefix_needs_extended_scan(&data) {
+        data = match read_prefix_from_ranges_field(
+            &parsed,
+            MAX_RAR_PREFIX_SCAN,
+            "rar.header_prefix",
+        ) {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
+    }
     verify_rar_data(py, &data, &candidates)
 }
 
@@ -107,12 +135,25 @@ pub(crate) fn rar_fast_verify_passwords_from_volumes(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let volumes = VolumeSet::new(parse_volumes(parts)?);
-    let data =
-        match py.detach(|| volumes.first_prefix_field(MAX_RAR_PREFIX_SCAN, "rar.header_prefix")) {
+    let mut data = match py.detach(|| {
+        volumes.first_prefix_field(RAR_INITIAL_PREFIX_SCAN, "rar.header_prefix")
+    }) {
+        Ok(data) => data,
+        Err(fault) => return password_read_fault_status(py, &fault),
+    };
+    if rar5_prefix_needs_extended_scan(&data) {
+        data = match py
+            .detach(|| volumes.first_prefix_field(MAX_RAR_PREFIX_SCAN, "rar.header_prefix"))
+        {
             Ok(data) => data,
             Err(fault) => return password_read_fault_status(py, &fault),
         };
+    }
     verify_rar_data(py, &data, &candidates)
+}
+
+fn rar5_prefix_needs_extended_scan(data: &[u8]) -> bool {
+    data.starts_with(RAR5_SIGNATURE) && find_rar5_encryption_header(data).is_none()
 }
 
 fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<Py<PyAny>> {
@@ -305,9 +346,9 @@ fn find_rar5_password_match(candidates: &[String], header: &Rar5EncryptionHeader
 
 struct Rar5EncryptionHeader {
     lg2_count: u8,
-    salt: Vec<u8>,
+    salt: [u8; 16],
     has_password_check: bool,
-    password_check: Vec<u8>,
+    password_check: [u8; 8],
 }
 
 fn find_rar5_encryption_header(data: &[u8]) -> Option<Rar5EncryptionHeader> {
@@ -327,10 +368,13 @@ fn find_rar5_encryption_header(data: &[u8]) -> Option<Rar5EncryptionHeader> {
         }
         let (header_type, after_type) = read_vint(data, after_size)?;
         let (header_flags, mut cursor) = read_vint(data, after_type)?;
-        if header_flags & 0x0001 != 0 {
-            let (_, next) = read_vint(data, cursor)?;
+        let extra_area_size = if header_flags & 0x0001 != 0 {
+            let (value, next) = read_vint(data, cursor)?;
             cursor = next;
-        }
+            value
+        } else {
+            0
+        };
         let data_area_size = if header_flags & 0x0002 != 0 {
             let (value, next) = read_vint(data, cursor)?;
             cursor = next;
@@ -341,9 +385,97 @@ fn find_rar5_encryption_header(data: &[u8]) -> Option<Rar5EncryptionHeader> {
         if header_type == 4 {
             return parse_rar5_encryption_body(data, cursor, crc_end);
         }
-        offset = crc_end.checked_add(data_area_size as usize)?;
+        if matches!(header_type, 2 | 3) && extra_area_size != 0 {
+            if let Some(header) =
+                parse_rar5_file_encryption_extra(data, cursor, crc_end, extra_area_size)
+            {
+                return Some(header);
+            }
+        }
+        offset = crc_end.checked_add(usize::try_from(data_area_size).ok()?)?;
     }
     None
+}
+
+fn parse_rar5_file_encryption_extra(
+    data: &[u8],
+    mut offset: usize,
+    header_end: usize,
+    extra_area_size: u64,
+) -> Option<Rar5EncryptionHeader> {
+    let (file_flags, next) = read_vint_bounded(data, offset, header_end)?;
+    offset = next;
+    let (_, next) = read_vint_bounded(data, offset, header_end)?; // Unpacked size.
+    offset = next;
+    let (_, next) = read_vint_bounded(data, offset, header_end)?; // Attributes.
+    offset = next;
+    if file_flags & 0x0002 != 0 {
+        offset = offset.checked_add(4)?;
+    }
+    if file_flags & 0x0004 != 0 {
+        offset = offset.checked_add(4)?;
+    }
+    let (_, next) = read_vint_bounded(data, offset, header_end)?; // Compression information.
+    offset = next;
+    let (_, next) = read_vint_bounded(data, offset, header_end)?; // Host OS.
+    offset = next;
+    let (name_size, next) = read_vint_bounded(data, offset, header_end)?;
+    offset = next.checked_add(usize::try_from(name_size).ok()?)?;
+
+    let extra_end = offset.checked_add(usize::try_from(extra_area_size).ok()?)?;
+    if extra_end > header_end || offset > data.len() {
+        return None;
+    }
+    while offset < extra_end {
+        let (record_size, record_body) = read_vint_bounded(data, offset, extra_end)?;
+        let record_end = record_body.checked_add(usize::try_from(record_size).ok()?)?;
+        if record_end > extra_end {
+            return None;
+        }
+        let (record_type, body) = read_vint_bounded(data, record_body, record_end)?;
+        if record_type == 1 {
+            return parse_rar5_file_encryption_body(data, body, record_end);
+        }
+        offset = record_end;
+    }
+    None
+}
+
+fn parse_rar5_file_encryption_body(
+    data: &[u8],
+    mut offset: usize,
+    end: usize,
+) -> Option<Rar5EncryptionHeader> {
+    let (version, next) = read_vint_bounded(data, offset, end)?;
+    if version != 0 {
+        return None;
+    }
+    offset = next;
+    let (flags, next) = read_vint_bounded(data, offset, end)?;
+    offset = next;
+    let lg2_count = *data.get(offset)?;
+    offset += 1;
+    if offset.checked_add(32)? > end {
+        return None;
+    }
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&data[offset..offset + 16]);
+    offset += 32; // Salt followed by the file encryption IV.
+
+    let has_password_check = flags & 0x0001 != 0;
+    let mut password_check = [0u8; 8];
+    if has_password_check {
+        if offset.checked_add(12)? > end {
+            return None;
+        }
+        password_check.copy_from_slice(&data[offset..offset + 8]);
+    }
+    Some(Rar5EncryptionHeader {
+        lg2_count,
+        salt,
+        has_password_check,
+        password_check,
+    })
 }
 
 fn parse_rar5_encryption_body(
@@ -363,17 +495,17 @@ fn parse_rar5_encryption_body(
     if offset + 16 > end {
         return None;
     }
-    let salt = data[offset..offset + 16].to_vec();
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&data[offset..offset + 16]);
     offset += 16;
     let has_password_check = flags & 0x0001 != 0;
-    let password_check = if has_password_check {
+    let mut password_check = [0u8; 8];
+    if has_password_check {
         if offset + 12 > end {
             return None;
         }
-        data[offset..offset + 8].to_vec()
-    } else {
-        Vec::new()
-    };
+        password_check.copy_from_slice(&data[offset..offset + 8]);
+    }
     Some(Rar5EncryptionHeader {
         lg2_count,
         salt,
@@ -383,7 +515,7 @@ fn parse_rar5_encryption_body(
 }
 
 fn rar5_password_check_matches(password: &str, header: &Rar5EncryptionHeader) -> bool {
-    if !header.has_password_check || header.password_check.len() != 8 {
+    if !header.has_password_check {
         return false;
     }
     let iterations = 1u32.checked_shl(header.lg2_count as u32).unwrap_or(0);
@@ -425,7 +557,7 @@ fn rar5_password_check_matches(password: &str, header: &Rar5EncryptionHeader) ->
     for (index, byte) in result2.iter().enumerate() {
         derived_check[index % 8] ^= *byte;
     }
-    derived_check == header.password_check.as_slice()
+    derived_check == header.password_check
 }
 
 fn status(
@@ -458,6 +590,13 @@ fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
         shift += 7;
     }
     None
+}
+
+fn read_vint_bounded(data: &[u8], offset: usize, end: usize) -> Option<(u64, usize)> {
+    if offset >= end || end > data.len() {
+        return None;
+    }
+    read_vint(&data[..end], offset)
 }
 
 fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {

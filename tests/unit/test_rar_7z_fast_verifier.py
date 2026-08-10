@@ -63,6 +63,59 @@ def _rar5_encryption_header_fixture() -> bytes:
     return b"Rar!\x1a\x07\x01\x00" + crc.to_bytes(4, "little") + crc_payload
 
 
+def _rar5_block(body: bytes) -> bytes:
+    crc_payload = _vint(len(body)) + body
+    crc = zlib.crc32(crc_payload) & 0xFFFFFFFF
+    return crc.to_bytes(4, "little") + crc_payload
+
+
+def _rar5_file_encryption_fixture(
+    *, packed_size: int = 753_226_912, leading_data_size: int = 0
+) -> bytes:
+    # Parameters extracted from a real RAR5 per-file encrypted entry whose
+    # password is "crom". The file data is deliberately omitted: password
+    # verification must finish from the plaintext file header alone.
+    salt = bytes.fromhex("ebc9f0345c53d730790576a35abf99d0")
+    iv = bytes.fromhex("1a8bc351cc9bff2935b6c42a6118ddf2")
+    password_check = bytes.fromhex("1fa1cce624d82f4a571ae6c8")
+    crypto_body = b"".join([
+        _vint(1),  # File encryption extra record type.
+        _vint(0),  # AES-256 encryption version.
+        _vint(3),  # Password check and tweaked checksums are present.
+        bytes([15]),
+        salt,
+        iv,
+        password_check,
+    ])
+    crypto_record = _vint(len(crypto_body)) + crypto_body
+    name = b"touming.123"
+    file_body = b"".join([
+        _vint(2),
+        _vint(3),  # Extra area and data area are present.
+        _vint(len(crypto_record)),
+        _vint(packed_size),
+        _vint(4),  # Unpacked CRC32 is present.
+        _vint(751_936_243),
+        _vint(0),
+        b"\0\0\0\0",
+        _vint(0x2180),
+        _vint(0),
+        _vint(len(name)),
+        name,
+        crypto_record,
+    ])
+    main_body = b"".join([_vint(1), _vint(0), _vint(0)])
+    prefix = b"Rar!\x1a\x07\x01\x00" + _rar5_block(main_body)
+    if leading_data_size:
+        skippable_body = b"".join([
+            _vint(6),
+            _vint(6),  # Data area and unknown-skippable flags.
+            _vint(leading_data_size),
+        ])
+        prefix += _rar5_block(skippable_body) + bytes(leading_data_size)
+    return prefix + _rar5_block(file_body)
+
+
 def _rar3_hp_encrypted_header_fixture() -> bytes:
     salt = bytes.fromhex("45109af8ab5f297a")
     encrypted_header = bytes.fromhex("adbf6c5385d7a40373e8f77d7b89d317")
@@ -113,6 +166,39 @@ def test_rar_fast_verifier_rejects_wrong_rar5_password_check(tmp_path):
     assert outcome.ok is False
     assert outcome.status == "no_match"
     assert outcome.attempts == 2
+
+
+def test_rar_fast_verifier_matches_rar5_file_password_check_without_payload(tmp_path):
+    archive = tmp_path / "file-encrypted.rar"
+    archive.write_bytes(_rar5_file_encryption_fixture())
+
+    outcome = RarFastVerifier().verify_batch(str(archive), ["wrong", "crom"])
+
+    assert outcome.ok is True
+    assert outcome.status == "match"
+    assert outcome.matched_index == 1
+    assert outcome.attempts == 2
+
+
+def test_rar_fast_verifier_rejects_wrong_rar5_file_passwords_without_payload(tmp_path):
+    archive = tmp_path / "file-encrypted.rar"
+    archive.write_bytes(_rar5_file_encryption_fixture())
+
+    outcome = RarFastVerifier().verify_batch(str(archive), ["wrong1", "wrong2"])
+
+    assert outcome.ok is False
+    assert outcome.status == "no_match"
+    assert outcome.attempts == 2
+
+
+def test_rar_fast_verifier_extends_prefix_only_when_file_check_is_later(tmp_path):
+    archive = tmp_path / "late-file-encrypted.rar"
+    archive.write_bytes(_rar5_file_encryption_fixture(leading_data_size=32 * 1024))
+
+    outcome = RarFastVerifier().verify_batch(str(archive), ["wrong", "crom"])
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
 
 
 def test_rar_fast_verifier_reads_complete_raw_split_stream(tmp_path):
