@@ -341,19 +341,25 @@ class WatchStateStore:
     def record_group_waiting(self, snapshot: WatchGroupSnapshot) -> None:
         previous = self.groups.get(snapshot.group_id)
         blockers = set(previous.blockers if previous else [])
-        blockers.add(BLOCKER_MISSING_VOLUME)
+        blockers.discard(BLOCKER_MISSING_VOLUME)
         self.groups[snapshot.group_id] = self._group_record(
             snapshot,
             previous=previous,
-            status="suspended",
+            status="waiting",
             blockers=sorted(blockers),
             last_attempted_fingerprint=snapshot.fingerprint,
             password_generation=previous.password_generation if previous else self.password_generation,
             failure_payload={
-                "kind": BLOCKER_MISSING_VOLUME,
+                "kind": "relation_waiting",
                 "stage": "relation",
-                "message": snapshot.missing_reason or "split archive is missing its first or an intermediate volume",
-                "details": {"missing_indices": list(snapshot.missing_indices)},
+                "message": "waiting for a split volume indicated by strong relation evidence",
+                "details": {
+                    "observed_reason": snapshot.missing_reason,
+                    "observed_indices": list(snapshot.missing_indices),
+                    "completeness_status": snapshot.completeness_status,
+                    "completeness_confidence": snapshot.completeness_confidence,
+                    "completeness_basis": list(snapshot.completeness_basis),
+                },
             },
         )
         self.save()

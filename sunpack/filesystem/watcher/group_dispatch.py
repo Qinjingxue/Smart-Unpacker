@@ -58,7 +58,7 @@ def plan_watch_dispatches(
         if any(path_key(member) in active_paths for member in snapshot.member_paths):
             deferred.append(candidate)
             continue
-        if not snapshot.has_head or snapshot.has_confirmed_gap:
+        if not snapshot.has_head or snapshot.should_wait_for_relation_gap:
             state.record_group_waiting(snapshot)
             waiting.append(snapshot)
             continue

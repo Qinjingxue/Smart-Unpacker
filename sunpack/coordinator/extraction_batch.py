@@ -1382,6 +1382,16 @@ class ExtractionBatchRunner:
                     details={**dict(failure.details), "repair": repair_status},
                 )
 
+        possible_missing_volume = _possible_missing_volume_failure(
+            task,
+            outcome.outcome_kind,
+            res.failure,
+            getattr(self, "i18n", I18nContext("en")),
+        )
+        if outcome.outcome_kind == OutcomeKind.FAILURE and possible_missing_volume is not None:
+            res.failure = possible_missing_volume
+            res.error = possible_missing_volume.message
+
         with self.context.lock:
             if outcome.outcome_kind == OutcomeKind.COMPLETE_SUCCESS:
                 self.context.success_count += 1
@@ -1413,14 +1423,26 @@ class ExtractionBatchRunner:
                         "recovery_report": recovery_report,
                         "selected_attempt": dict(outcome.recovery_rank),
                         "comparison": dict(outcome.comparison),
+                        **(
+                            {"warning": possible_missing_volume.to_dict()}
+                            if possible_missing_volume is not None
+                            else {}
+                        ),
                     })
+                if possible_missing_volume is not None:
+                    self.context.failures.append(possible_missing_volume)
                 self.context.processed_keys.add(task.key)
                 self.context.target_results.append(TargetRunResult(
                     input_path=task.main_path,
                     outcome_kind=OutcomeKind.PARTIAL_SUCCESS,
                     output_dir=out_dir,
                     verification=_verification_payload(outcome.verification) if outcome.verification is not None else {},
-                    error=str(res.error or ""),
+                    error=(
+                        possible_missing_volume.message
+                        if possible_missing_volume is not None
+                        else str(res.error or "")
+                    ),
+                    failure=possible_missing_volume,
                 ))
                 return out_dir
             self.context.failed_tasks.append(self._failure_message(task, outcome))
@@ -2186,6 +2208,83 @@ def _json_pretty_reports(config: dict[str, Any] | None) -> bool:
         return not bool(reporting.get("compact_json"))
     debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
     return bool(debug.get("pretty_json_reports", False))
+
+
+def _possible_missing_volume_failure(
+    task: ArchiveTask,
+    outcome_kind: OutcomeKind,
+    failure: FailureInfo | None,
+    i18n: I18nContext,
+) -> FailureInfo | None:
+    if outcome_kind == OutcomeKind.COMPLETE_SUCCESS or not _task_is_split_input(task):
+        return None
+    if failure is not None and failure.contains(FailureKind.MISSING_VOLUME):
+        return None
+
+    missing_indices = [int(value) for value in (task.fact_bag.get("relation.split_missing_indices") or [])]
+    missing_ranges = [
+        [int(value) for value in item]
+        for item in (task.fact_bag.get("relation.split_observed_missing_ranges") or [])
+        if isinstance(item, (list, tuple))
+    ]
+    observed_gap = bool(missing_indices or missing_ranges)
+    probe_suspected = _failure_has_possible_missing_volume_evidence(failure)
+
+    evidence = ""
+    if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
+        evidence = "partial_recovery_on_split_input"
+    elif probe_suspected:
+        evidence = "backend_possible_missing_volume"
+    elif observed_gap and failure is not None and failure.kind in {
+        FailureKind.UNKNOWN,
+        FailureKind.DAMAGED,
+    }:
+        evidence = "observed_volume_gap_after_archive_failure"
+    if not evidence:
+        return None
+
+    details: dict[str, Any] = {
+        "missing_volume_confirmed": False,
+        "evidence": evidence,
+        "partial_recovery": outcome_kind == OutcomeKind.PARTIAL_SUCCESS,
+    }
+    if missing_indices:
+        details["observed_missing_indices"] = missing_indices
+    if missing_ranges:
+        details["observed_missing_ranges"] = missing_ranges
+    if failure is not None:
+        details["original_failure_kind"] = failure.kind.value
+
+    return FailureInfo(
+        kind=FailureKind.MISSING_VOLUME,
+        stage="extraction_report",
+        message=i18n.t("failure.possible_missing_volume"),
+        message_key="failure.possible_missing_volume",
+        user_action="wait_for_volume",
+        repairable=False,
+        causes=(failure,) if failure is not None else (),
+        details=details,
+    )
+
+
+def _task_is_split_input(task: ArchiveTask) -> bool:
+    return bool(
+        task.split_info.is_split
+        or task.fact_bag.get("relation.is_split_related")
+        or len(task.all_parts or []) > 1
+    )
+
+
+def _failure_has_possible_missing_volume_evidence(failure: FailureInfo | None) -> bool:
+    if failure is None:
+        return False
+    details = failure.details if isinstance(failure.details, dict) else {}
+    read_error = details.get("read_error") if isinstance(details.get("read_error"), dict) else {}
+    if read_error.get("possible_missing_volume"):
+        return True
+    if details.get("missing_volume_confirmed") is False and details.get("evidence"):
+        return True
+    return any(_failure_has_possible_missing_volume_evidence(cause) for cause in failure.causes)
 
 
 def _json_text(payload: Any, *, pretty: bool = False) -> str:

@@ -211,6 +211,9 @@ class RunReporter:
                 coverage = item.get("archive_coverage") if isinstance(item.get("archive_coverage"), dict) else {}
                 completeness = _percent(coverage.get("completeness", item.get("completeness", 0.0)))
                 print(self.i18n.t("report.partial", archive=archive, completeness=completeness, coverage=_file_coverage(coverage)))
+                warning = FailureInfo.from_dict(item.get("warning"))
+                if warning is not None:
+                    print(self.i18n.t("report.partial_warning", warning=warning.message))
 
         structured_failures = list(failures or [])
         if failed_tasks:

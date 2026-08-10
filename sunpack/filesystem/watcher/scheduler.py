@@ -1014,6 +1014,45 @@ class WatchScheduler:
             *request.predicted_probe_dirs,
         ])
 
+        summary_failures = list(getattr(summary, "failures", []) or [])
+        if getattr(target_result, "failure", None) is not None and target_result.failure not in summary_failures:
+            summary_failures.append(target_result.failure)
+        missing_volume_failures = [
+            failure
+            for failure in summary_failures
+            if _failure_contains(failure, FailureKind.MISSING_VOLUME)
+        ]
+
+        if outcome_kind == OutcomeKind.PARTIAL_SUCCESS and missing_volume_failures:
+            self._cleanup_probe_workspace(request.probe_workspace)
+            failure_payloads = [_failure_to_dict(failure) for failure in missing_volume_failures]
+            payload = {**failure_payloads[0], "blockers": [BLOCKER_MISSING_VOLUME]}
+            error = str(getattr(missing_volume_failures[0], "message", "") or "possible missing split volume")
+            if group is not None:
+                self.state.record_group_suspended(
+                    group,
+                    blockers=[BLOCKER_MISSING_VOLUME],
+                    failure_payload=payload,
+                )
+            self.state.mark(
+                candidate.path,
+                candidate.size,
+                candidate.mtime,
+                file_id=candidate.file_id,
+                change_usn=candidate.change_usn,
+                status="suspended_missing_volume",
+                error=error,
+                failure_payload=payload,
+            )
+            self.log.write(
+                "suspended_missing_volume",
+                path=candidate.path,
+                error=error,
+                failures=failure_payloads,
+                partial_recovery=True,
+            )
+            return WatchRunResult(processed=1, failed=1, errors=[error])
+
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
             generated_output_dirs: list[str] = []
             if self.partial_output_policy == "promote":

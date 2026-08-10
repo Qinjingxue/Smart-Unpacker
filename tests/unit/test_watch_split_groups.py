@@ -18,6 +18,16 @@ def _summary(*failures: FailureInfo):
     )
 
 
+def _partial_summary(*failures: FailureInfo):
+    return SimpleNamespace(
+        success_count=0,
+        partial_success_count=1,
+        failed_tasks=[],
+        failures=list(failures),
+        target_results=[],
+    )
+
+
 def _watcher(tmp_path, runner_factory) -> WatchScheduler:
     root = tmp_path / "in"
     root.mkdir(exist_ok=True)
@@ -61,14 +71,7 @@ def test_watch_holds_orphan_non_head_until_first_volume_arrives(tmp_path):
     assert attempts == [str(head.resolve())]
 
 
-@pytest.mark.parametrize(
-    ("orphan_names", "head_name"),
-    [
-        (("plain.002", "plain.003"), "plain.001"),
-        (("old-style.r00",), "old-style.rar"),
-    ],
-)
-def test_watch_conservatively_holds_other_orphan_volume_families(tmp_path, orphan_names, head_name):
+def test_watch_conservatively_holds_old_rar_orphan_until_head_arrives(tmp_path):
     attempts: list[str] = []
 
     class Runner:
@@ -81,18 +84,190 @@ def test_watch_conservatively_holds_other_orphan_volume_families(tmp_path, orpha
 
     watcher = _watcher(tmp_path, Runner)
     root = tmp_path / "in"
-    for name in orphan_names:
+    for name in ("old-style.r00",):
         path = root / name
         path.write_bytes(name.encode())
         watcher.enqueue(str(path))
     assert watcher.run_once().processed == 0
 
-    head = root / head_name
+    head = root / "old-style.rar"
     head.write_bytes(b"head")
     watcher.enqueue(str(head))
 
     assert watcher.run_once().succeeded == 1
     assert attempts == [str(head.resolve())]
+
+
+def test_watch_does_not_hold_plain_numeric_files_as_missing_volumes(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    for name in ("plain.002", "plain.003"):
+        path = root / name
+        path.write_bytes(name.encode())
+        watcher.enqueue(str(path))
+
+    result = watcher.run_once()
+
+    assert result.processed == 1
+    assert len(attempts) == 1
+
+
+def test_watch_holds_strong_middle_gap_until_missing_volume_arrives(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    head = root / "gap.7z.001"
+    third = root / "gap.7z.003"
+    head.write_bytes(b"7z\xbc\xaf\x27\x1c-head")
+    third.write_bytes(b"tail")
+    watcher.enqueue(str(head))
+
+    first_result = watcher.run_once()
+
+    assert first_result.processed == 0
+    assert attempts == []
+    state = watcher.state.group_state(next(iter(watcher.state.groups)))
+    assert state is not None
+    assert "missing_volume" not in state.blockers
+    assert state.failure_payload["details"]["completeness_status"] == "middle_gap"
+    assert state.failure_payload["details"]["completeness_confidence"] == "strong"
+
+    second = root / "gap.7z.002"
+    second.write_bytes(b"middle")
+    watcher.enqueue(str(second))
+
+    second_result = watcher.run_once()
+    assert second_result.succeeded == 1
+    assert attempts == [str(head.resolve())]
+
+
+def test_watch_dispatches_weak_camouflaged_gap_for_backend_classification(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    head = root / "gap.part1.123"
+    third = root / "gap.part3.789"
+    head.write_bytes(b"ordinary data")
+    third.write_bytes(b"ordinary data")
+    watcher.enqueue(str(head))
+
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert attempts == [str(head.resolve())]
+
+
+def test_watch_holds_content_confirmed_camouflaged_middle_gap(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    head = root / "gap.part1.123"
+    third = root / "gap.part3.789"
+    head.write_bytes(b"7z\xbc\xaf\x27\x1c-head")
+    third.write_bytes(b"tail")
+    watcher.enqueue(str(head))
+
+    result = watcher.run_once()
+
+    assert result.processed == 0
+    assert attempts == []
+    state = watcher.state.group_state(next(iter(watcher.state.groups)))
+    assert state is not None
+    assert state.failure_payload["details"]["completeness_status"] == "middle_gap"
+    assert state.failure_payload["details"]["completeness_confidence"] == "strong"
+    assert "archive_head_confirmed" in state.failure_payload["details"]["completeness_basis"]
+
+
+def test_watch_does_not_infer_missing_tail_from_equal_volume_sizes(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    head = root / "exact-boundary.7z.001"
+    second = root / "exact-boundary.7z.002"
+    head.write_bytes(b"x" * 4096)
+    second.write_bytes(b"y" * 4096)
+    watcher.enqueue(str(head))
+
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert attempts == [str(head.resolve())]
+
+
+def test_watch_holds_classic_zip_until_required_terminal_arrives(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    first = root / "classic.z01"
+    second = root / "classic.z02"
+    first.write_bytes(b"segment-1")
+    second.write_bytes(b"segment-2")
+    watcher.enqueue(str(first))
+
+    assert watcher.run_once().processed == 0
+    assert attempts == []
+
+    terminal = root / "classic.zip"
+    terminal.write_bytes(b"terminal")
+    watcher.enqueue(str(terminal))
+
+    assert watcher.run_once().succeeded == 1
+    assert attempts == [str(first.resolve())]
 
 
 def test_watch_runtime_missing_volume_retries_only_after_group_changes(tmp_path):
@@ -121,6 +296,48 @@ def test_watch_runtime_missing_volume_retries_only_after_group_changes(tmp_path)
     watcher.enqueue(str(head), force=True)
     assert watcher.run_once().processed == 0
     third = root / "sample.7z.003"
+    third.write_bytes(b"part-3")
+    watcher.enqueue(str(third))
+
+    assert watcher.run_once().succeeded == 1
+    assert attempts == [str(head.resolve()), str(head.resolve())]
+
+
+def test_watch_treats_possible_missing_partial_recovery_as_suspended(tmp_path):
+    attempts: list[str] = []
+    possible_missing = FailureInfo(
+        FailureKind.MISSING_VOLUME,
+        "extraction_report",
+        "one or more split volumes may be missing",
+        details={"missing_volume_confirmed": False, "partial_recovery": True},
+    )
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _partial_summary(possible_missing) if len(attempts) == 1 else _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    head = root / "sample.zip.001"
+    second = root / "sample.zip.002"
+    head.write_bytes(b"part-1")
+    second.write_bytes(b"part-2")
+    watcher.enqueue(str(head))
+    watcher.enqueue(str(second))
+
+    assert watcher.run_once().failed == 1
+    group_state = watcher.state.group_state(next(iter(watcher.state.groups)))
+    assert group_state is not None
+    assert group_state.status == "suspended"
+    assert group_state.has_blocker("missing_volume")
+
+    watcher.enqueue(str(head), force=True)
+    assert watcher.run_once().processed == 0
+    third = root / "sample.zip.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
 

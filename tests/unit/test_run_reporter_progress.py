@@ -2,6 +2,7 @@ import io
 from types import SimpleNamespace
 
 import sunpack.coordinator.reporting as reporting
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.coordinator.reporting import RunReporter
 
 
@@ -72,6 +73,32 @@ def test_quiet_progress_writes_failure_log_without_terminal_output(tmp_path, cap
 
     assert capsys.readouterr().out == ""
     assert (tmp_path / "failed_log.txt").read_text(encoding="utf-8") == "bad.zip [broken]\n"
+
+
+def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsys):
+    warning = FailureInfo(
+        FailureKind.MISSING_VOLUME,
+        "extraction_report",
+        "压缩包内容不完整；可能缺少一个或多个分卷",
+        details={"missing_volume_confirmed": False, "partial_recovery": True},
+    )
+
+    RunReporter("zh").log_final_summary(
+        str(tmp_path),
+        0,
+        0,
+        [],
+        recovered_outputs=[{
+            "archive": str(tmp_path / "sample.zip.001"),
+            "completeness": 0.75,
+            "warning": warning.to_dict(),
+        }],
+        failures=[warning],
+    )
+
+    output = capsys.readouterr().out
+    assert "[部分恢复] sample.zip.001" in output
+    assert "[警告] 压缩包内容不完整；可能缺少一个或多个分卷" in output
 
 
 def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, monkeypatch):

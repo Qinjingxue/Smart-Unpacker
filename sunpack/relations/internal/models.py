@@ -46,6 +46,11 @@ class CandidateGroup:
     split_group_complete: bool | None = None
     split_missing_reason: str = ""
     split_missing_indices: List[int] = None
+    split_observed_missing_ranges: List[tuple[int, int]] = None
+    split_layout_status: str = "ambiguous"
+    split_completeness_status: str = "ambiguous"
+    split_completeness_confidence: str = "hint"
+    split_completeness_basis: List[str] = None
     head_metadata: Dict[str, Any] | None = None
 
     @property

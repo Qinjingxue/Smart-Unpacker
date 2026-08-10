@@ -90,6 +90,15 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
         bag.set("relation.split_missing_reason", group.split_missing_reason)
     if group.split_missing_indices:
         bag.set("relation.split_missing_indices", list(group.split_missing_indices))
+    if group.split_observed_missing_ranges:
+        bag.set(
+            "relation.split_observed_missing_ranges",
+            [list(value) for value in group.split_observed_missing_ranges],
+        )
+    bag.set("relation.split_layout_status", group.split_layout_status)
+    bag.set("relation.split_completeness_status", group.split_completeness_status)
+    bag.set("relation.split_completeness_confidence", group.split_completeness_confidence)
+    bag.set("relation.split_completeness_basis", list(group.split_completeness_basis or []))
     bag.set("relation.split_family", relation.split_family)
     bag.set("relation.split_index", relation.split_index)
     bag.set("relation.split_is_first", relation.split_role == "first")

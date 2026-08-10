@@ -236,19 +236,9 @@ ExtractArchiveResult extract_archive_internal(
     result.backend_available = true;
     result.requested_codepage = codepage;
 
-    if (canonical_names.empty() && has_split_volume_gap(part_paths)) {
-        set_missing_volume_failure(result, "input_preflight", "standard_sequence_gap");
-        return result;
-    }
-
     if (seven_zip_parts_prove_missing_tail(part_paths, !canonical_names.empty())) {
         set_missing_volume_failure(result, "input_preflight", "seven_zip_start_header_length");
         return result;
-    }
-
-    if (canonical_names.empty() && likely_missing_split_tail(part_paths)) {
-        result.missing_volume_suspected = true;
-        result.missing_volume_evidence = "tail_size_heuristic";
     }
 
     bool any_format_created = false;
@@ -360,7 +350,13 @@ ExtractArchiveResult extract_archive_internal(
 
             }
 
-            return open_archive_stream(archive_path, part_paths, stream_opened, &result.input_trace);
+            return open_archive_stream(
+                archive_path,
+                part_paths,
+                stream_opened,
+                &result.input_trace,
+                !canonical_names.empty()
+            );
 
         }();
 
@@ -527,9 +523,6 @@ ExtractArchiveResult extract_archive_internal(
             result.command_ok = true;
 
             result.missing_volume_suspected = false;
-            if (result.missing_volume_evidence == "tail_size_heuristic") {
-                result.missing_volume_evidence.clear();
-            }
 
             result.message = dry_run ? "archive dry-run completed" : "archive extracted";
 

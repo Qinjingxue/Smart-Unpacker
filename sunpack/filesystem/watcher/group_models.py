@@ -21,14 +21,25 @@ class WatchGroupSnapshot:
     missing_reason: str = ""
     missing_indices: tuple[int, ...] = ()
     candidate_substitution: bool = False
+    completeness_status: str = "ambiguous"
+    completeness_confidence: str = "hint"
+    completeness_basis: tuple[str, ...] = ()
 
     @property
     def has_head(self) -> bool:
         return bool(self.head_path)
 
     @property
-    def has_confirmed_gap(self) -> bool:
+    def has_observed_gap(self) -> bool:
         return self.complete is False
+
+    @property
+    def should_wait_for_relation_gap(self) -> bool:
+        return (
+            self.has_head
+            and self.completeness_status in {"middle_gap", "tail_missing"}
+            and self.completeness_confidence in {"strong", "proven"}
+        )
 
 
 @dataclass

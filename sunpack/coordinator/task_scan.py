@@ -109,8 +109,18 @@ def direct_file_task(path: str, all_parts: list[str] | None = None) -> ArchiveTa
         parsed = builder.parse_numbered_volume(path)
         format_hint = ""
         if parsed:
-            format_hint = os.path.splitext(os.path.basename(str(parsed["prefix"])))[1].lower().lstrip(".")
-        format_hint = format_hint or logical_name.rsplit(".", 1)[-1].lower()
+            style = str(parsed.get("style") or "")
+            if style.startswith("rar_"):
+                format_hint = "rar"
+            elif style.startswith("zip_"):
+                format_hint = "zip"
+            else:
+                candidate = os.path.splitext(os.path.basename(str(parsed["prefix"])))[1].lower().lstrip(".")
+                if candidate in {"7z", "zip", "rar"}:
+                    format_hint = candidate
+        logical_suffix = logical_name.rsplit(".", 1)[-1].lower()
+        if not format_hint and logical_suffix in {"7z", "zip", "rar"}:
+            format_hint = logical_suffix
     else:
         format_hint = ext.lower().lstrip(".")
     bag = FactBag()

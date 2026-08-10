@@ -820,9 +820,6 @@ PasswordTestResult test_passwords_with_parts(
 
         part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
 
-    if (has_split_volume_gap(effective_part_paths)) {
-        return needs_volume_or_tail_damaged_result("standard_sequence_gap");
-    }
     if (seven_zip_parts_prove_missing_tail(effective_part_paths, !canonical_names.empty())) {
         return needs_volume_or_tail_damaged_result("seven_zip_start_header_length");
     }

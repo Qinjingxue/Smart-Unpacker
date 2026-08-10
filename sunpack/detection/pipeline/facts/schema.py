@@ -87,6 +87,31 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "relations.group_builder",
         "description": "Split volume numbers that appear to be missing before the last observed volume.",
     },
+    "relation.split_observed_missing_ranges": {
+        "type": "list",
+        "producer": "relations.group_builder",
+        "description": "Compact filename-observed gap ranges; these are hints, not backend-confirmed missing volumes.",
+    },
+    "relation.split_layout_status": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Filename-layout assessment: coherent, observed_gap, or ambiguous.",
+    },
+    "relation.split_completeness_status": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Structured relation assessment: coherent, middle_gap, tail_missing, or ambiguous.",
+    },
+    "relation.split_completeness_confidence": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Evidence confidence for the completeness assessment: hint, strong, or proven.",
+    },
+    "relation.split_completeness_basis": {
+        "type": "list",
+        "producer": "relations.group_builder",
+        "description": "Machine-readable evidence used by the relation completeness assessment.",
+    },
     "relation.split_family": {
         "type": "str",
         "producer": "relations.group_builder",

@@ -29,15 +29,6 @@ HealthProbeResult check_archive_health_internal(
 
     result.backend_available = true;
 
-    if (has_split_volume_gap(part_paths)) {
-        result.status = PasswordTestStatus::Damaged;
-        result.is_archive = true;
-        result.missing_volume = true;
-        result.missing_volume_evidence = "standard_sequence_gap";
-        result.message = "split archive is missing one or more numbered volumes";
-        return result;
-    }
-
     if (seven_zip_parts_prove_missing_tail(part_paths)) {
         result.status = PasswordTestStatus::Damaged;
         result.is_archive = true;
@@ -45,11 +36,6 @@ HealthProbeResult check_archive_health_internal(
         result.missing_volume_evidence = "seven_zip_start_header_length";
         result.message = "7z start header proves that the split archive tail is missing";
         return result;
-    }
-
-    if (likely_missing_split_tail(part_paths)) {
-        result.missing_volume_suspected = true;
-        result.missing_volume_evidence = "tail_size_heuristic";
     }
 
     bool any_format_created = false;

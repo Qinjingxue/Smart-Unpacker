@@ -41,11 +41,41 @@ SPLIT_NAMING_CASES = [
     ),
     SplitNamingCase("7z-plain-numbered", "7z", lambda _base, index, _count: f"payload.{index:03d}"),
     SplitNamingCase(
+        "7z-part-marker-numeric-camouflage",
+        "7z",
+        lambda _base, index, _count: f"payload.part{index}.{(123, 456, 789)[index - 1] if index <= 3 else index * 111}",
+    ),
+    SplitNamingCase(
+        "7z-part-marker-changing-camouflage",
+        "7z",
+        lambda _base, index, _count: f"payload.part-{index:04d}.{('photo', 'document', 'binary')[index - 1] if index <= 3 else 'noise'}",
+    ),
+    SplitNamingCase(
+        "7z-format-before-part-marker",
+        "7z",
+        lambda _base, index, _count: f"payload.7z.part{index:04d}.jpg",
+    ),
+    SplitNamingCase(
+        "7z-format-after-part-marker",
+        "7z",
+        lambda _base, index, _count: f"payload.part{index:04d}.7z.png",
+    ),
+    SplitNamingCase(
+        "7z-variable-width-numbered",
+        "7z",
+        lambda _base, index, _count: f"payload.7z.{index}",
+    ),
+    SplitNamingCase(
         "7z-plain-numbered-cjk",
         "7z",
         lambda _base, index, _count: f"かな 素材.{index:03d}",
     ),
     SplitNamingCase("zip-numbered", "zip", lambda _base, index, _count: f"payload.zip.{index:03d}"),
+    SplitNamingCase(
+        "zip-part-marker-camouflage",
+        "zip",
+        lambda _base, index, _count: f"payload.part{index}.zip.hidden-{index}",
+    ),
     SplitNamingCase(
         "zip-numbered-cjk",
         "zip",

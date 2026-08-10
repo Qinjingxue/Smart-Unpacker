@@ -213,7 +213,7 @@ def test_native_wrapper_handles_zip_sfx_split_health_password_and_resources(tmp_
     assert analysis.file_count >= 1
 
 
-def test_native_wrapper_detects_missing_zip_sfx_split_tail(tmp_path):
+def test_native_wrapper_does_not_guess_zip_sfx_tail_from_equal_part_sizes(tmp_path):
     require_7z()
     case = ArchiveFixtureFactory().create(tmp_path, "native_zip_sfx_missing_tail", "zip", split=True, sfx=True)
     _remove_last_data_part(case)
@@ -222,8 +222,8 @@ def test_native_wrapper_detects_missing_zip_sfx_split_tail(tmp_path):
 
     assert health.ok
     assert not health.is_missing_volume
-    assert health.is_missing_volume_suspected
-    assert health.missing_volume_evidence == "tail_size_heuristic"
+    assert not health.is_missing_volume_suspected
+    assert not health.missing_volume_evidence
 
 
 def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):

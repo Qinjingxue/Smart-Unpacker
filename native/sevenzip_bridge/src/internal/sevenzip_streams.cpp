@@ -18,7 +18,9 @@ ComPtr<IInStream> open_archive_stream(
 
     bool& opened,
 
-    ExtractInputTrace* trace
+    ExtractInputTrace* trace,
+
+    bool structured_order
 
 ) {
 
@@ -26,7 +28,13 @@ ComPtr<IInStream> open_archive_stream(
 
     if (is_sfx_path(archive_path)) {
 
-        std::vector<std::wstring> volumes = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+        std::vector<std::wstring> volumes = unique_existing_paths(archive_path, part_paths);
+
+        if (!structured_order) {
+
+            volumes = sorted_data_volume_paths(volumes);
+
+        }
 
         if (!volumes.empty() && is_sfx_path(volumes.front())) {
 
@@ -68,7 +76,13 @@ ComPtr<IInStream> open_archive_stream(
 
 
 
-    std::vector<std::wstring> paths = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+    std::vector<std::wstring> paths = unique_existing_paths(archive_path, part_paths);
+
+    if (!structured_order) {
+
+        paths = sorted_data_volume_paths(paths);
+
+    }
 
     if (paths.empty()) {
 

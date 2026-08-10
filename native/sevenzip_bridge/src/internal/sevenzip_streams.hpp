@@ -1535,7 +1535,9 @@ ComPtr<IInStream> open_archive_stream(
 
     bool& opened,
 
-    ExtractInputTrace* trace = nullptr
+    ExtractInputTrace* trace = nullptr,
+
+    bool structured_order = false
 
 );
 

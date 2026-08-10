@@ -107,6 +107,11 @@ class RelationsGroupBuilder:
             split_complete = raw.get("split_group_complete")
             missing_reason = str(raw.get("split_missing_reason") or "")
             missing_indices = [int(value) for value in (raw.get("split_missing_indices") or [])]
+            missing_ranges = [
+                (int(value[0]), int(value[1]))
+                for value in (raw.get("split_observed_missing_ranges") or [])
+                if isinstance(value, (list, tuple)) and len(value) == 2
+            ]
             first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
             if first_volume:
                 head_path = first_volume.path
@@ -121,6 +126,13 @@ class RelationsGroupBuilder:
                 split_group_complete=split_complete,
                 split_missing_reason=missing_reason,
                 split_missing_indices=missing_indices,
+                split_observed_missing_ranges=missing_ranges,
+                split_layout_status=str(raw.get("split_layout_status") or "ambiguous"),
+                split_completeness_status=str(raw.get("split_completeness_status") or "ambiguous"),
+                split_completeness_confidence=str(raw.get("split_completeness_confidence") or "hint"),
+                split_completeness_basis=[
+                    str(value) for value in (raw.get("split_completeness_basis") or [])
+                ],
                 head_metadata={},
             )
         except (TypeError, ValueError):

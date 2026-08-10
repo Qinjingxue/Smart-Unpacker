@@ -459,3 +459,239 @@ def test_relation_group_builder_groups_zero_based_zip_numbered_volumes(tmp_path)
         (3, "payload.zip.0002"),
     ]
     assert split_group.split_group_complete is True
+
+
+@pytest.mark.parametrize(
+    ("name", "prefix", "number", "style", "width"),
+    [
+        ("payload.part1.123", "payload", 1, "part_numbered", 1),
+        ("payload.part-0002.photo", "payload", 2, "part_numbered", 4),
+        ("payload.volume_03.any.thing", "payload", 3, "part_numbered", 2),
+        ("payload.7z.part0004.jpg", "payload", 4, "part_numbered", 4),
+        ("payload.part0005.zip.png", "payload", 5, "part_numbered", 4),
+        ("payload.7z.1", "payload.7z", 1, "numeric_suffix", 1),
+        ("payload.z0012", "payload", 12, "zip_spanned", 4),
+        ("payload.r001", "payload", 3, "rar_oldstyle", 3),
+    ],
+)
+def test_relation_parser_understands_human_obvious_camouflaged_volume_markers(
+    name, prefix, number, style, width
+):
+    parsed = RelationsScheduler().parse_numbered_volume(name)
+
+    assert parsed == {
+        "prefix": prefix,
+        "number": number,
+        "style": style,
+        "width": width,
+        **({"decorated": True} if ".part" in name or ".volume" in name else {}),
+    }
+
+
+def test_part_markers_outrank_unrelated_numeric_camouflage_suffixes(tmp_path):
+    names = ["payload.part1.123", "payload.part2.456", "payload.part3.789"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "payload")
+
+    assert {Path(path).name for path in split_group.all_paths} == set(names)
+    assert [(volume.number, Path(volume.path).name) for volume in split_group.split_volumes] == [
+        (1, names[0]),
+        (2, names[1]),
+        (3, names[2]),
+    ]
+    assert split_group.relation.split_family == "generic_part"
+    assert split_group.split_missing_indices == []
+    assert split_group.split_observed_missing_ranges == []
+    assert split_group.split_layout_status == "coherent"
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("bundle.part1.photo", "bundle.part2.document", "bundle.part3.random"),
+        ("bundle.part-01.hidden.zip", "bundle.part-02.hidden.zip", "bundle.part-03.hidden.zip"),
+        ("bundle.7z.part001.jpg", "bundle.7z.part002.png", "bundle.7z.part003.txt"),
+        ("bundle.part001.7z.jpg", "bundle.part002.7z.png", "bundle.part003.7z.txt"),
+        ("bundle.volume_1.aaa", "bundle.volume_2.bbb", "bundle.volume_3.ccc"),
+    ],
+)
+def test_relation_group_builder_groups_varied_marker_camouflage(tmp_path, names):
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "bundle")
+
+    assert {Path(path).name for path in split_group.all_paths} == set(names)
+    assert [volume.number for volume in split_group.split_volumes] == [1, 2, 3]
+    assert split_group.split_layout_status == "coherent"
+
+
+def test_unknown_part_camouflage_joins_only_one_concrete_format_family(tmp_path):
+    names = ["archive.part1.123", "archive.part2.rar", "archive.part3.rar.hidden"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "archive")
+
+    assert {Path(path).name for path in split_group.all_paths} == set(names)
+    assert split_group.relation.split_family == "rar_part"
+    assert [volume.number for volume in split_group.split_volumes] == [1, 2, 3]
+
+
+def test_unknown_part_with_duplicate_index_does_not_override_concrete_volume(tmp_path):
+    names = ["archive.part1.rar", "archive.part1.123", "archive.part2.rar"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    archive_groups = [group for group in groups if group.logical_name == "archive"]
+
+    rar_group = next(group for group in archive_groups if group.relation.split_family == "rar_part")
+    numeric_decoy = next(group for group in archive_groups if Path(group.head_path).name == "archive.part1.123")
+    assert {Path(path).name for path in rar_group.all_paths} == {
+        "archive.part1.rar",
+        "archive.part2.rar",
+    }
+    assert numeric_decoy.kind == "file"
+
+
+def test_conflicting_part_format_families_are_not_cross_merged(tmp_path):
+    names = [
+        "collision.part1.rar",
+        "collision.part2.rar",
+        "collision.part1.7z",
+        "collision.part2.7z",
+        "collision.part3.999",
+    ]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    collision_groups = [group for group in groups if group.logical_name == "collision"]
+    members_by_family = {
+        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        for group in collision_groups
+    }
+
+    assert members_by_family["rar_part"] == {"collision.part1.rar", "collision.part2.rar"}
+    assert members_by_family["7z_part"] == {"collision.part1.7z", "collision.part2.7z"}
+    assert members_by_family["generic_part"] == {"collision.part3.999"}
+
+
+def test_different_trailing_numbered_formats_with_same_stem_remain_separate(tmp_path):
+    names = ["mix.7z.001.jpg", "mix.7z.002.png", "mix.zip.001.txt", "mix.zip.002.dat"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    mix_groups = [group for group in groups if group.logical_name == "mix"]
+
+    assert {
+        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        for group in mix_groups
+    } == {
+        "7z_numbered": {"mix.7z.001.jpg", "mix.7z.002.png"},
+        "zip_numbered": {"mix.zip.001.txt", "mix.zip.002.dat"},
+    }
+
+
+def test_camouflaged_zip_segments_and_terminal_form_one_group(tmp_path):
+    names = ["photos.z1.jpg", "photos.z02.png", "photos.zip.document"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "photos")
+
+    assert [Path(path).name for path in split_group.all_paths] == names
+    assert [volume.role for volume in split_group.split_volumes] == ["first", "member", "terminal"]
+    assert split_group.relation.split_family == "zip_spanned"
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("report.2023", "report.2024", "report.2025"),
+        ("chapter.001", "chapter.003", "chapter.005"),
+        ("report.partition1.2024", "report.partition2.2025"),
+        ("build.version1.001", "build.version2.002"),
+    ],
+)
+def test_plain_or_incidental_numbers_do_not_become_split_groups(tmp_path, names):
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+
+    assert all(group.kind == "file" for group in groups)
+    assert {Path(group.head_path).name for group in groups} == set(names)
+
+
+def test_large_fake_numeric_suffix_does_not_expand_missing_volume_list(tmp_path):
+    names = ["huge.part1.999999998", "huge.part3.999999999"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "huge")
+
+    assert split_group.split_missing_indices == [2]
+    assert split_group.split_observed_missing_ranges == [(2, 2)]
+    assert split_group.split_layout_status == "observed_gap"
+    assert split_group.split_completeness_status == "middle_gap"
+    assert split_group.split_completeness_confidence == "hint"
+    assert "bracketed_number_gap" in split_group.split_completeness_basis
+
+
+def test_standard_middle_gap_has_strong_structured_completeness_evidence(tmp_path):
+    for name in ("archive.7z.001", "archive.7z.003"):
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "archive")
+
+    assert split_group.split_completeness_status == "middle_gap"
+    assert split_group.split_completeness_confidence == "strong"
+    assert set(split_group.split_completeness_basis) == {"canonical_scheme", "bracketed_number_gap"}
+
+
+def test_classic_zip_without_terminal_is_proven_only_for_canonical_scheme(tmp_path):
+    for name in ("archive.z01", "archive.z02"):
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "archive")
+
+    assert split_group.split_completeness_status == "tail_missing"
+    assert split_group.split_completeness_confidence == "proven"
+    assert "required_terminal_absent" in split_group.split_completeness_basis
+
+
+def test_plain_numeric_sequence_requires_archive_magic_before_grouping(tmp_path):
+    names = ["raw.001", "raw.002", "raw.003"]
+    for index, name in enumerate(names):
+        payload = b"7z\xbc\xaf\x27\x1c" + b"head" if index == 0 else name.encode()
+        (tmp_path / name).write_bytes(payload)
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "raw")
+
+    assert split_group.kind == "split_archive"
+    assert [Path(path).name for path in split_group.all_paths] == names
+
+
+def test_format_token_anywhere_before_part_marker_is_preserved_as_evidence(tmp_path):
+    names = ["movie.7z.camouflage.part1.jpg", "movie.7z.camouflage.part2.png"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "movie.7z.camouflage")
+
+    assert split_group.relation.split_family == "7z_part"
+    assert {Path(path).name for path in split_group.all_paths} == set(names)

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.pipeline_engine import execute_pipeline
+from sunpack.contracts.failures import FailureKind
 from sunpack.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
@@ -303,22 +304,95 @@ def test_real_archive_edge_password_split_archives_require_matching_password(tmp
 
 
 @pytest.mark.parametrize("archive_format", archive_format_params(set()))
-def test_real_archive_edge_missing_split_archives_fail(tmp_path, archive_format):
+def test_real_archive_edge_missing_tail_reports_missing_volume(tmp_path, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"missing_split_{archive_format}", archive_format, split=True, split_issue="missing_last")
 
-    assert_failure_contains(case, {"分卷缺失或不完整", "压缩包损坏", "致命错误"})
+    summary = run_pipeline(case.archive_dir)
+    missing = [failure for failure in summary.failures if failure.contains(FailureKind.MISSING_VOLUME)]
+
+    assert missing
+    if archive_format == "zip":
+        assert summary.partial_success_count == 1
+        assert summary.failed_tasks == []
+        assert missing[0].details["missing_volume_confirmed"] is False
+        assert summary.recovered_outputs[0]["warning"]["kind"] == "missing_volume"
+    else:
+        assert summary.failed_tasks
 
 
 @pytest.mark.parametrize("archive_format", archive_format_params(set()))
-def test_real_archive_edge_partial_split_corruption_fails(tmp_path, archive_format):
+def test_real_archive_edge_missing_middle_reports_possible_missing_volume(tmp_path, archive_format):
+    require_7z()
+    case = FACTORY.create(
+        tmp_path,
+        f"missing_middle_{archive_format}",
+        archive_format,
+        split=True,
+        payload_size=620 * 1024,
+    )
+    parts = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
+    assert len(parts) >= 5
+    parts[len(parts) // 2].unlink()
+
+    summary = run_pipeline(case.archive_dir)
+    possible = [
+        failure
+        for failure in summary.failures
+        if failure.contains(FailureKind.MISSING_VOLUME)
+        and failure.details.get("missing_volume_confirmed") is False
+    ]
+
+    assert summary.failed_tasks
+    assert possible
+    assert possible[0].details["evidence"] == "observed_volume_gap_after_archive_failure"
+    assert possible[0].causes
+    assert possible[0].causes[0].kind in {FailureKind.UNKNOWN, FailureKind.DAMAGED}
+
+
+def test_real_rar_sfx_missing_middle_reports_possible_missing_volume(tmp_path):
+    if get_optional_rar() is None:
+        pytest.skip("RAR generator is not configured")
+    case = FACTORY.create(
+        tmp_path,
+        "missing_middle_rar_sfx",
+        "rar",
+        split=True,
+        sfx=True,
+        payload_size=620 * 1024,
+    )
+    parts = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
+    assert len(parts) >= 5
+    parts[len(parts) // 2].unlink()
+
+    summary = run_pipeline(case.archive_dir)
+
+    assert summary.failed_tasks
+    assert any(
+        failure.kind is FailureKind.MISSING_VOLUME
+        and failure.details.get("missing_volume_confirmed") is False
+        for failure in summary.failures
+    )
+
+
+@pytest.mark.parametrize("archive_format", archive_format_params(set()))
+def test_real_archive_edge_partial_split_corruption_reports_possible_missing_volume(tmp_path, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"partial_split_{archive_format}", archive_format, split=True, split_issue="corrupt_member")
 
-    if archive_format == "rar":
-        assert_success(case)
-        return
-    assert_failure_contains(case, {"压缩包损坏", "分卷缺失或不完整", "致命错误"})
+    summary = run_pipeline(case.archive_dir)
+    possible = [
+        failure
+        for failure in summary.failures
+        if failure.contains(FailureKind.MISSING_VOLUME)
+        and failure.details.get("missing_volume_confirmed") is False
+    ]
+
+    assert summary.partial_success_count == 1
+    assert summary.failed_tasks == []
+    assert possible
+    assert possible[0].details["partial_recovery"] is True
+    assert summary.recovered_outputs[0]["warning"]["kind"] == "missing_volume"
 
 
 @pytest.mark.parametrize("archive_format", sfx_format_params(set()))
