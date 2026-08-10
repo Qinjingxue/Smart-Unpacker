@@ -68,7 +68,7 @@ class PasswordScheduler:
     def from_archive_password_tester(cls, password_tester: object) -> "PasswordScheduler":
         final_verifier = SevenZipDllVerifier.from_archive_password_tester(password_tester)
         registry = PasswordVerifierRegistry(
-            fast_verifiers=[ZipFastVerifier(), RarFastVerifier(), SevenZipFastVerifier(), final_verifier],
+            fast_verifiers=[ZipFastVerifier(), RarFastVerifier(), SevenZipFastVerifier()],
             final_verifier=final_verifier,
         )
         return cls(registry.build())

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import sunpack.passwords.scheduler as password_scheduler_module
 from sunpack.passwords.cache import PasswordAttemptCache
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.fingerprint import build_archive_fingerprint
@@ -240,12 +241,26 @@ def test_verifier_chain_without_final_verifier_preserves_all_weak_matches():
     assert outcome.match_evidence == "zipcrypto_header_byte"
 
 
-def test_extraction_plan_never_invokes_full_payload_final_verifier(tmp_path):
+def test_production_extraction_plan_never_invokes_full_payload_final_verifier(
+    tmp_path,
+    monkeypatch,
+):
     archive = tmp_path / "renamed.bin"
     archive.write_bytes(b"archive")
-    fast = StaticVerifier(PasswordBatchVerification(
+
+    zip_fast = FormatVerifier("zip", PasswordBatchVerification(
+        ok=False,
+        status="unsupported_method",
+        attempts=0,
+    ))
+    rar_fast = FormatVerifier("rar", PasswordBatchVerification(
         ok=False,
         status="unknown_needs_final_verifier",
+        attempts=0,
+    ))
+    seven_zip_fast = FormatVerifier("7z", PasswordBatchVerification(
+        ok=False,
+        status="unsupported_method",
         attempts=0,
     ))
     final = StaticVerifier(PasswordBatchVerification(
@@ -254,7 +269,18 @@ def test_extraction_plan_never_invokes_full_payload_final_verifier(tmp_path):
         matched_index=2,
         attempts=3,
     ))
-    scheduler = PasswordScheduler(PasswordVerifierChain([fast], final), default_batch_size=2)
+
+    class FinalVerifierFactory:
+        @classmethod
+        def from_archive_password_tester(cls, password_tester):
+            return final
+
+    monkeypatch.setattr(password_scheduler_module, "ZipFastVerifier", lambda: zip_fast)
+    monkeypatch.setattr(password_scheduler_module, "RarFastVerifier", lambda: rar_fast)
+    monkeypatch.setattr(password_scheduler_module, "SevenZipFastVerifier", lambda: seven_zip_fast)
+    monkeypatch.setattr(password_scheduler_module, "SevenZipDllVerifier", FinalVerifierFactory)
+
+    scheduler = PasswordScheduler.from_archive_password_tester(object())
 
     result = scheduler.plan_for_extraction(PasswordJob(
         archive_path=str(archive),
@@ -264,7 +290,14 @@ def test_extraction_plan_never_invokes_full_payload_final_verifier(tmp_path):
 
     assert result.password is None
     assert result.extraction_candidates == ("one", "two", "three")
-    assert fast.batches == [["one", "two"], ["three"]]
+    assert isinstance(scheduler.verifier, PasswordVerifierChain)
+    assert all(
+        verifier is not scheduler.verifier.final_verifier
+        for verifier in scheduler.verifier.fast_verifiers
+    )
+    assert zip_fast.batches == []
+    assert rar_fast.batches == [["one", "two", "three"]]
+    assert seven_zip_fast.batches == []
     assert final.batches == []
 
 
