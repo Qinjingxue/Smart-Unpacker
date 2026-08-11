@@ -75,7 +75,6 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
 
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}
-    config["filesystem"] = {**config.get("filesystem", {}), "scan_filters": []}
     config["post_extract"] = {**config.get("post_extract", {}), "archive_cleanup_mode": "keep"}
     config["watch"] = {
         **config.get("watch", {}),
@@ -173,7 +172,6 @@ def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, incl
     )
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}
-    config["filesystem"] = {**config.get("filesystem", {}), "scan_filters": []}
     config["post_extract"] = {**config.get("post_extract", {}), "archive_cleanup_mode": "keep"}
     config["watch"] = {
         **config.get("watch", {}),

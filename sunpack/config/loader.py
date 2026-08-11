@@ -1,10 +1,13 @@
 import copy
+import json
+import os
 from pathlib import Path
 import threading
 from typing import Any
 
+from sunpack.config.advanced_defaults import _payload as _advanced_defaults_payload
 from sunpack.config.detection_view import DIRECTORY_SCAN_MODES, directory_scan_mode, rule_pipeline_config, scan_filters_config
-from sunpack.config.schema import ConfigSchemaError, normalize_config, validate_external_config
+from sunpack.config.schema import ConfigSchemaError, config_fields, normalize_config, validate_external_config
 from sunpack.support.json_format import load_json_file
 from sunpack.support.resources import candidate_resource_paths, dedupe_paths, first_existing_path
 
@@ -15,6 +18,7 @@ class ConfigError(RuntimeError):
 
 SIMPLE_CONFIG_FILENAME = "sunpack_config.json"
 ADVANCED_CONFIG_FILENAME = "sunpack_advanced_config.json"
+OVERRIDES_ENV_VAR = "SUNPACK_CONFIG_OVERRIDES"
 
 
 _CONFIG_CACHE_LOCK = threading.RLock()
@@ -38,6 +42,56 @@ def _candidate_config_paths(filename: str) -> list[Path]:
 
 def _first_existing_config(filename: str) -> Path | None:
     return first_existing_path(_candidate_config_paths(filename))
+
+
+def _known_config_sections() -> frozenset[str]:
+    sections = {field.path[0] for field in config_fields().values()}
+    try:
+        sections.update(_advanced_defaults_payload())
+    except Exception:
+        pass
+    return frozenset(sections)
+
+
+def _load_override_payload() -> dict[str, Any]:
+    """Read the SUNPACK_CONFIG_OVERRIDES layer (inline JSON object or file path)."""
+    raw = os.environ.get(OVERRIDES_ENV_VAR, "").strip()
+    if not raw:
+        return {}
+    path = Path(raw)
+    if path.is_file():
+        payload = _load_json(path)
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            if raw[:1] in {"{", "["}:
+                raise ConfigError(f"{OVERRIDES_ENV_VAR} contains invalid JSON: {exc}") from exc
+            raise ConfigError(
+                f"{OVERRIDES_ENV_VAR} must be an inline JSON object or an existing JSON file: {raw}"
+            ) from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"{OVERRIDES_ENV_VAR} must contain a JSON object")
+    unknown = sorted(set(payload) - _known_config_sections())
+    if unknown:
+        raise ConfigError(
+            f"{OVERRIDES_ENV_VAR} contains unknown config sections: {', '.join(unknown)}"
+        )
+    return payload
+
+
+def _override_signature() -> tuple[str, int, int] | str | None:
+    raw = os.environ.get(OVERRIDES_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_file():
+        return raw
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path.resolve()), -1, -1)
+    return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
 
 
 _NAMED_MODULE_LIST_PATHS = {
@@ -113,6 +167,16 @@ def _merge_named_module_list(base: list[Any], override: list[Any], *, override_o
     return merged
 
 
+def apply_config_overrides(config: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Merge a runtime override layer into config in place using the canonical layer semantics."""
+    if not overrides:
+        return config
+    merged = _deep_merge_config(config, overrides)
+    config.clear()
+    config.update(merged)
+    return config
+
+
 def _load_layered_config() -> tuple[Path, dict[str, Any]]:
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
@@ -128,10 +192,11 @@ def _load_layered_config_paths(simple_path: Path | None, advanced_path: Path | N
         raise ConfigError(f"Missing required {SIMPLE_CONFIG_FILENAME} or {ADVANCED_CONFIG_FILENAME}. Searched: {', '.join(searched)}")
 
     advanced = _load_json(advanced_path) if advanced_path is not None else {}
-    if simple_path is None:
-        return advanced_path, advanced
-    simple = _load_json(simple_path)
-    return simple_path, _deep_merge_config(advanced, simple)
+    config = advanced
+    if simple_path is not None:
+        config = _deep_merge_config(advanced, _load_json(simple_path))
+    overrides = _load_override_payload()
+    return (simple_path or advanced_path), apply_config_overrides(config, overrides)
 
 
 def load_raw_config_payload() -> tuple[Path, dict[str, Any]]:
@@ -139,7 +204,7 @@ def load_raw_config_payload() -> tuple[Path, dict[str, Any]]:
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
-    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         if (
             signature == _CONFIG_CACHE_SIGNATURE
@@ -170,7 +235,7 @@ def config_cache_token() -> tuple[Any, ...]:
     """Return the selected config files and mtimes used for cache invalidation."""
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
-    return (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    return (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
 
 
 def clear_config_cache() -> None:
@@ -243,7 +308,7 @@ def load_config() -> dict[str, Any]:
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
-    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         if signature == _CONFIG_CACHE_SIGNATURE and _CONFIG_CACHE_VALUE is not None:
             return copy.deepcopy(_CONFIG_CACHE_VALUE)
@@ -270,7 +335,7 @@ def load_effective_config_payload() -> tuple[Path, dict[str, Any]]:
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
-    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         cached_raw = copy.deepcopy(_CONFIG_CACHE_RAW_VALUE) if (
             signature == _CONFIG_CACHE_SIGNATURE

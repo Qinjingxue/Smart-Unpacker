@@ -4,6 +4,7 @@ from typing import Any
 
 from sunpack.cli.cli_constants import EXIT_USAGE
 from sunpack.cli.cli_types import CliCommandResult, CliPasswordSummary
+from sunpack.config.loader import apply_config_overrides
 from sunpack.config.schema import normalize_config_value
 from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
 from sunpack.coordinator.scheduling import build_scheduler_profile_config
@@ -145,39 +146,38 @@ def build_password_summary(
 
 
 def apply_runtime_config_overrides(config: dict, args) -> dict:
+    """Apply CLI flag overrides as one config layer, then report the summary keys."""
     overrides = {}
+    payload: dict[str, Any] = {}
+    section = payload.setdefault
     if getattr(args, "recursive_extract", None) is not None:
         overrides["recursive_extract"] = args.recursive_extract
-        config["recursive_extract"] = normalize_config_value(("recursive_extract",), args.recursive_extract)
+        payload["recursive_extract"] = normalize_config_value(("recursive_extract",), args.recursive_extract)
     if getattr(args, "scheduler_profile", None) is not None:
         overrides["scheduler_profile"] = args.scheduler_profile
-        performance = config.setdefault("performance", {})
-        performance["scheduler_profile"] = args.scheduler_profile
+        section("performance", {})["scheduler_profile"] = args.scheduler_profile
     if getattr(args, "archive_cleanup_mode", None) is not None:
         overrides["archive_cleanup_mode"] = args.archive_cleanup_mode
-        config.setdefault("post_extract", {})["archive_cleanup_mode"] = normalize_config_value(
-            ("post_extract", "archive_cleanup_mode"),
-            args.archive_cleanup_mode,
+        section("post_extract", {})["archive_cleanup_mode"] = normalize_config_value(
+            ("post_extract", "archive_cleanup_mode"), args.archive_cleanup_mode,
         )
     output_dir = getattr(args, "output_dir", None)
     output_root = os.path.abspath(os.path.normpath(output_dir or "."))
     overrides["output_dir"] = output_root
-    config["output"] = {
-        **(config.get("output", {}) if isinstance(config.get("output"), dict) else {}),
-        "root": output_root,
-    }
+    section("output", {})["root"] = output_root
     if getattr(args, "flatten_single_directory", None) is not None:
         overrides["flatten_single_directory"] = args.flatten_single_directory
-        config.setdefault("post_extract", {})["flatten_single_directory"] = args.flatten_single_directory
+        section("post_extract", {})["flatten_single_directory"] = args.flatten_single_directory
     if getattr(args, "write_progress_manifest", False):
         overrides["write_progress_manifest"] = True
-        config.setdefault("extraction", {})["write_progress_manifest"] = True
+        section("extraction", {})["write_progress_manifest"] = True
     if getattr(args, "allow_partial", False):
         overrides["content_requirement"] = "allow_partial"
-        config.setdefault("extraction", {})["content_requirement"] = "allow_partial"
+        section("extraction", {})["content_requirement"] = "allow_partial"
     if getattr(args, "directory_passwords", None) is not None:
         overrides["directory_passwords"] = bool(args.directory_passwords)
-        config.setdefault("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)
+        section("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)
+    apply_config_overrides(config, payload)
     return overrides
 
 

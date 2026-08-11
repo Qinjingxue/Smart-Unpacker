@@ -75,7 +75,6 @@ class _RecordingPipelineEngine:
 def _watch_config() -> dict:
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}
-    config["filesystem"] = {**(config.get("filesystem") or {}), "scan_filters": []}
     config["pipeline"] = {
         **(config.get("pipeline") or {}),
         "max_active_pipeline_requests": 3,

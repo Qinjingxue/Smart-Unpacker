@@ -13,7 +13,9 @@ def _minimal_7z_header(payload_size: int) -> bytes:
 def build_cli_pipeline_fixture(root: Path) -> Path:
     fixture = root / "pipeline_run"
     fixture.mkdir(parents=True, exist_ok=True)
-    payload_size = 1024 * 1024 + 128
+    # Small fixtures are fine: pytest disables the size_range filter via
+    # SUNPACK_CONFIG_OVERRIDES, so there is no 1 MB floor to dodge.
+    payload_size = 64 * 1024
     (fixture / "rj081295.7z.001").write_bytes(_minimal_7z_header(payload_size) + b"x" * payload_size + b"\x17\x06")
     (fixture / "rj081295.7z").write_bytes(b"companion-7z" + b"y" * payload_size)
     (fixture / "rj081295").write_bytes(b"companion-plain" + b"z" * payload_size)

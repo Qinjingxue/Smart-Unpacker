@@ -21,7 +21,6 @@ PAYLOAD_SIZE = 256 * 1024
 def _watch_config() -> dict:
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}
-    config["filesystem"] = {**(config.get("filesystem") or {}), "scan_filters": []}
     config["post_extract"] = {
         **(config.get("post_extract") or {}),
         "archive_cleanup_mode": "keep",

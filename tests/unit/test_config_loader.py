@@ -162,3 +162,87 @@ def test_removed_analysis_full_scan_configuration_is_rejected(tmp_path, monkeypa
 
     with pytest.raises(loader.ConfigError, match="Removed analysis.prepass fields: deep_scan"):
         loader.load_config()
+
+
+def test_load_config_applies_inline_env_override_last(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {
+        "filesystem": {"scan_filters": [
+            {"name": "size_range", "enabled": True, "range": "r >= 2 MB"},
+            {"name": "blacklist", "enabled": True, "blocked_extensions": [".tmp"]},
+        ]},
+    })
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, json.dumps({
+        "filesystem": {"scan_filters": [{"name": "size_range", "enabled": False}]},
+    }))
+
+    config = loader.load_config()
+    filters = {item["name"]: item for item in config["filesystem"]["scan_filters"]}
+
+    assert filters["size_range"]["enabled"] is False
+    assert filters["size_range"]["range"] == "r >= 2 MB"
+    assert filters["blacklist"]["enabled"] is True
+
+
+def test_load_config_applies_override_file_last(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {})
+    override_path = tmp_path / "override.json"
+    _write_json(override_path, {"recursive_extract": "1"})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, str(override_path))
+
+    _path, config = loader.load_raw_config_payload()
+
+    assert config["recursive_extract"] == "1"
+
+
+def test_load_config_rejects_invalid_override_payload(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, "{not json")
+    with pytest.raises(loader.ConfigError, match="invalid JSON"):
+        loader.load_config()
+
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, json.dumps([1, 2]))
+    with pytest.raises(loader.ConfigError, match="must contain a JSON object"):
+        loader.load_config()
+
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, str(tmp_path / "missing-override.json"))
+    with pytest.raises(loader.ConfigError, match="inline JSON object or an existing JSON file"):
+        loader.load_config()
+
+
+def test_load_config_rejects_unknown_override_section(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, json.dumps({"filsystem": {"scan_filters": []}}))
+
+    with pytest.raises(loader.ConfigError, match="unknown config sections: filsystem"):
+        loader.load_config()
+
+
+def test_changing_override_invalidates_config_cache(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, _advanced_payload())
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, json.dumps({"recursive_extract": "1"}))
+    assert loader.load_raw_config_payload()[1]["recursive_extract"] == "1"
+
+    monkeypatch.setenv(loader.OVERRIDES_ENV_VAR, json.dumps({"recursive_extract": "2"}))
+    assert loader.load_raw_config_payload()[1]["recursive_extract"] == "2"

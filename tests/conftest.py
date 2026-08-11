@@ -1,6 +1,32 @@
+import os
 from pathlib import Path
 
 import pytest
+
+
+DEFAULT_TEST_CONFIG_OVERRIDES = (
+    '{"filesystem": {"scan_filters": [{"name": "size_range", "enabled": false}]}}'
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def apply_default_test_config_overrides():
+    """Let pytest runs use small fixtures by disabling the size_range filter.
+
+    The value is only installed when the caller did not already set
+    SUNPACK_CONFIG_OVERRIDES, so custom overrides keep working.
+    """
+    if "SUNPACK_CONFIG_OVERRIDES" not in os.environ:
+        os.environ["SUNPACK_CONFIG_OVERRIDES"] = DEFAULT_TEST_CONFIG_OVERRIDES
+    try:
+        from sunpack.config.loader import clear_config_cache
+    except Exception:
+        pass
+    else:
+        clear_config_cache()
+    yield
+    if os.environ.get("SUNPACK_CONFIG_OVERRIDES") == DEFAULT_TEST_CONFIG_OVERRIDES:
+        os.environ.pop("SUNPACK_CONFIG_OVERRIDES", None)
 
 
 @pytest.fixture(scope="session", autouse=True)

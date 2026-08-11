@@ -18,6 +18,29 @@ python sunpack.py config validate
 python sunpack.py config show
 ```
 
+## 运行时覆盖
+
+程序支持通过环境变量 `SUNPACK_CONFIG_OVERRIDES` 在启动前动态覆盖任意配置项，不需要修改配置文件。值可以是内联 JSON 对象，也可以是某个 JSON 文件的路径。
+
+合并顺序（后覆盖先）：`sunpack_advanced_config.json` → `sunpack_config.json` → 运行时覆盖。覆盖遵循与配置层相同的合并规则：对象字段递归合并，命名模块列表（如 `filesystem.scan_filters`、`detection.rule_pipeline.precheck`）按 `name` 合并，因此覆盖里只需写要改的那一项。
+
+例如临时放行小文件：
+
+```powershell
+$env:SUNPACK_CONFIG_OVERRIDES = '{"filesystem": {"scan_filters": [{"name": "size_range", "enabled": false}]}}'
+python sunpack.py scan C:\Archives
+```
+
+或保留过滤器、把阈值降到 0：
+
+```powershell
+$env:SUNPACK_CONFIG_OVERRIDES = '{"filesystem": {"scan_filters": [{"name": "size_range", "range": "r >= 0"}]}}'
+```
+
+覆盖里出现未知的顶层配置节会直接报错，避免拼错字段名被静默忽略。CLI 参数（如 `--recur`、`--sched`、`--cleanup`）与运行覆盖共用同一套合并逻辑，在加载完成后作为最后一层生效。
+
+pytest 默认注入一份覆盖，关闭 `size_range` 过滤器，因此测试可以使用小于 1MB 的文件；调用方如果自己设置了 `SUNPACK_CONFIG_OVERRIDES`，pytest 会保留调用方的值。
+
 ## 顶层结构
 
 ```json
