@@ -9,7 +9,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tests.helpers.tool_config import get_optional_rar, get_test_tools, require_7z, require_zstd
+from tests.helpers.tool_config import (
+    get_optional_rar,
+    get_optional_winrar,
+    get_test_tools,
+    require_7z,
+    require_zstd,
+)
 
 
 MINIMAL_JPEG_BYTES = bytes.fromhex(
@@ -313,6 +319,8 @@ def create_rar_archive(
     split_volume_size: int = 100 * 1024,
 ):
     rar = get_optional_rar()
+    if sfx and (rar is None or not (rar.parent / "Default.SFX").is_file()):
+        rar = get_optional_winrar()
     if not rar:
         raise FileNotFoundError("RAR generator is not configured.")
     cmd = [str(rar), "a", "-ep1", "-r", "-idq", "-m0", "-ma5", "-y"]

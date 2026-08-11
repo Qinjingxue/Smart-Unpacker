@@ -404,6 +404,41 @@ def test_input_planning_stage_projects_rar_sfx_volume_password_probe(tmp_path):
     assert task.split_info.archive_input.open_mode == "sfx_with_volumes"
 
 
+def test_input_planning_preserves_structured_password_probe_for_split_segment_at_zero(tmp_path):
+    first = tmp_path / "case.7z.001"
+    second = tmp_path / "case.7z.002"
+    first.write_bytes(b"7z-first")
+    second.write_bytes(b"7z-second")
+    evidence = ArchiveFormatEvidence(
+        format="7z",
+        confidence=0.99,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=None, confidence=0.99)],
+        details={"password_required": True},
+    )
+    task = _task(first, parts=[first, second])
+    descriptor = ArchiveInputDescriptor.from_split_volumes(
+        archive_path=str(first),
+        volumes=[
+            {"path": str(first), "number": 1, "style": "numeric_suffix", "prefix": "case.7z", "role": "first", "width": 3},
+            {"path": str(second), "number": 2, "style": "numeric_suffix", "prefix": "case.7z", "role": "member", "width": 3},
+        ],
+        format_hint="7z",
+        logical_name="case",
+    )
+    task.split_info.archive_input = descriptor
+    task.set_archive_input(descriptor)
+    stage = ArchiveInputPlanningStage({"input_planning": {"enabled": False}})
+    stage.enabled = True
+    stage.analyzer = _FakeAnalyzer(_multi_report(first, [evidence]))
+
+    stage.plan_task(task)
+
+    probe = knowledge_view.source_password_probe_input(task)
+    assert probe["open_mode"] == "native_volumes"
+    assert [part["path"] for part in probe["parts"]] == [str(first), str(second)]
+
+
 def test_input_planner_understands_rar_patch_state_without_reading_carrier_prefix(tmp_path):
     prefix = b"MZ-RAR-SFX-STUB" * 8
     rar_payload = _rar4_bytes()

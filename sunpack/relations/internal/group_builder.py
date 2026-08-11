@@ -49,12 +49,17 @@ class RelationsGroupBuilder:
         for group in groups:
             anchor = group.head_metadata if isinstance(group.head_metadata, dict) else {}
             roles = {str(value).lower() for value in (anchor.get("anchor_roles") or [])}
+            evidence = {str(value).lower() for value in (anchor.get("evidence") or [])}
             group_keys = {path_key(path) for path in group.all_paths}
             head_missing_from_contract = path_key(group.head_path) not in group_keys
             if not bool(
                 anchor.get("confidence") == "strong"
-                and anchor.get("multivolume")
-                and "first" in roles
+                and (anchor.get("multivolume") or anchor.get("sfx"))
+                and (
+                    "first" in roles
+                    or anchor.get("sfx")
+                    or "rar5:encryption_header" in evidence
+                )
                 and anchor.get("format")
                 and (head_missing_from_contract or group.split_group_complete is not True)
             ):

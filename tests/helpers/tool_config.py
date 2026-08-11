@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 
 
@@ -32,12 +33,16 @@ def get_test_tools() -> dict[str, Path | None]:
     seven_zip_sfx = os.environ.get("sunpack_TEST_7Z_SFX") or config.get("seven_zip_sfx") or "tools/7zCon.sfx"
     zstd_exe = os.environ.get("sunpack_TEST_ZSTD") or config.get("zstd_exe") or "tools/zstd.exe"
     rar_exe = os.environ.get("sunpack_TEST_RAR") or config.get("rar_exe")
+    winrar_exe = os.environ.get("sunpack_TEST_WINRAR") or config.get("winrar_exe")
+    if not winrar_exe:
+        winrar_exe = shutil.which("WinRAR.exe")
 
     return {
         "seven_zip": _resolve_tool(seven_zip, repo_root),
         "seven_zip_sfx": _resolve_tool(seven_zip_sfx, repo_root),
         "zstd_exe": _resolve_tool(zstd_exe, repo_root),
         "rar_exe": _resolve_tool(rar_exe, repo_root),
+        "winrar_exe": _resolve_tool(winrar_exe, repo_root),
     }
 
 
@@ -65,3 +70,8 @@ def get_optional_rar_sfx() -> Path | None:
     if rar is None or not (rar.parent / "Default.SFX").is_file():
         return None
     return rar
+
+
+def get_optional_winrar() -> Path | None:
+    winrar = get_test_tools()["winrar_exe"]
+    return winrar if winrar and winrar.is_file() else None

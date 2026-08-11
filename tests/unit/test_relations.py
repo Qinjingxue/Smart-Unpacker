@@ -1,4 +1,5 @@
 from pathlib import Path
+import struct
 
 import pytest
 
@@ -47,7 +48,6 @@ def test_strict_formats_with_same_stem_never_cross_merge(tmp_path):
         ["movie.part1.photo", "movie.part2.document"],
         ["movie.7z.001.noise.bin", "movie.7z.002.noise.bin"],
         ["movie.volume_1.fake", "movie.volume_2.fake"],
-        ["movie.z01", "movie.z02", "movie.zip"],
         ["setup.exe", "setup.001", "setup.002"],
     ],
 )
@@ -91,15 +91,98 @@ def test_public_parser_exposes_only_strict_names(name, number, style):
         "archive.7z.001.noise.bin",
         "archive.part1.rar.hidden",
         "archive.volume_1.fake",
-        "archive.z01",
         "archive.[z-02]~",
     ],
 )
-def test_public_parser_rejects_camouflage_and_ancient_zip_spanned(name):
+def test_public_parser_rejects_camouflage(name):
     scheduler = RelationsScheduler()
 
     assert scheduler.parse_numbered_volume(name) is None
     assert scheduler.detect_split_role(name) is None
+
+
+def test_public_parser_accepts_modern_split_zip_members():
+    scheduler = RelationsScheduler()
+
+    first = scheduler.parse_numbered_volume("archive.z01")
+    later = scheduler.parse_numbered_volume("archive.z12")
+
+    assert first is not None
+    assert first["number"] == 1
+    assert first["style"] == "zip_spanned"
+    assert later is not None
+    assert later["number"] == 12
+    assert later["style"] == "zip_spanned"
+
+
+def test_split_zip_structure_anchor_recovers_decorated_middle_member(tmp_path):
+    first = tmp_path / "modern.z01"
+    disguised_second = tmp_path / "modern.z02.useless.bin"
+    terminal = tmp_path / "modern.zip"
+    first.write_bytes(_split_zip_first_bytes())
+    disguised_second.write_bytes(b"opaque-middle-volume")
+    terminal.write_bytes(_split_zip_terminal_bytes(disk=2, cd_disk=2))
+
+    group = next(group for group in _groups(tmp_path) if group.logical_name == "modern")
+
+    assert [Path(path).name for path in group.all_paths] == [
+        first.name,
+        disguised_second.name,
+        terminal.name,
+    ]
+    assert [volume.number for volume in group.split_volumes] == [1, 2, 3]
+    assert [volume.role for volume in group.split_volumes] == ["first", "member", "terminal"]
+    assert all(volume.style == "zip_spanned" for volume in group.split_volumes)
+    assert group.split_missing_indices == []
+    assert group.split_completeness_status == "retry_pending_validation"
+
+
+def test_split_zip_without_terminal_reports_strong_missing_tail(tmp_path):
+    first = tmp_path / "modern.z01"
+    second = tmp_path / "modern.z02"
+    first.write_bytes(_split_zip_first_bytes())
+    second.write_bytes(b"opaque-middle-volume")
+
+    group = next(group for group in _groups(tmp_path) if group.logical_name == "modern")
+
+    assert group.split_group_complete is False
+    assert group.split_missing_reason == "missing_tail"
+    assert group.split_missing_indices == [3]
+    assert group.split_completeness_status == "tail_missing"
+    assert group.split_completeness_confidence == "strong"
+
+
+def _split_zip_first_bytes() -> bytes:
+    name = b"x"
+    local = struct.pack(
+        "<4s5H3L2H",
+        b"PK\x03\x04",
+        20,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        len(name),
+        0,
+    )
+    return b"PK\x07\x08" + local + name
+
+
+def _split_zip_terminal_bytes(*, disk: int, cd_disk: int) -> bytes:
+    return struct.pack(
+        "<4s4H2LH",
+        b"PK\x05\x06",
+        disk,
+        cd_disk,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
 
 
 def test_standalone_tbz2_cannot_become_zip_volume_two(tmp_path):

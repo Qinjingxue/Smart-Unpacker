@@ -1,7 +1,9 @@
 # Structure-first volume resolution
 
 SunPack resolves archive volumes in two deliberately bounded phases. Initial discovery is
-strict and cheap; a failed extraction may request exactly one structure-driven regrouping.
+strict and cheap, followed immediately by one structure-driven completion attempt for an
+incomplete strong-anchor group; a failed extraction may request the same bounded resolver once
+more after the directory contents have changed.
 There is no general resolution loop and no filename-only camouflage grouping.
 
 ## Pipeline contract
@@ -44,11 +46,15 @@ Initial Relations grouping accepts only strict conventional names. On the one re
    A generic `partN`/numeric member is allowed only when that primary stem has exactly one
    structure-confirmed archive format in the directory; mixed-format stems require the format
    token and therefore cannot cross-merge.
-5. Do not apply constrained filename matching when no strong anchor exists, for RAR members,
-   or for an SFX anchor.
+   If multiple archives of the same format share that primary stem, a stable discriminator token
+   must be shared by the anchor and its candidate members. The discriminator becomes part of the
+   logical task identity; without one the result is reported as ambiguous rather than guessed.
+5. Do not apply constrained filename matching when no strong anchor exists. Ordinary native
+   RAR volume sets remain structure-only; only a structurally confirmed RAR SFX first chunk may
+   constrain opaque numbered continuations produced by a generic byte splitter.
 
-The relaxed decorated-name parsers are private to step 4. They are not exposed through
-`parse_numbered_volume`, `detect_split_role`, initial grouping or watcher discovery.
+The relaxed decorated-name parsers are private to step 4. Canonical modern split-ZIP `.z01`,
+`.z02`, ... names are strict relations; decorated variants remain private recovery evidence.
 
 Volume evidence is private to Relations. It is used to replace matching physical-file
 candidates with one logical `ArchiveInputDescriptor`, then exposed only as diagnostic
@@ -62,15 +68,18 @@ and rules; repeated structural reads are absorbed by the native reader/session c
 |---|---|---|---|
 | 7z split | First part has the 7z Start Header; middle and tail parts can be raw bytes | `.7z.001`, `.7z.002`, ... | Anchor-constrained matching for raw members |
 | ZIP raw split | First part has local-file structure; terminal part has an EOCD; middle parts can be raw bytes | `.zip.001`, `.zip.002`, ... | Anchor-constrained matching for raw members |
-| RAR4/RAR5 volume set | Every native volume carries a RAR marker and main-volume header; RAR5 also carries an internal zero-based volume number after the first volume | `.part1.rar`, `.part2.rar`, ...; supported strict legacy RAR naming remains available | Structure only; no opaque member fallback |
-| RAR SFX volume set | First volume may have an `MZ` stub before the RAR structure; later native volumes still carry RAR structure | `.part1.exe`, `.part2.rar`, ... | Structure only |
-| ZIP spanned | Multi-disk metadata and `.z01` naming | Not supported by Relations | None |
-| Generic byte-split RAR/SFX | No native per-volume structure | Not supported | None |
+| ZIP split archive | First `.z01` starts with the split marker and local header; terminal `.zip` EOCD carries the zero-based disk number; middle `.zNN` parts can be opaque | `.z01`, `.z02`, ..., `.zip` | Structure-first grouping plus anchor-constrained decorated `.zNN` recovery |
+| RAR4/RAR5 volume set | Every native volume carries a RAR marker; ordinary RAR5 exposes its internal volume number, while header-encrypted RAR5 exposes a CRC-protected type-4 encryption header and relies on anchor-constrained naming for order | `.part1.rar`, `.part2.rar`, ...; supported strict legacy RAR naming remains available | Structure first; opaque ordinary RAR members are not admitted |
+| RAR SFX volume set | First volume may have an `MZ` stub before the RAR structure; later native volumes still carry RAR structure | `.part1.exe`, `.part2.rar`, ... | Structure first |
+| 7-Zip SFX plus volumes | Current 7-Zip emits a separate SFX launcher beside an ordinary `.7z.001`, `.7z.002`, ... set | `.exe` plus `.7z.001`, ... | The archive set follows normal 7z rules; the launcher is not misclassified as a data volume |
+| Opaque 7z/ZIP SFX split | Strong embedded first anchor plus opaque numbered continuations | Decorated format/part/volume numbering | Anchor-constrained matching and structural upper bounds |
+| Generic byte-split RAR SFX | Strong embedded RAR SFX anchor plus opaque numbered continuations | Decorated format/part/volume numbering | SFX-anchor-constrained matching; ordinary RAR cannot use this fallback |
 
 References: [7-Zip recovery and volume layout](https://www.7-zip.org/recover.html),
+[7-Zip volume switch](https://documentation.help/7-Zip-15.14/volume.htm),
 [RAR 5.0 archive format](https://www.rarlab.com/technote.htm),
 [RAR volume naming](https://www.rarlab.com/rar_file.htm), and
-[PKWARE ZIP APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
+[Bandizip current split-ZIP documentation](https://en.bandisoft.com/bandizip/howto/open-z01/).
 
 ## I/O and cache guarantees
 

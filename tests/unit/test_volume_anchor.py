@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bz2
+import struct
 import zipfile
 
 from sunpack.analysis.volume_anchor import probe_volume_anchor_paths
@@ -55,3 +56,60 @@ def test_small_zip_tail_is_read_past_the_initial_prefix(tmp_path):
     assert evidence.format == "zip"
     assert evidence.standalone is True
     assert {"first", "terminal", "standalone"} <= set(evidence.anchor_roles)
+
+
+def test_modern_split_zip_first_marker_is_a_strong_volume_anchor(tmp_path):
+    candidate = tmp_path / "archive.z01"
+    name = b"x"
+    local = struct.pack(
+        "<4s5H3L2H",
+        b"PK\x03\x04",
+        20,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        len(name),
+        0,
+    )
+    candidate.write_bytes(b"PK\x07\x08" + local + name)
+
+    evidence = probe_volume_anchor_paths([str(candidate)]).get(str(candidate))
+
+    assert evidence is not None
+    assert evidence.structurally_confirmed
+    assert evidence.format == "zip"
+    assert evidence.multivolume is True
+    assert evidence.internal_volume_number == 1
+    assert "first" in evidence.anchor_roles
+    assert "zip:split_marker" in evidence.evidence
+
+
+def test_modern_split_zip_eocd_exposes_terminal_volume_number(tmp_path):
+    candidate = tmp_path / "archive.zip"
+    candidate.write_bytes(
+        struct.pack(
+            "<4s4H2LH",
+            b"PK\x05\x06",
+            3,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+
+    evidence = probe_volume_anchor_paths([str(candidate)]).get(str(candidate))
+
+    assert evidence is not None
+    assert evidence.structurally_confirmed
+    assert evidence.format == "zip"
+    assert evidence.multivolume is True
+    assert evidence.internal_volume_number == 4
+    assert "terminal" in evidence.anchor_roles
+    assert "zip:eocd_split_terminal" in evidence.evidence

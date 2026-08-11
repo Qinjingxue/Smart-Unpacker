@@ -158,7 +158,7 @@ pub(crate) fn relations_resolve_volume_once(
         .filter_map(|path| anchor_by_path.get(&path.to_ascii_lowercase()))
         .filter(|anchor| {
             anchor.confidence == "strong"
-                && anchor.multivolume
+                && (anchor.multivolume || anchor.sfx)
                 && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
         })
         .collect();
@@ -176,6 +176,9 @@ pub(crate) fn relations_resolve_volume_once(
     } else {
         return Ok(None);
     };
+    let target_has_sfx_anchor = current_structural
+        .iter()
+        .any(|anchor| anchor.format == target_format && anchor.sfx);
     let anchor_path = current_paths
         .iter()
         .find(|path| {
@@ -183,7 +186,7 @@ pub(crate) fn relations_resolve_volume_once(
                 .get(&path.to_ascii_lowercase())
                 .is_some_and(|anchor| {
                     anchor.confidence == "strong"
-                        && anchor.multivolume
+                        && (anchor.multivolume || anchor.sfx)
                         && anchor.format == target_format
                 })
         })
@@ -194,11 +197,38 @@ pub(crate) fn relations_resolve_volume_once(
     if primary_stem.is_empty() {
         return Ok(None);
     }
+    let structural_peers: Vec<&VolumeAnchor> = anchor_by_path
+        .values()
+        .filter(|anchor| {
+            anchor.confidence == "strong"
+                && (anchor.multivolume || anchor.sfx)
+                && anchor.format == target_format
+                && retry_primary_stem(basename(&anchor.path)) == primary_stem
+                && (anchor.anchor_roles.contains(&"first")
+                    || anchor.sfx
+                    || anchor.internal_volume_number == Some(1)
+                    || retry_volume_number(basename(&anchor.path), target_format) == Some(1))
+        })
+        .collect();
+    let retry_discriminators =
+        retry_unique_discriminators(anchor_name, target_format, &structural_peers, &anchor_path);
+    if structural_peers.len() > 1 && retry_discriminators.is_empty() {
+        // Two archives of the same format and primary stem are information-
+        // theoretically ambiguous without another stable filename token.
+        return Ok(None);
+    }
+    let resolved_logical_name = if structural_peers.len() > 1 {
+        let mut tokens: Vec<&str> = retry_discriminators.iter().map(String::as_str).collect();
+        tokens.sort_unstable();
+        format!("{primary_stem}.{}", tokens[0])
+    } else {
+        primary_stem.clone()
+    };
     let structural_formats: HashSet<&str> = anchor_by_path
         .values()
         .filter(|anchor| {
             anchor.confidence == "strong"
-                && anchor.multivolume
+                && (anchor.multivolume || anchor.sfx)
                 && retry_primary_stem(basename(&anchor.path)) == primary_stem
                 && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
         })
@@ -206,9 +236,6 @@ pub(crate) fn relations_resolve_volume_once(
         .collect();
     let allow_generic_name_fallback =
         structural_formats.len() == 1 && structural_formats.contains(target_format);
-    let anchor_is_sfx = anchor_by_path
-        .get(&anchor_path.to_ascii_lowercase())
-        .is_some_and(|anchor| anchor.sfx);
     let structural_upper_bound =
         retry_structural_upper_bound(&all_paths, &anchor_by_path, target_format, &primary_stem);
 
@@ -219,16 +246,28 @@ pub(crate) fn relations_resolve_volume_once(
         if retry_primary_stem(name) != primary_stem {
             continue;
         }
+        if structural_peers.len() > 1
+            && retry_identity_tokens(name, target_format).is_disjoint(&retry_discriminators)
+        {
+            continue;
+        }
         let evidence = anchor_by_path.get(&path.to_ascii_lowercase());
         if let Some(anchor) = evidence.filter(|anchor| {
-            anchor.confidence == "strong" && anchor.multivolume && anchor.format == target_format
+            anchor.confidence == "strong"
+                && (anchor.multivolume || anchor.sfx)
+                && anchor.format == target_format
         }) {
             let number = if target_format == "rar" {
-                anchor.internal_volume_number
+                anchor
+                    .internal_volume_number
+                    .or_else(|| (target_has_sfx_anchor && anchor.sfx).then_some(1))
+                    .or_else(|| retry_volume_number(name, target_format))
             } else if anchor.anchor_roles.contains(&"first") {
                 Some(1)
             } else {
-                retry_volume_number(name, target_format)
+                anchor
+                    .internal_volume_number
+                    .or_else(|| retry_volume_number(name, target_format))
             };
             if let Some(number) = number.filter(|number| *number > 0) {
                 structural_number_conflict |= insert_resolved_volume(
@@ -237,6 +276,23 @@ pub(crate) fn relations_resolve_volume_once(
                         path: path.clone(),
                         number,
                         source: "structure",
+                        role: if anchor.anchor_roles.contains(&"first")
+                            || (target_format == "rar" && anchor.sfx)
+                        {
+                            "first"
+                        } else if anchor.anchor_roles.contains(&"terminal") {
+                            "terminal"
+                        } else {
+                            "member"
+                        },
+                        style: if target_format == "zip"
+                            && anchor.evidence.iter().any(|item| {
+                                matches!(*item, "zip:split_marker" | "zip:eocd_split_terminal")
+                            }) {
+                            "zip_spanned"
+                        } else {
+                            ""
+                        },
                     },
                 );
             }
@@ -248,9 +304,10 @@ pub(crate) fn relations_resolve_volume_once(
         {
             continue;
         }
-        // Native RAR volumes carry their own headers. Generic byte-split RAR
-        // and every byte-split SFX layout are deliberately unsupported.
-        if target_format == "rar" || anchor_is_sfx {
+        // Native RAR volume sets normally carry a header in every part. Only
+        // a structurally confirmed SFX anchor opens the opaque fallback used
+        // by modern generic byte splitters; ordinary RAR remains structure-only.
+        if target_format == "rar" && !target_has_sfx_anchor {
             continue;
         }
         let Some(number) = retry_volume_number(name, target_format).or_else(|| {
@@ -269,6 +326,8 @@ pub(crate) fn relations_resolve_volume_once(
                 path: path.clone(),
                 number,
                 source: "anchored_name",
+                role: if number == 1 { "first" } else { "member" },
+                style: "",
             },
         );
     }
@@ -295,7 +354,7 @@ pub(crate) fn relations_resolve_volume_once(
         py,
         &volumes,
         target_format,
-        &primary_stem,
+        &resolved_logical_name,
         anchor_by_path.get(&anchor_path.to_ascii_lowercase()),
     )
     .map(Some)
@@ -306,6 +365,8 @@ struct ResolvedVolume {
     path: String,
     number: u32,
     source: &'static str,
+    role: &'static str,
+    style: &'static str,
 }
 
 fn insert_resolved_volume(
@@ -338,7 +399,11 @@ fn retry_structural_upper_bound(
                 && anchor.confidence == "strong"
                 && anchor.format == "zip"
                 && anchor.anchor_roles.contains(&"terminal"))
-            .then(|| retry_volume_number(name, "zip"))
+            .then(|| {
+                anchor
+                    .internal_volume_number
+                    .or_else(|| retry_volume_number(name, "zip"))
+            })
             .flatten()
         });
     }
@@ -350,7 +415,6 @@ fn retry_structural_upper_bound(
                 || anchor.confidence != "strong"
                 || anchor.format != "7z"
                 || !anchor.anchor_roles.contains(&"first")
-                || anchor.sfx
                 || anchor.size == 0
             {
                 return None;
@@ -384,6 +448,62 @@ fn retry_primary_stem(name: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase()
+}
+
+fn retry_unique_discriminators(
+    anchor_name: &str,
+    target_format: &str,
+    peers: &[&VolumeAnchor],
+    anchor_path: &str,
+) -> HashSet<String> {
+    if peers.len() <= 1 {
+        return HashSet::new();
+    }
+    let mut unique = retry_identity_tokens(anchor_name, target_format);
+    for peer in peers {
+        if peer.path.eq_ignore_ascii_case(anchor_path) {
+            continue;
+        }
+        let peer_tokens = retry_identity_tokens(basename(&peer.path), target_format);
+        unique.retain(|token| !peer_tokens.contains(token));
+    }
+    unique
+}
+
+fn retry_identity_tokens(name: &str, target_format: &str) -> HashSet<String> {
+    let primary = retry_primary_stem(name);
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token != &primary && token != target_format)
+        .filter(|token| {
+            !matches!(
+                token.as_str(),
+                "exe"
+                    | "rar"
+                    | "zip"
+                    | "7z"
+                    | "bin"
+                    | "dat"
+                    | "fake"
+                    | "junk"
+                    | "noise"
+                    | "unused"
+                    | "useless"
+                    | "download"
+                    | "downloading"
+            )
+        })
+        .filter(|token| {
+            let digits = token
+                .strip_prefix("part")
+                .or_else(|| token.strip_prefix("volume"))
+                .or_else(|| token.strip_prefix("vol"))
+                .or_else(|| token.strip_prefix('z'))
+                .unwrap_or(token);
+            digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .collect()
 }
 
 fn retry_volume_number(name: &str, target_format: &str) -> Option<u32> {
@@ -441,6 +561,12 @@ fn resolved_volume_group_to_dict(
         .iter()
         .find(|volume| volume.number == 1)
         .unwrap_or(&volumes[0]);
+    let resolved_style =
+        if format == "zip" && volumes.iter().any(|volume| volume.style == "zip_spanned") {
+            "zip_spanned".to_string()
+        } else {
+            format!("{format}_structure_retry")
+        };
     let relation = FileRelationNative {
         filename: basename(&head.path).to_string(),
         logical_name: logical_name.to_string(),
@@ -455,7 +581,7 @@ fn resolved_volume_group_to_dict(
         match_rar_disguised: false,
         match_rar_head: format == "rar",
         match_001_head: true,
-        split_family: format!("{format}_structure_retry"),
+        split_family: resolved_style.clone(),
         split_index: 1,
     };
     let all_parts: Vec<&str> = volumes.iter().map(|volume| volume.path.as_str()).collect();
@@ -465,16 +591,9 @@ fn resolved_volume_group_to_dict(
             let dict = PyDict::new(py);
             dict.set_item("path", &volume.path)?;
             dict.set_item("number", volume.number)?;
-            dict.set_item(
-                "role",
-                if volume.number == 1 {
-                    "first"
-                } else {
-                    "member"
-                },
-            )?;
+            dict.set_item("role", volume.role)?;
             dict.set_item("source", volume.source)?;
-            dict.set_item("style", format!("{format}_structure_retry"))?;
+            dict.set_item("style", &resolved_style)?;
             dict.set_item("prefix", logical_name)?;
             dict.set_item("width", 3)?;
             Ok(dict.unbind())
@@ -954,7 +1073,15 @@ fn split_completeness_assessment(
         }
         "missing_tail" => {
             basis.push("required_terminal_absent");
-            ("tail_missing", "hint", basis)
+            (
+                "tail_missing",
+                if canonical_scheme || head_content_confirmed {
+                    "strong"
+                } else {
+                    "hint"
+                },
+                basis,
+            )
         }
         _ if contract.complete == Some(true) => (
             "coherent",
@@ -1232,9 +1359,43 @@ fn build_native_split_contract(
         }
     }
 
+    let mut has_zip_terminal = false;
+    if anchor.style == "zip_spanned" {
+        if let Some((entry, number)) = group_entries.iter().find_map(|entry| {
+            let relation = relations.get(&entry.name)?;
+            let terminal = relation.split_family == "zip_spanned"
+                && relation.split_role.as_deref() == Some("terminal")
+                && relation.split_index > 1
+                && split_ext(&entry.path)
+                    .0
+                    .eq_ignore_ascii_case(&anchor.prefix);
+            terminal.then_some((entry, relation.split_index))
+        }) {
+            has_zip_terminal = true;
+            by_number.insert(
+                number,
+                NativeSplitVolume {
+                    path: entry.path.clone(),
+                    number,
+                    role: "terminal",
+                    source: "structure",
+                    style: anchor.style.to_string(),
+                    prefix: anchor.prefix.clone(),
+                    width: anchor.width,
+                },
+            );
+        }
+    }
+
     let max_number = by_number.keys().copied().max().unwrap_or(0);
     let present_numbers: HashSet<u32> = by_number.keys().copied().collect();
-    let (missing_ranges, missing) = observed_missing(&present_numbers, max_number);
+    let (mut missing_ranges, mut missing) = observed_missing(&present_numbers, max_number);
+    let zip_tail_missing = anchor.style == "zip_spanned" && !has_zip_terminal;
+    if zip_tail_missing {
+        let tail_number = max_number.saturating_add(1);
+        missing_ranges.push((tail_number, tail_number));
+        missing.push(tail_number);
+    }
 
     let mut volumes: Vec<NativeSplitVolume> = by_number.into_values().collect();
     volumes.sort_by(|left, right| {
@@ -1248,6 +1409,8 @@ fn build_native_split_contract(
         String::new()
     } else if missing.contains(&1) {
         "missing_head".to_string()
+    } else if zip_tail_missing && missing.len() == 1 {
+        "missing_tail".to_string()
     } else {
         "missing_middle".to_string()
     };
@@ -1372,6 +1535,7 @@ fn build_file_relation(
         split_index = parsed.number;
         split_family = match (parsed.family, parsed.style) {
             ("rar", "rar_part" | "rar_sfx_part") => "rar_part",
+            ("zip", "zip_spanned") => "zip_spanned",
             ("7z", "part_numbered") => "7z_part",
             ("zip", "part_numbered") => "zip_part",
             (_, "part_numbered") => "generic_part",
@@ -1449,6 +1613,13 @@ fn build_file_relation(
         );
         if split_family.is_empty() {
             split_family = format!("{}_volume_anchor", anchor.format);
+            split_index = anchor.internal_volume_number.unwrap_or(1);
+        }
+        if anchor.format == "zip"
+            && anchor.anchor_roles.contains(&"terminal")
+            && anchor.internal_volume_number.is_some()
+        {
+            split_family = "zip_spanned".to_string();
             split_index = anchor.internal_volume_number.unwrap_or(1);
         }
     }
@@ -1569,7 +1740,7 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
 fn logical_name_from_parsed(parsed: &ParsedVolume) -> String {
     if matches!(
         parsed.style,
-        "rar_part" | "rar_sfx_part" | "part_numbered" | "rar_oldstyle"
+        "rar_part" | "rar_sfx_part" | "part_numbered" | "rar_oldstyle" | "zip_spanned"
     ) || parsed.family == "generic"
     {
         return clean_logical_name(&parsed.prefix);
@@ -1618,6 +1789,7 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
         let scheme = match parsed.style {
             "rar_part" | "rar_sfx_part" => "rar:part",
             "rar_oldstyle" => "rar:oldstyle",
+            "zip_spanned" => "zip:spanned",
             "zip_zero_numbered" => "zip:zero-numbered",
             "numeric_suffix" => "archive:numeric",
             "plain_numeric_suffix" => "generic:numeric",
@@ -1634,6 +1806,7 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
         ".zip" => {
             keys.push(split_size_family_key("archive:numeric", path));
             keys.push(split_size_family_key("zip:zero-numbered", path));
+            keys.push(split_size_family_key("zip:spanned", &base));
         }
         ".rar" => {
             keys.push(split_size_family_key("archive:numeric", path));
@@ -1724,6 +1897,9 @@ fn parse_numbered_volume_name(filename: &str) -> Option<ParsedVolume> {
 fn parse_volume_candidates(filename: &str) -> Vec<ParsedVolume> {
     let mut candidates = Vec::new();
 
+    if let Some(parsed) = parse_zip_split_volume(filename) {
+        push_unique_volume_candidate(&mut candidates, parsed);
+    }
     if let Some(parsed) = parse_marker_numbered_volume(filename) {
         push_unique_volume_candidate(&mut candidates, parsed);
     }
@@ -1842,6 +2018,24 @@ fn parse_volume_candidates(filename: &str) -> Vec<ParsedVolume> {
         Some(())
     })();
     candidates
+}
+
+fn parse_zip_split_volume(filename: &str) -> Option<ParsedVolume> {
+    let captures = parse_zip_split_re().captures(filename)?;
+    let raw_number = captures.name("number")?.as_str();
+    let number = raw_number.parse::<u32>().ok().filter(|value| *value > 0)?;
+    let tail = captures
+        .name("tail")
+        .map(|value| value.as_str())
+        .unwrap_or_default();
+    Some(ParsedVolume {
+        prefix: captures.name("prefix")?.as_str().to_string(),
+        number,
+        style: "zip_spanned",
+        width: raw_number.len(),
+        family: "zip",
+        decorated: !tail.is_empty(),
+    })
 }
 
 fn push_unique_volume_candidate(candidates: &mut Vec<ParsedVolume>, candidate: ParsedVolume) {
@@ -2170,6 +2364,7 @@ fn relation_group_key(relation: &FileRelationNative) -> String {
     let family_and_scheme = match relation.split_family.as_str() {
         "7z_numbered" => "7z:numeric",
         "zip_numbered" => "zip:numeric",
+        "zip_spanned" => "zip:spanned",
         "rar_numbered" => "rar:numeric",
         "rar_part" => "rar:part",
         "7z_part" => "7z:part",
@@ -2272,6 +2467,11 @@ fn parse_archive_numbered_re() -> &'static Regex {
 fn parse_zip_zero_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$"))
+}
+
+fn parse_zip_split_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.z(?P<number>\d{2,})(?P<tail>(?:\..+)?)$"))
 }
 
 fn parse_rar_part_re() -> &'static Regex {

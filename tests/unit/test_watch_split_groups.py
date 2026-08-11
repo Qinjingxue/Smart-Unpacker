@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,24 @@ def _watcher(tmp_path, runner_factory) -> WatchScheduler:
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(runner_factory),
         group_coordinator=WatchGroupCoordinator({}),
+    )
+
+
+def _split_zip_first_bytes() -> bytes:
+    return b"PK\x07\x08" + b"PK\x03\x04" + (b"\x00" * 64)
+
+
+def _split_zip_terminal_bytes(disk_number: int) -> bytes:
+    return b"tail" + struct.pack(
+        "<4s4H2LH",
+        b"PK\x05\x06",
+        disk_number,
+        disk_number,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
 
 
@@ -210,6 +229,43 @@ def test_watch_does_not_infer_missing_tail_from_equal_volume_sizes(tmp_path):
     assert attempts == [str(head.resolve())]
 
 
+def test_watch_holds_modern_split_zip_until_terminal_volume_arrives(tmp_path):
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    watcher = _watcher(tmp_path, Runner)
+    root = tmp_path / "in"
+    first = root / "shared.z01"
+    second = root / "shared.z02"
+    first.write_bytes(_split_zip_first_bytes())
+    second.write_bytes(b"opaque middle volume")
+    watcher.enqueue(str(first))
+
+    first_result = watcher.run_once()
+
+    assert first_result.processed == 0
+    assert attempts == []
+    state = watcher.state.group_state(next(iter(watcher.state.groups)))
+    assert state is not None
+    assert state.failure_payload["details"]["completeness_status"] == "tail_missing"
+    assert state.failure_payload["details"]["completeness_confidence"] == "strong"
+
+    terminal = root / "shared.zip"
+    terminal.write_bytes(_split_zip_terminal_bytes(2))
+    watcher.enqueue(str(terminal))
+
+    second_result = watcher.run_once()
+    assert second_result.succeeded == 1
+    assert attempts == [str(first.resolve())]
+
+
 def test_watch_runtime_missing_volume_retries_only_after_group_changes(tmp_path):
     attempts: list[str] = []
 
@@ -357,7 +413,7 @@ def test_watch_replaces_missing_blocker_with_password_blocker_after_retry(tmp_pa
     assert len(attempts) == 3
 
 
-def test_watch_single_archive_combined_failure_waits_for_first_detected_part(tmp_path):
+def test_watch_combined_failure_waits_for_split_group_change(tmp_path):
     attempts: list[str] = []
     combined = FailureInfo(
         FailureKind.MISSING_VOLUME,
@@ -376,19 +432,22 @@ def test_watch_single_archive_combined_failure_waits_for_first_detected_part(tmp
 
     watcher = _watcher(tmp_path, Runner)
     root = tmp_path / "in"
-    terminal = root / "sample.zip"
-    terminal.write_bytes(b"PK\x05\x06")
-    watcher.enqueue(str(terminal))
+    head = root / "sample.7z.001"
+    second = root / "sample.7z.002"
+    head.write_bytes(b"7z\xbc\xaf\x27\x1c-head")
+    second.write_bytes(b"part-2")
+    watcher.enqueue(str(head))
+    watcher.enqueue(str(second))
     assert watcher.run_once().failed == 1
 
     watcher.notify_password_source_changed("test")
     assert watcher.run_once().processed == 0
-    first_part = root / "sample.z01"
-    first_part.write_bytes(b"split payload")
-    watcher.enqueue(str(first_part))
+    third = root / "sample.7z.003"
+    third.write_bytes(b"part-3")
+    watcher.enqueue(str(third))
 
     assert watcher.run_once().succeeded == 1
-    assert attempts == [str(terminal.resolve()), str(first_part.resolve())]
+    assert attempts == [str(head.resolve()), str(head.resolve())]
 
 
 def test_watch_split_suspension_survives_restart(tmp_path):

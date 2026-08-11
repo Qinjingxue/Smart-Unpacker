@@ -260,7 +260,7 @@ class ArchiveInputPlanningStage:
                 password_probe_input = (
                     self._password_probe_input_for_segment(task, *selected_segment)
                     if selected_segment is not None
-                    else None
+                    else self._structured_volume_source(task)
                 )
                 _write_plan_knowledge(
                     task,
@@ -293,6 +293,14 @@ class ArchiveInputPlanningStage:
         with _phase(phase_timer, f"{phase_prefix}_state_update"):
             self._record_planning_state(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
         return [task]
+
+    @staticmethod
+    def _structured_volume_source(task: ArchiveTask) -> ArchiveInputDescriptor | None:
+        split_info = getattr(task, "split_info", None)
+        source_input = getattr(split_info, "archive_input", None)
+        if isinstance(source_input, ArchiveInputDescriptor) and len(source_input.parts) > 1:
+            return source_input
+        return None
 
     def _apply_selected_segment(
         self,
@@ -606,10 +614,20 @@ class ArchiveInputPlanningStage:
         if archive_input is not None:
             return archive_input
 
+        # A segment beginning at logical offset zero does not need a carved
+        # range, but password verification must still receive the structured
+        # multi-volume descriptor. Falling back to the single physical file
+        # loses the part table and makes encrypted split inputs unverifiable.
+        parts = self._ordered_parts(task)
+        if len(parts) > 1 and int(segment.start_offset) <= 0:
+            split_info = getattr(task, "split_info", None)
+            source_input = getattr(split_info, "archive_input", None)
+            if isinstance(source_input, ArchiveInputDescriptor) and len(source_input.parts) > 1:
+                return source_input
+
         # RAR volumes are independent containers and cannot become one concat
         # stream.  Header-password probes only need the real archive prefix in
         # the first SFX volume, while extraction retains sfx_with_volumes.
-        parts = self._ordered_parts(task)
         start = int(segment.start_offset)
         if str(evidence.format or "").lower() != "rar" or len(parts) < 2 or start <= 0:
             return None

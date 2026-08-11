@@ -13,6 +13,7 @@ const RAR5: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
 const ZIP_EOCD: &[u8] = b"PK\x05\x06";
 const ZIP_EMPTY: &[u8] = b"PK\x05\x06";
+const ZIP_SPLIT_MARKER: &[u8] = b"PK\x07\x08";
 const DEFAULT_PREFIX_LIMIT: usize = 1024 * 1024;
 const DEFAULT_TAIL_LIMIT: usize = 65_557;
 
@@ -181,8 +182,21 @@ fn probe_rar(prefix: &[u8], offset: usize, out: &mut VolumeAnchor) -> bool {
         .get(offset..)
         .is_some_and(|value| value.starts_with(RAR5))
     {
-        let Some((archive_flags, number)) = rar5_main_volume(prefix, offset + RAR5.len()) else {
-            return false;
+        let header_offset = offset + RAR5.len();
+        let Some((archive_flags, number)) = rar5_main_volume(prefix, header_offset) else {
+            if !rar5_encryption_header(prefix, header_offset) {
+                return false;
+            }
+            initialize_rar_anchor(out, offset);
+            // Header-encrypted RAR5 keeps the main-volume flags and number
+            // behind encryption. The CRC-protected type-4 header still gives
+            // strong format evidence; Relations may derive ordering only from
+            // an anchor-constrained filename hypothesis and Detection must
+            // validate the resulting logical input.
+            out.multivolume = true;
+            out.anchor_roles.push("encrypted_volume");
+            out.evidence.push("rar5:encryption_header");
+            return true;
         };
         initialize_rar_anchor(out, offset);
         out.multivolume = archive_flags & 0x01 != 0;
@@ -217,6 +231,32 @@ fn probe_rar(prefix: &[u8], offset: usize, out: &mut VolumeAnchor) -> bool {
         return false;
     }
     true
+}
+
+fn rar5_encryption_header(data: &[u8], offset: usize) -> bool {
+    let Some(stored_crc) = u32_le(data, offset) else {
+        return false;
+    };
+    let Some((header_size, after_size)) = read_vint(data, offset + 4) else {
+        return false;
+    };
+    let Some(total) = after_size
+        .checked_sub(offset + 4)
+        .and_then(|size_len| 4usize.checked_add(size_len))
+        .and_then(|prefix| prefix.checked_add(header_size as usize))
+    else {
+        return false;
+    };
+    let Some(end) = offset.checked_add(total) else {
+        return false;
+    };
+    let Some(header) = data.get(offset + 4..end) else {
+        return false;
+    };
+    if crc32(header) != stored_crc {
+        return false;
+    }
+    read_vint(data, after_size).is_some_and(|(header_type, _)| header_type == 4)
 }
 
 fn initialize_rar_anchor(out: &mut VolumeAnchor, offset: usize) {
@@ -317,9 +357,18 @@ fn probe_seven_zip(prefix: &[u8], offset: usize, size: u64, out: &mut VolumeAnch
 
 fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor) -> bool {
     let allow_embedded = prefix.starts_with(b"MZ");
-    let start_offset = anchored_signature(prefix, ZIP_LOCAL, allow_embedded)
-        .filter(|offset| plausible_zip_local(prefix, *offset))
-        .or_else(|| anchored_signature(prefix, ZIP_EMPTY, allow_embedded));
+    let split_start_offset = prefix
+        .starts_with(ZIP_SPLIT_MARKER)
+        .then_some(ZIP_SPLIT_MARKER.len())
+        .filter(|offset| plausible_zip_local(prefix, *offset));
+    let start_offset = split_start_offset.or_else(|| {
+        anchored_signature(prefix, ZIP_LOCAL, allow_embedded)
+            .filter(|offset| plausible_zip_local(prefix, *offset))
+            .or_else(|| anchored_signature(prefix, ZIP_EMPTY, allow_embedded))
+    });
+    let empty_eocd_start = split_start_offset.is_none()
+        && prefix.starts_with(ZIP_EMPTY)
+        && !prefix.starts_with(ZIP_LOCAL);
     let eocd_index = memmem::rfind(tail, ZIP_EOCD).filter(|index| {
         tail.get(index + 20..index + 22)
             .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) as usize)
@@ -332,26 +381,45 @@ fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor
     out.confidence = "strong".to_string();
     if let Some(offset) = start_offset {
         out.structure_offset = Some(offset as u64);
-        out.sfx = offset > 0;
+        out.sfx = offset > 0 && split_start_offset.is_none();
         out.anchor_roles.push("first");
-        out.evidence.push(if out.sfx {
+        out.internal_volume_number = Some(1);
+        out.evidence.push(if split_start_offset.is_some() {
+            "zip:split_marker"
+        } else if empty_eocd_start {
+            "zip:empty_eocd"
+        } else if out.sfx {
             "zip:sfx_local_header"
         } else {
             "zip:local_header"
         });
     }
+    let mut split_terminal = false;
     if let Some(index) = eocd_index {
         if let Some(record) = tail.get(index..index + 22) {
             let disk = u16::from_le_bytes([record[4], record[5]]);
             let cd_disk = u16::from_le_bytes([record[6], record[7]]);
-            // Old ZIP multi-disk/spanned layouts are intentionally unsupported.
-            if disk != 0 || cd_disk != 0 {
-                out.error = "unsupported_zip_multidisk".to_string();
+            if cd_disk > disk {
+                out.error = "invalid_zip_multidisk_order".to_string();
                 out.confidence = "unsupported".to_string();
                 return true;
             }
+            split_terminal = disk != 0 || cd_disk != 0;
             out.anchor_roles.push("terminal");
-            out.evidence.push("zip:eocd_single_disk");
+            out.evidence.push(if split_terminal {
+                "zip:eocd_split_terminal"
+            } else {
+                "zip:eocd_single_disk"
+            });
+            if split_terminal {
+                out.internal_volume_number = Some(u32::from(disk).saturating_add(1));
+                if empty_eocd_start {
+                    out.anchor_roles.retain(|role| *role != "first");
+                    out.structure_offset = None;
+                    out.sfx = false;
+                    out.continuation_to_next = false;
+                }
+            }
             out.expected_logical_size = Some(
                 tail_start
                     + index as u64
@@ -360,13 +428,14 @@ fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor
             );
         }
     }
-    if start_offset.is_some() && eocd_index.is_some() {
+    let has_first = start_offset.is_some() && !(split_terminal && empty_eocd_start);
+    if has_first && eocd_index.is_some() && !split_terminal {
         out.standalone = true;
         out.anchor_roles.push("standalone");
     } else {
         out.multivolume = true;
         out.continuation_from_previous = eocd_index.is_some();
-        out.continuation_to_next = start_offset.is_some();
+        out.continuation_to_next = has_first;
     }
     true
 }
