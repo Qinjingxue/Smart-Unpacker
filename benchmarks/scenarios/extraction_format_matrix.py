@@ -8,6 +8,7 @@ same archives are scanned by both revisions on the same machine.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -23,8 +24,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import zstandard
-
 from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
 
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -32,22 +31,27 @@ if not PYTHON.exists():
     PYTHON = Path(sys.executable)
 SEVEN_ZIP = ROOT / "tools" / "7z.exe"
 RAR = ROOT / "tools" / "Rar.exe"
+ZSTD = ROOT / "tools" / "zstd.exe"
 SUPPORTED = ("zip", "7z", "rar", "gz", "bz2", "xz", "zst", "Z", "tar", "tgz", "tbz2", "txz", "tzst")
 GENERATED_FORMATS = (
-    "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst",
+    "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "Z", "tgz", "tbz2", "txz", "tzst",
 )
+MIN_SCANNABLE_ARCHIVE_BYTES = 1024 * 1024
 
 
-def timed(command: list[str], cwd: Path) -> tuple[float, int]:
+def timed(command: list[str], cwd: Path) -> tuple[float, int, str]:
     started = time.perf_counter()
     result = subprocess.run(
         command,
         cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    return time.perf_counter() - started, result.returncode
+    return time.perf_counter() - started, result.returncode, result.stderr[-2000:]
 
 
 def _run_7z(command: list[str]) -> bool:
@@ -73,11 +77,11 @@ def _write_payloads(root: Path, small_files: int, large_files: int, large_file_m
     large = root / "few-large"
     small.mkdir(parents=True)
     large.mkdir(parents=True)
-    for index in range(small_files):
-        (small / f"file-{index:05d}.txt").write_text(f"record {index}\n" * 4, encoding="utf-8")
-
     chunk_size = 1024 * 1024
     rng = random.Random(20260729)
+    for index in range(small_files):
+        (small / f"file-{index:05d}.bin").write_bytes(rng.randbytes(1024))
+
     compressible_chunk = (b"sunpack-benchmark\n" * ((chunk_size // 18) + 1))[:chunk_size]
     for index in range(large_files):
         with (large / f"large-{index:02d}.bin").open("wb") as stream:
@@ -91,12 +95,94 @@ def _create_archive(target: Path, archive_type: str, source: Path) -> bool:
 
 
 def _create_zstd_archive(target: Path, source: Path) -> bool:
-    try:
-        with source.open("rb") as input_stream, target.open("wb") as output_stream:
-            zstandard.ZstdCompressor(level=3).copy_stream(input_stream, output_stream)
-    except (OSError, zstandard.ZstdError):
-        return False
-    return target.exists()
+    result = subprocess.run(
+        [str(ZSTD), "-q", "-f", "-3", str(source), "-o", str(target)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0 and target.exists()
+
+
+def _create_unix_compress_archive(target: Path, source: Path) -> bool:
+    result = subprocess.run(
+        [str(PYTHON), str(ROOT / "benchmarks" / "tools" / "create_unix_compress.py"), str(source), str(target)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0 and target.exists()
+
+
+def _content_signature(root: Path) -> list[dict[str, Any]]:
+    rows = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        rows.append({"bytes": path.stat().st_size, "sha256": digest.hexdigest()})
+    return sorted(rows, key=lambda row: (row["sha256"], row["bytes"]))
+
+
+def _contains_expected_payload(output: Path, expected: list[dict[str, Any]]) -> bool:
+    actual = _content_signature(output)
+    remaining = list(actual)
+    for wanted in expected:
+        try:
+            remaining.remove(wanted)
+        except ValueError:
+            return False
+    return True
+
+
+def _isolate_corpus_inputs(root: Path, corpus: dict[str, dict[str, Any]]) -> None:
+    """Keep scanner-visible siblings limited to the archive's own volume set."""
+    inputs_root = root / "inputs"
+    inputs_root.mkdir()
+    for name, item in corpus.items():
+        source = Path(item["path"])
+        case_root = inputs_root / name.replace(":", "-")
+        case_root.mkdir()
+        if item["format"] == "7z-split":
+            members = sorted(source.parent.glob(f"{source.name.rsplit('.', 1)[0]}.*"))
+        elif item["format"] == "rar-split":
+            prefix = source.name.split(".part", 1)[0]
+            members = sorted(source.parent.glob(f"{prefix}.part*.rar"))
+        else:
+            members = [source]
+        for member in members:
+            destination = case_root / member.name
+            if item["workload"] == "external":
+                shutil.copy2(member, destination)
+            else:
+                shutil.move(str(member), destination)
+            if member == source:
+                item["path"] = destination
+
+
+def _timed_seven_zip_extract(archive: Path, output: Path, archive_format: str) -> tuple[float, int]:
+    started = time.perf_counter()
+    stage = output / "_compressed_stream"
+    composite = archive_format in {"gz", "bz2", "xz", "zst", "Z", "tgz", "tbz2", "txz", "tzst"}
+    first_output = stage if composite else output
+    first_output.mkdir(parents=True, exist_ok=True)
+    command = [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{first_output}", str(archive)]
+    first = subprocess.run(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    code = first.returncode
+    if code == 0 and composite:
+        tar_candidates = [path for path in stage.rglob("*") if path.is_file()]
+        if len(tar_candidates) != 1:
+            code = 2
+        else:
+            second = subprocess.run(
+                [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{output}", str(tar_candidates[0])],
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            code = second.returncode
+        shutil.rmtree(stage, ignore_errors=True)
+    return time.perf_counter() - started, code
 
 
 def create_corpus(
@@ -106,8 +192,9 @@ def create_corpus(
     large_files: int,
     large_file_mib: int,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     payloads = _write_payloads(root / "payloads", small_files, large_files, large_file_mib)
+    expected_payloads = {name: _content_signature(path) for name, path in payloads.items()}
     corpus: dict[str, dict[str, Any]] = {}
     skipped: dict[str, str] = {}
 
@@ -125,7 +212,9 @@ def create_corpus(
             else:
                 skipped[f"{workload}:{archive_type}"] = "bundled 7-Zip cannot create this format"
 
-        split_size = "4k" if workload == "many_small" else "8m"
+        # Keep the scanner entry volume above the project's default 1 MiB
+        # recognition floor and avoid thousands of tiny volumes.
+        split_size = "1m" if workload == "many_small" else "16m"
         split_target = root / f"{workload}.split.7z"
         split_first = root / f"{workload}.split.7z.001"
         split_created = _run_7z(["a", "-y", "-t7z", f"-v{split_size}", str(split_target), str(source)])
@@ -182,12 +271,26 @@ def create_corpus(
         else:
             skipped[f"{workload}:zst"] = "zstandard runtime cannot create this format"
 
+        unix_compress_target = root / f"{workload}.tar.Z"
+        if tar_source is not None and _create_unix_compress_archive(unix_compress_target, tar_source):
+            corpus[f"{workload}:Z"] = {
+                "workload": workload,
+                "format": "Z",
+                "path": unix_compress_target,
+            }
+        else:
+            skipped[f"{workload}:Z"] = "benchmark Unix-compress fixture builder could not create this format"
+
     for name, source in extra.items():
         key = f"external:{name}"
-        corpus[key] = {"workload": "external", "format": name, "path": source}
+        corpus[key] = {"workload": "external", "format": name, "path": source, "expected_payload": None}
+    for item in corpus.values():
+        if item["workload"] in expected_payloads:
+            item["expected_payload"] = expected_payloads[item["workload"]]
     for ext in SUPPORTED:
         if not any(item["format"] == ext for item in corpus.values()):
             skipped.setdefault(ext, "provide a valid archive with --sample EXT=PATH")
+    _isolate_corpus_inputs(root, corpus)
     return corpus, skipped
 
 
@@ -277,6 +380,7 @@ def benchmark(
     runs: int,
     warmups: int,
     compare_root: Path | None,
+    case_cooldown_seconds: float,
 ) -> list[dict[str, Any]]:
     current_detection = _detection_for_root(ROOT, archives, runs, warmups)
     comparison_detection: dict[str, dict[str, Any]] = {}
@@ -293,22 +397,44 @@ def benchmark(
         archive = Path(item["path"])
         raw: list[float | None] = []
         full: list[float | None] = []
-        for run in range(runs):
-            for label in ("raw", "sunpack"):
+        raw_valid: list[bool] = []
+        full_valid: list[bool] = []
+        raw_exit_codes: list[int] = []
+        full_exit_codes: list[int] = []
+        raw_file_counts: list[int] = []
+        full_file_counts: list[int] = []
+        full_errors: list[str] = []
+        expected_payload = item.get("expected_payload")
+        for run in range(-warmups, runs):
+            labels = ("raw", "sunpack") if run % 2 == 0 else ("sunpack", "raw")
+            for label in labels:
                 output = work / f"out-{name.replace(':', '-')}-{label}-{run}"
                 shutil.rmtree(output, ignore_errors=True)
                 output.mkdir()
                 if label == "raw":
-                    command = [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{output}", str(archive)]
+                    elapsed, code = _timed_seven_zip_extract(archive, output, item["format"])
+                    error = ""
                 else:
                     command = [
-                        str(PYTHON), "-m", "sunpack", "extract", "--direct-file", "--recur", "1",
+                        str(PYTHON), "-m", "sunpack", "extract", "--recur", "*",
                         "--cleanup", "k", "--no-flatten", "--no-builtin-pw", "--no-dir-pw", "--quiet",
                         "--no-pause", "-o", str(output), str(archive),
                     ]
-                elapsed, code = timed(command, ROOT)
-                (raw if label == "raw" else full).append(elapsed if code == 0 else None)
+                    elapsed, code, error = timed(command, ROOT)
+                extracted_file_count = sum(1 for path in output.rglob("*") if path.is_file())
+                valid = code == 0 and (
+                    expected_payload is None or _contains_expected_payload(output, expected_payload)
+                )
+                if run >= 0:
+                    (raw if label == "raw" else full).append(elapsed if valid else None)
+                    (raw_valid if label == "raw" else full_valid).append(valid)
+                    (raw_exit_codes if label == "raw" else full_exit_codes).append(code)
+                    (raw_file_counts if label == "raw" else full_file_counts).append(extracted_file_count)
+                    if label == "sunpack":
+                        full_errors.append(error)
                 shutil.rmtree(output, ignore_errors=True)
+                if case_cooldown_seconds:
+                    time.sleep(case_cooldown_seconds)
 
         raw_m = _median(raw)
         full_m = _median(full)
@@ -327,6 +453,16 @@ def benchmark(
             "runs": runs,
             "seven_zip_seconds": raw_m,
             "sunpack_seconds": full_m,
+            "seven_zip_samples_seconds": raw,
+            "sunpack_samples_seconds": full,
+            "seven_zip_payload_valid": all(raw_valid),
+            "sunpack_payload_valid": all(full_valid),
+            "seven_zip_exit_codes": raw_exit_codes,
+            "sunpack_exit_codes": full_exit_codes,
+            "seven_zip_file_counts": raw_file_counts,
+            "sunpack_file_counts": full_file_counts,
+            "sunpack_stderr": full_errors,
+            "end_to_end_includes_detection": True,
             "detection": {
                 "current": current,
                 "comparison": comparison,
@@ -355,9 +491,40 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "detection_current_total_seconds": sum(current),
         "detection_current_median_seconds": statistics.median(current) if current else None,
         "successful_extraction_cases": sum(row["sunpack_seconds"] is not None for row in rows),
+        "successful_seven_zip_cases": sum(row["seven_zip_seconds"] is not None for row in rows),
+        "sunpack_payload_valid_cases": sum(bool(row["sunpack_payload_valid"]) for row in rows),
+        "seven_zip_payload_valid_cases": sum(bool(row["seven_zip_payload_valid"]) for row in rows),
         "successful_detection_cases": len(current),
         "detection_error_cases": len(rows) - len(current),
     }
+    valid_pairs = [
+        row for row in rows
+        if row["sunpack_seconds"] is not None
+        and row["seven_zip_seconds"] is not None
+        and row["sunpack_payload_valid"]
+        and row["seven_zip_payload_valid"]
+    ]
+    sunpack_total = sum(row["sunpack_seconds"] for row in valid_pairs)
+    seven_zip_total = sum(row["seven_zip_seconds"] for row in valid_pairs)
+    failed_cases = [
+        {
+            "name": row["name"],
+            "sunpack_exit_codes": row["sunpack_exit_codes"],
+            "sunpack_file_counts": row["sunpack_file_counts"],
+            "seven_zip_file_counts": row["seven_zip_file_counts"],
+            "sunpack_stderr": row["sunpack_stderr"],
+        }
+        for row in rows
+        if row not in valid_pairs
+    ]
+    summary.update({
+        "comparable_valid_cases": len(valid_pairs),
+        "sunpack_end_to_end_total_seconds": sunpack_total,
+        "seven_zip_total_seconds": seven_zip_total,
+        "sunpack_vs_seven_zip_ratio": sunpack_total / seven_zip_total if seven_zip_total else None,
+        "all_generated_cases_passed": len(valid_pairs) == len(rows),
+        "failed_cases": failed_cases,
+    })
     if comparable:
         current_total = sum(row["detection"]["current"]["median_seconds"] for row in comparable)
         comparison_total = sum(row["detection"]["comparison"]["median_seconds"] for row in comparable)
@@ -401,6 +568,10 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--results-root", type=Path, help="Durable benchmark result root.")
     parser.add_argument("--keep-workdir", action="store_true", help="Keep generated archives and extraction outputs.")
+    parser.add_argument(
+        "--case-cooldown-seconds", type=float, default=0.25,
+        help="Pause between serial extractor invocations to reduce sustained system pressure.",
+    )
     parser.add_argument("--detection-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-archive", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -411,6 +582,8 @@ def main() -> int:
         parser.error(f"bundled 7-Zip does not exist: {SEVEN_ZIP}")
     if not RAR.is_file():
         parser.error(f"bundled RAR does not exist: {RAR}")
+    if not ZSTD.is_file():
+        parser.error(f"bundled zstd does not exist: {ZSTD}")
     compare_root = args.compare_root.resolve() if args.compare_root else None
     if compare_root is not None and not (compare_root / "sunpack").is_dir():
         parser.error(f"comparison root does not contain sunpack package: {compare_root}")
@@ -429,7 +602,23 @@ def main() -> int:
             max(1, args.large_files),
             max(1, args.large_file_mib),
         )
-        rows = benchmark(corpus, work, max(1, args.runs), max(0, args.warmups), compare_root)
+        undersized = {
+            name: Path(item["path"]).stat().st_size
+            for name, item in corpus.items()
+            if item["workload"] != "external"
+            and Path(item["path"]).stat().st_size < MIN_SCANNABLE_ARCHIVE_BYTES
+        }
+        if undersized:
+            details = ", ".join(f"{name}={size}B" for name, size in sorted(undersized.items()))
+            raise RuntimeError(f"generated scanner inputs are below the 1 MiB floor: {details}")
+        rows = benchmark(
+            corpus,
+            work,
+            max(1, args.runs),
+            max(0, args.warmups),
+            compare_root,
+            max(0.0, args.case_cooldown_seconds),
+        )
         report = {
             "schema_version": 2,
             "supported_formats": list(SUPPORTED),
@@ -458,7 +647,8 @@ def main() -> int:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
             args.json_out.write_text(rendered, encoding="utf-8")
         print(rendered)
-    return 0
+        all_passed = report["summary"]["all_generated_cases_passed"]
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":

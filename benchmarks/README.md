@@ -33,6 +33,17 @@ debugging a generated archive; the retained path is recorded in `manifest.json`.
 archives are never copied to the durable result directory implicitly, so large corpora do not
 accumulate. A scenario may explicitly preserve a small diagnostic artifact with the workspace API.
 
+`extraction format-matrix` builds ZIP, 7z, split 7z, RAR, split RAR, TAR, gzip,
+bzip2, xz, zstd, Unix compress and the conventional compressed-TAR aliases. It uses
+the bundled binaries under `tools/`; the test-only Unix-compress fixture builder lives
+under `benchmarks/tools/`. Each archive is placed in an isolated scanner input directory,
+then both SunPack's complete detection/extraction flow and raw 7-Zip are timed. Only cases
+whose extracted payload hashes pass on both sides contribute to the comparison ratio.
+The matrix starts extractor commands strictly one at a time and adds a short cooldown
+between invocations, while leaving SunPack's internal scheduler at its program-controlled
+default and using unlimited recursive extraction. Generated scanner entry files are
+rejected when they fall below the project's 1 MiB recognition floor.
+
 The reusable harness in `benchmarks/harness` defines the common wall/CPU clocks,
 process-tree memory sampling, real-archive workspace lifecycle, and versioned JSON report
 envelope. New scenarios must use those components instead of adding another local timer,

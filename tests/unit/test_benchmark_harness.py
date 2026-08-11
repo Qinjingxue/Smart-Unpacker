@@ -1,5 +1,7 @@
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -89,3 +91,25 @@ def test_benchmark_workspace_can_explicitly_keep_workdir(tmp_path):
     manifest = json.loads((result_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["temporary_workdir"] == str(temporary_root)
     assert manifest["temporary_workdir_retained"] is True
+
+
+def test_unix_compress_fixture_tool_round_trips_through_bundled_seven_zip(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    source = tmp_path / "payload.bin"
+    source.write_bytes((bytes(range(256)) + b"sunpack") * 32)
+    archive = tmp_path / "payload.Z"
+    output = tmp_path / "output"
+
+    subprocess.run(
+        [sys.executable, str(repo_root / "benchmarks" / "tools" / "create_unix_compress.py"), str(source), str(archive)],
+        check=True,
+    )
+    subprocess.run(
+        [str(repo_root / "tools" / "7z.exe"), "x", "-y", f"-o{output}", str(archive)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    extracted = [path for path in output.iterdir() if path.is_file()]
+    assert len(extracted) == 1
+    assert extracted[0].read_bytes() == source.read_bytes()
