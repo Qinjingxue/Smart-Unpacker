@@ -75,6 +75,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         analysis_native::fuzzy_binary_profile_for_paths,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(analysis_native::probe_volume_anchors, m)?)?;
     m.add_function(wrap_pyfunction!(scan::embedded::scan_embedded_archives, m)?)?;
     m.add_function(wrap_pyfunction!(
         scan::executable_carrier::executable_runtime_bundle_profile,
@@ -130,6 +131,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         relations::relations_build_candidate_groups_from_snapshot,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        relations::relations_resolve_volume_once,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(scan::directory::scan_output_tree, m)?)?;

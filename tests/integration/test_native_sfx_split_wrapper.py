@@ -9,7 +9,7 @@ from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 from sunpack.support.sevenzip_bridge import get_native_password_tester
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from tests.helpers.real_archives import ArchiveFixtureFactory
-from tests.helpers.tool_config import get_optional_rar, require_7z
+from tests.helpers.tool_config import get_optional_rar, get_optional_rar_sfx, require_7z
 
 
 PASSWORD = "sfx-split-secret"
@@ -37,16 +37,15 @@ def _remove_last_data_part(case):
 
 
 @pytest.mark.parametrize("archive_format", ["7z", "zip", "rar"])
-@pytest.mark.parametrize("split", [False, True], ids=["single", "split"])
-def test_input_planned_sfx_uses_format_fast_password_probe(tmp_path, archive_format, split):
+def test_input_planned_single_sfx_uses_format_fast_password_probe(tmp_path, archive_format):
     require_7z()
-    if archive_format == "rar" and not get_optional_rar():
-        pytest.skip("RAR generator is not configured")
+    if archive_format == "rar" and not get_optional_rar_sfx():
+        pytest.skip("RAR SFX generator is not configured")
     case = ArchiveFixtureFactory().create(
         tmp_path,
-        f"fast_probe_{archive_format}_{split}",
+        f"fast_probe_{archive_format}_single",
         archive_format,
-        split=split,
+        split=False,
         sfx=True,
         password=PASSWORD,
     )
@@ -67,8 +66,6 @@ def test_input_planned_sfx_uses_format_fast_password_probe(tmp_path, archive_for
     assert outcome.matched_index == 1
     assert probe_input["open_mode"] in {"file_range", "concat_ranges"}
     assert task.split_info.archive_input.open_mode == extraction_mode
-    if split:
-        assert extraction_mode == "sfx_with_volumes"
 
 
 @pytest.mark.parametrize(
@@ -255,8 +252,8 @@ def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):
 @pytest.mark.parametrize("password", [None, PASSWORD])
 def test_native_wrapper_handles_rar_sfx_split_health_password_and_resources(tmp_path, password):
     require_7z()
-    if not get_optional_rar():
-        pytest.skip("RAR generator is not configured")
+    if not get_optional_rar_sfx():
+        pytest.skip("RAR SFX generator is not configured")
     case = ArchiveFixtureFactory().create(
         tmp_path,
         f"native_rar_sfx_split_pwd_{bool(password)}",
@@ -286,8 +283,8 @@ def test_native_wrapper_handles_rar_sfx_split_health_password_and_resources(tmp_
 
 def test_native_wrapper_detects_missing_rar_sfx_split_tail(tmp_path):
     require_7z()
-    if not get_optional_rar():
-        pytest.skip("RAR generator is not configured")
+    if not get_optional_rar_sfx():
+        pytest.skip("RAR SFX generator is not configured")
     case = ArchiveFixtureFactory().create(tmp_path, "native_rar_sfx_missing_tail", "rar", split=True, sfx=True)
     parts = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
     parts[-1].unlink()

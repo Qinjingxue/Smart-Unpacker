@@ -8,7 +8,7 @@ from sunpack.contracts.failures import FailureKind
 from sunpack.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.tool_config import get_optional_rar, require_7z, require_zstd
+from tests.helpers.tool_config import get_optional_rar, get_optional_rar_sfx, require_7z, require_zstd
 
 
 PASSWORD = "123"
@@ -163,7 +163,7 @@ def assert_partial_recovery(case: ArchiveCase):
 
 def archive_formats():
     formats = ["7z", "zip"]
-    if get_optional_rar():
+    if get_optional_rar_sfx():
         formats.append("rar")
     return formats
 
@@ -352,8 +352,8 @@ def test_real_archive_edge_missing_middle_reports_possible_missing_volume(tmp_pa
 
 
 def test_real_rar_sfx_missing_middle_reports_possible_missing_volume(tmp_path):
-    if get_optional_rar() is None:
-        pytest.skip("RAR generator is not configured")
+    if get_optional_rar_sfx() is None:
+        pytest.skip("RAR SFX generator is not configured")
     case = FACTORY.create(
         tmp_path,
         "missing_middle_rar_sfx",

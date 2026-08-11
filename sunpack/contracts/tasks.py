@@ -128,6 +128,26 @@ class ArchiveTask:
         except (TypeError, ValueError):
             self.set_archive_input(self.archive_input().with_path_mapping(mapped))
 
+    def adopt_detection_plan(self, replacement: "ArchiveTask") -> None:
+        """Replace this task's detection/input plan while preserving its identity."""
+        self.fact_bag = replacement.fact_bag
+        self.score = replacement.score
+        self.key = replacement.key
+        self.main_path = replacement.main_path
+        self.all_parts = list(replacement.all_parts or [])
+        self.logical_name = replacement.logical_name
+        self.split_info = replacement.split_info
+        self.decision = replacement.decision
+        self.stop_reason = replacement.stop_reason
+        self.matched_rules = list(replacement.matched_rules or [])
+        self.detected_ext = replacement.detected_ext
+        self._archive_knowledge_cache_raw = None
+        self._archive_knowledge_cache = None
+        self._archive_state_cache_raw = None
+        self._archive_state_cache_knowledge_raw = None
+        self._archive_state_cache = None
+        self.ensure_archive_state()
+
     def archive_input(self) -> ArchiveInputDescriptor:
         raw_state = self._raw_archive_state()
         if isinstance(raw_state, dict):

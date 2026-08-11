@@ -24,7 +24,12 @@ def _bag_key(bag: FactBag) -> str:
         return path_key(path)
     parent = os.path.dirname(normalized_path(path)) if path else ""
     logical_name = bag.get("file.logical_name") or os.path.basename(path)
-    return path_key(os.path.join(parent, logical_name.lower()))
+    family = str(
+        bag.get("relation.split_family")
+        or bag.get("relation.format_hint")
+        or "unknown"
+    ).lower()
+    return path_key(os.path.join(parent, f"{logical_name.lower()}\x1f{family}"))
 
 
 def _add_unique(target: List[FactBag], seen_keys: set[str], bags: List[FactBag]):

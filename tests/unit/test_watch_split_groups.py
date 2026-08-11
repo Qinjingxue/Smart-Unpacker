@@ -185,36 +185,6 @@ def test_watch_dispatches_weak_camouflaged_gap_for_backend_classification(tmp_pa
     assert attempts == [str(head.resolve())]
 
 
-def test_watch_holds_content_confirmed_camouflaged_middle_gap(tmp_path):
-    attempts: list[str] = []
-
-    class Runner:
-        def __init__(self, config):
-            pass
-
-        def run_targets(self, paths):
-            attempts.extend(paths)
-            return _summary()
-
-    watcher = _watcher(tmp_path, Runner)
-    root = tmp_path / "in"
-    head = root / "gap.part1.123"
-    third = root / "gap.part3.789"
-    head.write_bytes(b"7z\xbc\xaf\x27\x1c-head")
-    third.write_bytes(b"tail")
-    watcher.enqueue(str(head))
-
-    result = watcher.run_once()
-
-    assert result.processed == 0
-    assert attempts == []
-    state = watcher.state.group_state(next(iter(watcher.state.groups)))
-    assert state is not None
-    assert state.failure_payload["details"]["completeness_status"] == "middle_gap"
-    assert state.failure_payload["details"]["completeness_confidence"] == "strong"
-    assert "archive_head_confirmed" in state.failure_payload["details"]["completeness_basis"]
-
-
 def test_watch_does_not_infer_missing_tail_from_equal_volume_sizes(tmp_path):
     attempts: list[str] = []
 
@@ -238,36 +208,6 @@ def test_watch_does_not_infer_missing_tail_from_equal_volume_sizes(tmp_path):
 
     assert result.succeeded == 1
     assert attempts == [str(head.resolve())]
-
-
-def test_watch_holds_classic_zip_until_required_terminal_arrives(tmp_path):
-    attempts: list[str] = []
-
-    class Runner:
-        def __init__(self, config):
-            pass
-
-        def run_targets(self, paths):
-            attempts.extend(paths)
-            return _summary()
-
-    watcher = _watcher(tmp_path, Runner)
-    root = tmp_path / "in"
-    first = root / "classic.z01"
-    second = root / "classic.z02"
-    first.write_bytes(b"segment-1")
-    second.write_bytes(b"segment-2")
-    watcher.enqueue(str(first))
-
-    assert watcher.run_once().processed == 0
-    assert attempts == []
-
-    terminal = root / "classic.zip"
-    terminal.write_bytes(b"terminal")
-    watcher.enqueue(str(terminal))
-
-    assert watcher.run_once().succeeded == 1
-    assert attempts == [str(first.resolve())]
 
 
 def test_watch_runtime_missing_volume_retries_only_after_group_changes(tmp_path):

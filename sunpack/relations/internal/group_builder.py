@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 import os
-import re
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 from sunpack_native import (
     list_regular_files_in_directory as _native_list_regular_files_in_directory,
@@ -10,16 +10,17 @@ from sunpack_native import (
     relations_detect_split_role as _native_detect_split_role,
     relations_logical_name as _native_logical_name,
     relations_parse_numbered_volume as _native_parse_numbered_volume,
+    relations_resolve_volume_once as _native_resolve_volume_once,
     relations_split_sort_key as _native_split_sort_key,
 )
 
-from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
-from sunpack.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation, SplitVolumeEntry
-from sunpack.support.path_keys import case_key, normalized_path, path_key
+from sunpack.contracts.filesystem import DirectorySnapshot
+from sunpack.relations.internal.models import CandidateGroup, FileRelation, SplitVolumeEntry
+from sunpack.support.path_keys import path_key
 
 
 class RelationsGroupBuilder:
-    FUZZY_TIME_WINDOW_NS = 24 * 60 * 60 * 1_000_000_000
+    """Thin Python contract over the native evidence-first Relations engine."""
 
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
         native_groups = _native_build_candidate_groups(snapshot.native_snapshot)
@@ -31,65 +32,224 @@ class RelationsGroupBuilder:
             if group is None:
                 raise ValueError("native relations returned an invalid group")
             groups.append(group)
-        return groups
+        return self._merge_structure_resolved_groups(groups)
 
-    def _build_classic_zip_spanned_groups(
+    def _merge_structure_resolved_groups(
         self,
-        dir_files: Dict[str, List[FileEntry]],
-        directory_indexes: Dict[str, DirectoryFileIndex],
-    ) -> tuple[List[CandidateGroup], set[str]]:
-        groups: List[CandidateGroup] = []
+        groups: List[CandidateGroup],
+    ) -> List[CandidateGroup]:
+        """Use bounded structure evidence only to build logical volume groups."""
+        candidate_paths = list(dict.fromkeys(
+            path
+            for group in groups
+            for path in [group.head_path, *group.all_paths]
+        ))
+        replacements: list[tuple[set[str], CandidateGroup]] = []
         claimed: set[str] = set()
-        for directory, entries in dir_files.items():
-            by_base: Dict[str, List[FileEntry]] = defaultdict(list)
-            for entry in entries:
-                match = re.match(r"^(?P<base>.+)\.z(?P<number>\d{2})$", entry.path.name, re.IGNORECASE)
-                if match:
-                    by_base[match.group("base").lower()].append(entry)
-            lower_names = {entry.path.name.lower() for entry in entries}
-            for base, members in by_base.items():
-                if f"{base}.z01" not in lower_names:
-                    continue
-                terminal = next((entry for entry in entries if entry.path.name.lower() == f"{base}.zip"), None)
-                group_entries = [*members, *([terminal] if terminal is not None else [])]
-                relations = {
-                    entry.path.name: self._build_file_relation(entry.path.name, lower_names)
-                    for entry in group_entries
-                }
-                groups.append(self._build_group(group_entries, relations, directory_indexes.get(directory)))
-                claimed.update(path_key(entry.path) for entry in group_entries)
-        return groups, claimed
+        for group in groups:
+            anchor = group.head_metadata if isinstance(group.head_metadata, dict) else {}
+            roles = {str(value).lower() for value in (anchor.get("anchor_roles") or [])}
+            group_keys = {path_key(path) for path in group.all_paths}
+            head_missing_from_contract = path_key(group.head_path) not in group_keys
+            if not bool(
+                anchor.get("confidence") == "strong"
+                and anchor.get("multivolume")
+                and "first" in roles
+                and anchor.get("format")
+                and (head_missing_from_contract or group.split_group_complete is not True)
+            ):
+                continue
+            current_paths = (
+                [group.head_path]
+                if head_missing_from_contract
+                else list(dict.fromkeys([group.head_path, *group.all_paths]))
+            )
+            resolved = self.resolve_volume_once(
+                current_paths,
+                candidate_paths,
+                format_hint=str(anchor["format"]),
+            )
+            if resolved is None or len(resolved.all_paths) <= 1:
+                continue
+            keys = {path_key(path) for path in resolved.all_paths}
+            if keys & claimed:
+                continue
+            claimed.update(keys)
+            replacements.append((keys, resolved))
 
-    def _build_zero_based_zip_numbered_groups(
+        if not replacements:
+            return groups
+        merged: List[CandidateGroup] = []
+        emitted: set[int] = set()
+        for group in groups:
+            group_keys = {path_key(path) for path in group.all_paths}
+            replacement_index = next(
+                (index for index, (keys, _resolved) in enumerate(replacements) if keys & group_keys),
+                None,
+            )
+            if replacement_index is None:
+                merged.append(group)
+            elif replacement_index not in emitted:
+                merged.append(replacements[replacement_index][1])
+                emitted.add(replacement_index)
+        return merged
+
+    def resolve_volume_once(
         self,
-        dir_files: Dict[str, List[FileEntry]],
-        directory_indexes: Dict[str, DirectoryFileIndex],
-    ) -> tuple[List[CandidateGroup], set[str]]:
-        groups: List[CandidateGroup] = []
-        claimed: set[str] = set()
-        for directory, entries in dir_files.items():
-            by_prefix: Dict[str, List[FileEntry]] = defaultdict(list)
-            for entry in entries:
-                match = re.match(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$", entry.path.name, re.IGNORECASE)
-                if match:
-                    by_prefix[match.group("prefix").lower()].append(entry)
-
-            lower_names = {entry.path.name.lower() for entry in entries}
-            for prefix, members in by_prefix.items():
-                if f"{prefix}.0000" not in lower_names:
-                    continue
-                relations = {
-                    entry.path.name: self._build_file_relation(entry.path.name, lower_names)
-                    for entry in members
-                }
-                groups.append(self._build_group(members, relations, directory_indexes.get(directory)))
-                claimed.update(path_key(entry.path) for entry in members)
-        return groups, claimed
-
-    def _candidate_group_from_native(
-        self,
-        raw: dict,
+        current_paths: list[str],
+        candidate_paths: list[str],
+        *,
+        format_hint: str = "",
     ) -> CandidateGroup | None:
+        raw = _native_resolve_volume_once(current_paths, candidate_paths, format_hint)
+        return self._candidate_group_from_native(raw) if isinstance(raw, dict) else None
+
+    def resolve_volume_once_in_directory(
+        self,
+        current_paths: list[str],
+        *,
+        format_hint: str = "",
+    ) -> CandidateGroup | None:
+        directories = {
+            os.path.normcase(os.path.abspath(os.path.dirname(path) or os.getcwd()))
+            for path in current_paths
+            if path
+        }
+        if len(directories) != 1:
+            return None
+        rows = _native_list_regular_files_in_directory(next(iter(directories)))
+        candidates = [
+            str(row.get("path"))
+            for row in rows
+            if isinstance(row, dict) and row.get("path")
+        ]
+        return self.resolve_volume_once(current_paths, candidates, format_hint=format_hint)
+
+    def detect_split_role(self, filename: str) -> Optional[str]:
+        return _native_detect_split_role(filename)
+
+    def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
+        return str(_native_logical_name(filename, bool(is_archive)))
+
+    def parse_numbered_volume(self, path: str):
+        return _native_parse_numbered_volume(path)
+
+    def split_sort_key(self, path: str) -> tuple[int, int, str]:
+        return tuple(_native_split_sort_key(path))
+
+    def select_first_volume(self, paths: List[str]) -> str:
+        if not paths:
+            return ""
+        parsed = [(path, self.parse_numbered_volume(path)) for path in paths]
+        first = next((path for path, value in parsed if value and int(value["number"]) == 1), None)
+        return first or min(paths, key=self.split_sort_key)
+
+    def should_scan_split_siblings(
+        self,
+        archive: str,
+        *,
+        is_split: bool = False,
+        is_sfx_stub: bool = False,
+    ) -> bool:
+        del is_sfx_stub
+        return bool(is_split or self.parse_numbered_volume(archive))
+
+    def find_standard_split_siblings(self, archive: str) -> List[str]:
+        parsed = self.parse_numbered_volume(archive)
+        if not parsed:
+            return []
+        directory = os.path.dirname(os.path.abspath(archive)) or os.getcwd()
+        matches: list[str] = []
+        for row in _native_list_regular_files_in_directory(directory):
+            if not isinstance(row, dict) or not row.get("path"):
+                continue
+            candidate = str(row["path"])
+            other = self.parse_numbered_volume(candidate)
+            if not other:
+                continue
+            if self._same_standard_family(parsed, other):
+                matches.append(candidate)
+        return sorted(dict.fromkeys(matches), key=self.split_sort_key)
+
+    def build_split_volume_entries(
+        self,
+        archive: str,
+        all_parts: List[str],
+        directory_index=None,
+    ) -> tuple[List[SplitVolumeEntry], Optional[bool], str, List[int]]:
+        del directory_index
+        paths = list(dict.fromkeys(str(path) for path in all_parts if path))
+        parsed_rows = [(path, self.parse_numbered_volume(path)) for path in paths]
+        parsed_rows = [(path, parsed) for path, parsed in parsed_rows if parsed]
+        if not parsed_rows:
+            return [], None, "", []
+        anchor = next((parsed for path, parsed in parsed_rows if path_key(path) == path_key(archive)), parsed_rows[0][1])
+        members = [
+            (path, parsed)
+            for path, parsed in parsed_rows
+            if self._same_standard_family(anchor, parsed)
+        ]
+        by_number: dict[int, tuple[str, dict]] = {}
+        for path, parsed in members:
+            number = int(parsed["number"])
+            if number > 0:
+                by_number.setdefault(number, (path, parsed))
+        if not by_number:
+            return [], None, "", []
+        volumes = [
+            SplitVolumeEntry(
+                path=path,
+                number=number,
+                role="first" if number == 1 else "member",
+                source="standard",
+                style=str(anchor.get("style") or ""),
+                prefix=str(anchor.get("prefix") or ""),
+                width=int(anchor.get("width") or 3),
+            )
+            for number, (path, parsed) in sorted(by_number.items())
+        ]
+        highest = max(by_number)
+        missing = [number for number in range(1, highest + 1) if number not in by_number]
+        if 1 in missing:
+            reason = "missing_head"
+        elif missing:
+            reason = "missing_middle"
+        else:
+            reason = ""
+        return volumes, not missing, reason, missing
+
+    def build_file_relation(self, filename: str, sibling_names: Set[str]) -> FileRelation:
+        del sibling_names
+        parsed = self.parse_numbered_volume(filename)
+        if not parsed:
+            return FileRelation(filename=filename, logical_name=self.get_logical_name(filename))
+        number = int(parsed["number"])
+        family = str(parsed.get("style") or "")
+        return FileRelation(
+            filename=filename,
+            logical_name=self.get_logical_name(filename),
+            split_role="first" if number == 1 else "member",
+            is_split_member=True,
+            is_split_related=True,
+            split_family=family,
+            split_index=number,
+        )
+
+    @staticmethod
+    def _same_standard_family(left: dict, right: dict) -> bool:
+        left_style = str(left.get("style") or "")
+        right_style = str(right.get("style") or "")
+        compatible_styles = left_style == right_style or {
+            left_style,
+            right_style,
+        } <= {"rar_part", "rar_sfx_part"}
+        return bool(
+            compatible_styles
+            and os.path.normcase(os.path.abspath(str(left.get("prefix") or "")))
+            == os.path.normcase(os.path.abspath(str(right.get("prefix") or "")))
+        )
+
+    def _candidate_group_from_native(self, raw: dict) -> CandidateGroup | None:
         relation_payload = raw.get("relation")
         if not isinstance(relation_payload, dict):
             return None
@@ -104,17 +264,9 @@ class RelationsGroupBuilder:
                 for payload in (raw.get("split_volumes") or [])
                 if isinstance(payload, dict)
             ]
-            split_complete = raw.get("split_group_complete")
-            missing_reason = str(raw.get("split_missing_reason") or "")
-            missing_indices = [int(value) for value in (raw.get("split_missing_indices") or [])]
-            missing_ranges = [
-                (int(value[0]), int(value[1]))
-                for value in (raw.get("split_observed_missing_ranges") or [])
-                if isinstance(value, (list, tuple)) and len(value) == 2
-            ]
-            first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
-            if first_volume:
-                head_path = first_volume.path
+            first = next((volume for volume in split_volumes if volume.number == 1), None)
+            if first:
+                head_path = first.path
             return CandidateGroup(
                 head_path=head_path,
                 logical_name=str(raw.get("logical_name") or relation.logical_name),
@@ -123,820 +275,19 @@ class RelationsGroupBuilder:
                 is_split_candidate=bool(raw.get("is_split_candidate")),
                 head_size=raw.get("head_size"),
                 split_volumes=split_volumes,
-                split_group_complete=split_complete,
-                split_missing_reason=missing_reason,
-                split_missing_indices=missing_indices,
-                split_observed_missing_ranges=missing_ranges,
+                split_group_complete=raw.get("split_group_complete"),
+                split_missing_reason=str(raw.get("split_missing_reason") or ""),
+                split_missing_indices=[int(value) for value in (raw.get("split_missing_indices") or [])],
+                split_observed_missing_ranges=[
+                    (int(value[0]), int(value[1]))
+                    for value in (raw.get("split_observed_missing_ranges") or [])
+                    if isinstance(value, (list, tuple)) and len(value) == 2
+                ],
                 split_layout_status=str(raw.get("split_layout_status") or "ambiguous"),
                 split_completeness_status=str(raw.get("split_completeness_status") or "ambiguous"),
                 split_completeness_confidence=str(raw.get("split_completeness_confidence") or "hint"),
-                split_completeness_basis=[
-                    str(value) for value in (raw.get("split_completeness_basis") or [])
-                ],
-                head_metadata={},
+                split_completeness_basis=[str(value) for value in (raw.get("split_completeness_basis") or [])],
+                head_metadata=dict(raw.get("head_metadata") or {}),
             )
         except (TypeError, ValueError):
             return None
-
-    def _build_directory_index(self, entries: List[FileEntry]) -> DirectoryFileIndex:
-        lower_names = {entry.path.name.lower() for entry in entries}
-        by_norm_path = {
-            path_key(entry.path): entry
-            for entry in entries
-        }
-        by_lower_name: Dict[str, List[FileEntry]] = defaultdict(list)
-        for entry in entries:
-            by_lower_name[entry.path.name.lower()].append(entry)
-        return DirectoryFileIndex(
-            entries=entries,
-            lower_names=lower_names,
-            by_norm_path=by_norm_path,
-            by_lower_name=dict(by_lower_name),
-        )
-
-    def detect_split_role(self, filename: str) -> Optional[str]:
-        match = re.search(r"\.z(?P<number>\d{2})$", filename, re.IGNORECASE)
-        if match:
-            return "first" if int(match.group("number")) == 1 else "member"
-        match = re.search(r"\.zip\.(?P<number>\d{4})$", filename, re.IGNORECASE)
-        if match:
-            return "first" if int(match.group("number")) == 0 else "member"
-        return _native_detect_split_role(filename)
-
-    def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
-        match = re.match(r"^(?P<prefix>.+)\.z\d{2}$", filename, re.IGNORECASE)
-        if match:
-            return str(match.group("prefix"))
-        match = re.match(r"^(?P<prefix>.+)\.zip\.\d{4}$", filename, re.IGNORECASE)
-        if match:
-            return str(match.group("prefix")).removesuffix(".zip")
-        return _native_logical_name(filename, is_archive)
-
-    def build_file_relation(self, filename: str, sibling_names: Set[str]) -> FileRelation:
-        return self._build_file_relation(filename, {name.lower() for name in sibling_names})
-
-    def _build_file_relation(self, filename: str, lower_names: Set[str]) -> FileRelation:
-        base, ext = os.path.splitext(filename)
-        ext = ext.lower()
-        split_role = self.detect_split_role(filename)
-        parsed_volume = self.parse_numbered_volume(filename)
-        split_family = ""
-        split_index = 0
-        if parsed_volume:
-            split_index = int(parsed_volume["number"])
-            if parsed_volume["style"] == "zip_spanned":
-                split_family = "zip_spanned"
-            elif parsed_volume["style"] == "rar_part":
-                split_family = "rar_part"
-            else:
-                parsed_prefix = str(parsed_volume["prefix"]).lower()
-                if parsed_prefix.endswith(".7z"):
-                    split_family = "7z_numbered"
-                elif parsed_prefix.endswith(".zip"):
-                    split_family = "zip_numbered"
-                elif parsed_prefix.endswith(".rar"):
-                    split_family = "rar_numbered"
-                else:
-                    split_family = "generic_numbered"
-        logical_name = self.get_logical_name(filename)
-
-        has_generic_001_head = f"{base}.001".lower() in lower_names
-        is_plain_numeric_member = bool(re.search(r"\.\d{3}(?:\.[^.]+)?$", filename, re.IGNORECASE)) and not bool(
-            re.search(r"\.(7z|zip|rar)\.\d{3}(?:\.[^.]+)?$", filename, re.IGNORECASE)
-        )
-        is_split_member = split_role is not None
-        if split_role == "member" and is_plain_numeric_member and not has_generic_001_head:
-            is_split_member = False
-            split_role = None
-
-        has_split_companions = False
-        is_split_exe_companion = False
-        is_disguised_split_exe_companion = False
-
-        if ext == ".exe":
-            has_split_companions = self._has_split_companions_in_dir(lower_names, base)
-            is_split_exe_companion = has_split_companions
-            if has_split_companions:
-                logical_name = base
-                split_family = "exe_companion"
-                split_index = 1
-        elif base.lower().endswith(".exe"):
-            logical_base = base[:-4]
-            has_split_companions = self._has_split_companions_in_dir(lower_names, logical_base)
-            is_disguised_split_exe_companion = has_split_companions
-            if has_split_companions:
-                logical_name = logical_base
-                split_family = "exe_companion"
-                split_index = 1
-
-        match_rar_disguised = re.search(r"^(.*\.part)0*1\.rar(?:\.[^.]+)?$", filename, re.IGNORECASE) is not None
-        match_rar_head = re.search(r"^(.*\.part)0*1$", base, re.IGNORECASE) is not None
-        match_001_head = re.search(r"^(.*)\.001$", base, re.IGNORECASE) is not None
-
-        return FileRelation(
-            filename=filename,
-            logical_name=logical_name,
-            split_role=split_role,
-            is_split_member=is_split_member,
-            has_generic_001_head=has_generic_001_head,
-            is_plain_numeric_member=is_plain_numeric_member,
-            has_split_companions=has_split_companions,
-            is_split_exe_companion=is_split_exe_companion,
-            is_disguised_split_exe_companion=is_disguised_split_exe_companion,
-            is_split_related=is_split_member or is_split_exe_companion or is_disguised_split_exe_companion,
-            match_rar_disguised=match_rar_disguised,
-            match_rar_head=match_rar_head,
-            match_001_head=match_001_head,
-            split_family=split_family,
-            split_index=split_index,
-        )
-
-    def parse_numbered_volume(self, path: str):
-        return _native_parse_numbered_volume(path)
-
-    @staticmethod
-    def _is_rar_part_style(style: str) -> bool:
-        return style in {"rar_part", "rar_sfx_part"}
-
-    @classmethod
-    def _split_styles_match(cls, left: str, right: str) -> bool:
-        return left == right or (cls._is_rar_part_style(left) and cls._is_rar_part_style(right))
-
-    def select_first_volume(self, paths: List[str]) -> str:
-        if not paths:
-            return ""
-
-        for path in paths:
-            parsed = self.parse_numbered_volume(normalized_path(path))
-            if parsed and parsed["number"] == 1:
-                return path
-
-        lower_names = {os.path.basename(path).lower() for path in paths}
-        for path in paths:
-            if self.is_oldstyle_rar_head(path, lower_names):
-                return path
-
-        return ""
-
-    def should_scan_split_siblings(self, archive: str, is_split: bool = False, is_sfx_stub: bool = False) -> bool:
-        if is_split or is_sfx_stub:
-            return True
-        parsed = self.parse_numbered_volume(normalized_path(archive))
-        if parsed and parsed["number"] == 1:
-            return True
-        return os.path.splitext(archive)[1].lower() in {".exe", ".rar"}
-
-    def find_standard_split_siblings(self, archive: str) -> List[str]:
-        directory = os.path.dirname(archive) or "."
-        archive_name = os.path.basename(archive)
-        parsed_archive = self.parse_numbered_volume(archive_name)
-        if parsed_archive and parsed_archive["style"] == "rar_part":
-            base = str(parsed_archive["prefix"])
-        else:
-            base = os.path.splitext(archive_name)[0]
-        entries = self._iter_directory_files(directory)
-        names = [entry.path.name for entry in entries]
-
-        lower_names = {name.lower() for name in names}
-        expected_heads = {
-            f"{base}.7z.001".lower(),
-            f"{base}.zip.001".lower(),
-            f"{base}.zip.0000".lower(),
-            f"{base}.rar.001".lower(),
-            f"{base}.001".lower(),
-            f"{base}.part1.rar".lower(),
-            f"{base}.part01.rar".lower(),
-            f"{base}.part001.rar".lower(),
-            f"{base}.part1.exe".lower(),
-            f"{base}.part01.exe".lower(),
-            f"{base}.part001.exe".lower(),
-            f"{base}.z01".lower(),
-        }
-        oldstyle_rar_head = f"{base}.rar".lower()
-        oldstyle_rar_present = oldstyle_rar_head in lower_names and any(
-            f"{base}.r{number:02d}".lower() in lower_names for number in range(0, 100)
-        )
-        if oldstyle_rar_present:
-            expected_heads.add(f"{base}.rar".lower())
-
-        if not (expected_heads & lower_names):
-            return []
-
-        siblings = []
-        for entry in entries:
-            name = entry.path.name
-            lower = name.lower()
-            if self.is_standard_split_sibling(base.lower(), lower, oldstyle_rar_present):
-                siblings.append(os.path.join(directory, name))
-
-        return sorted(siblings, key=self.split_sort_key)
-
-    def is_standard_split_sibling(self, base: str, lower_name: str, oldstyle_rar_present: bool) -> bool:
-        if re.match(rf"^{re.escape(base)}\.z\d{{2}}$", lower_name) or lower_name == f"{base}.zip":
-            return True
-        if re.match(rf"^{re.escape(base)}\.zip\.\d{{4}}$", lower_name):
-            return True
-        if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
-            return True
-        if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
-            return True
-        if re.match(rf"^{re.escape(base)}\.part\d+\.(rar|exe)$", lower_name):
-            return True
-        if oldstyle_rar_present and lower_name == f"{base}.rar":
-            return True
-        if oldstyle_rar_present and re.match(rf"^{re.escape(base)}\.r\d{{2}}$", lower_name):
-            return True
-        return False
-
-    def split_sort_key(self, path: str) -> tuple[int, int, str]:
-        raw = _native_split_sort_key(normalized_path(path))
-        return (int(raw[0]), int(raw[1]), str(raw[2]))
-
-    def is_oldstyle_rar_head(self, path: str, lower_names: Set[str]) -> bool:
-        lower_name = os.path.basename(path).lower()
-        if not lower_name.endswith(".rar"):
-            return False
-        base = lower_name[:-4]
-        return any(f"{base}.r{number:02d}" in lower_names for number in range(0, 100))
-
-    def collect_misnamed_volume_candidates(
-        self,
-        archive: str,
-        all_parts: List[str],
-        archive_prefix: str,
-        style: str,
-        directory_index: DirectoryFileIndex | None = None,
-    ):
-        directory = os.path.dirname(archive)
-        logical_base = archive_prefix if self._is_rar_part_style(style) else os.path.splitext(archive_prefix)[0]
-        known = {path_key(path) for path in all_parts}
-        candidates = []
-
-        for path in all_parts:
-            norm_path = normalized_path(path)
-            if self.parse_numbered_volume(norm_path):
-                continue
-            if self._looks_like_misnamed_volume(norm_path, archive_prefix, logical_base, style):
-                candidates.append(norm_path)
-
-        for entry in self._iter_misnamed_volume_files(directory, archive_prefix, logical_base, style, directory_index):
-            path = normalized_path(entry.path)
-            norm_key = path_key(path)
-            if norm_key in known:
-                continue
-            if self._looks_like_misnamed_volume(path, archive_prefix, logical_base, style):
-                candidates.append(path)
-                known.add(norm_key)
-
-        fuzzy_candidates = self._collect_fuzzy_volume_candidates(
-            archive,
-            archive_prefix,
-            style,
-            known,
-            directory_index=directory_index,
-        )
-        ordered = (
-            sorted(dict.fromkeys(candidates), key=lambda item: os.path.basename(item).lower())
-            + sorted(dict.fromkeys(fuzzy_candidates), key=lambda item: os.path.basename(item).lower())
-        )
-        return list(dict.fromkeys(ordered))
-
-    def _iter_misnamed_volume_files(
-        self,
-        directory: str,
-        archive_prefix: str,
-        logical_base: str,
-        style: str,
-        directory_index: DirectoryFileIndex | None,
-    ) -> List[FileEntry]:
-        if directory_index is None:
-            return self._iter_directory_files(directory)
-
-        archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = os.path.basename(logical_base).lower()
-        candidate_names = {archive_name, logical_name}
-        if self._is_rar_part_style(style):
-            candidate_names.add(f"{logical_name}.rar")
-            for number in range(100):
-                candidate_names.add(f"{logical_name}.rar.{number}")
-                candidate_names.add(f"{logical_name}.rar.{number:02d}")
-        else:
-            for number in range(100):
-                candidate_names.add(f"{archive_name}.{number}")
-                candidate_names.add(f"{archive_name}.{number:02d}")
-
-        seen: set[str] = set()
-        candidates: List[FileEntry] = []
-        for name in candidate_names:
-            for entry in directory_index.by_lower_name.get(name, []):
-                key = path_key(entry.path)
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(entry)
-
-        if self._is_rar_part_style(style):
-            for entry in directory_index.entries:
-                name = entry.path.name.lower()
-                if logical_name not in name or ".part" not in name or ".rar." not in name:
-                    continue
-                key = path_key(entry.path)
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(entry)
-        return candidates
-
-    def expand_misnamed_split_parts(
-        self,
-        archive: str,
-        all_parts: List[str],
-        directory_index: DirectoryFileIndex | None = None,
-    ) -> List[str]:
-        parsed_main = self.parse_numbered_volume(normalized_path(archive))
-        if not parsed_main or parsed_main["number"] != 1:
-            return list(all_parts)
-        archive_prefix = parsed_main["prefix"]
-        candidates = self.collect_misnamed_volume_candidates(
-            archive,
-            all_parts,
-            archive_prefix,
-            parsed_main["style"],
-            directory_index=directory_index,
-        )
-        return list(dict.fromkeys(list(all_parts) + candidates))
-
-    def build_split_volume_entries(
-        self,
-        archive: str,
-        all_parts: List[str],
-        directory_index: DirectoryFileIndex | None = None,
-    ) -> tuple[List[SplitVolumeEntry], bool | None, str, List[int]]:
-        parsed_main = self.parse_numbered_volume(normalized_path(archive))
-        if not parsed_main:
-            parsed_parts = [
-                (normalized_path(path), parsed)
-                for path in all_parts
-                if (parsed := self.parse_numbered_volume(normalized_path(path)))
-            ]
-            if os.path.splitext(archive)[1].lower() == ".exe" and parsed_parts:
-                external = sorted(parsed_parts, key=lambda item: int(item[1]["number"]))
-                anchor = external[0][1]
-                external_numbers = [int(item[1]["number"]) for item in external]
-                missing = [number for number in range(1, max(external_numbers) + 1) if number not in external_numbers]
-                entries = [SplitVolumeEntry(
-                    path=normalized_path(archive),
-                    number=1,
-                    role="first",
-                    source="standard",
-                    style="sfx_numeric_suffix",
-                    prefix=str(anchor["prefix"]),
-                    width=int(anchor["width"]),
-                )]
-                entries.extend(
-                    SplitVolumeEntry(
-                        path=path,
-                        number=int(parsed["number"]) + 1,
-                        role="member",
-                        source="candidate" if parsed.get("decorated") else "standard",
-                        style="sfx_numeric_suffix",
-                        prefix=str(anchor["prefix"]),
-                        width=int(anchor["width"]),
-                    )
-                    for path, parsed in external
-                )
-                return entries, not missing, "missing_middle" if missing else "", [number + 1 for number in missing]
-            oldstyle = next(
-                (parsed for _path, parsed in parsed_parts if parsed["style"] == "rar_oldstyle"),
-                None,
-            )
-            if oldstyle and case_key(normalized_path(archive)) == case_key(f'{oldstyle["prefix"]}.rar'):
-                parsed_main = {
-                    "prefix": oldstyle["prefix"],
-                    "number": 1,
-                    "style": "rar_oldstyle",
-                    "width": oldstyle["width"],
-                }
-            if not parsed_main:
-                parsed_main = self._first_parsed_volume(all_parts)
-        if not parsed_main:
-            return [], None, "", []
-
-        archive_prefix = str(parsed_main["prefix"])
-        style = str(parsed_main["style"])
-        width = int(parsed_main["width"])
-        confirmed: dict[int, str] = {}
-        decorated_paths: set[str] = set()
-        candidates: List[str] = []
-        seen_paths: set[str] = set()
-
-        for path in all_parts:
-            norm_path = normalized_path(path)
-            path_id = path_key(norm_path)
-            if path_id in seen_paths:
-                continue
-            seen_paths.add(path_id)
-
-            parsed = self.parse_numbered_volume(norm_path)
-            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
-                confirmed[int(parsed["number"])] = norm_path
-                if parsed.get("decorated"):
-                    decorated_paths.add(path_id)
-            elif style == "rar_oldstyle" and case_key(norm_path) == case_key(f"{archive_prefix}.rar"):
-                confirmed[1] = norm_path
-            else:
-                candidates.append(norm_path)
-
-        if not confirmed:
-            return [], None, "", []
-
-        max_confirmed = max(confirmed)
-        missing_numbers = [number for number in range(1, max_confirmed + 1) if number not in confirmed]
-        # Fuzzy recovery needs a confirmed first-volume anchor.  A later orphan
-        # such as ``name.7z.005`` does not provide enough evidence to assign
-        # unrelated sibling files to volumes 1..4.  Besides creating false
-        # split groups, that synthetic group can claim the same logical key as
-        # a genuine ``.001``-anchored group and hide it during target deduping.
-        fuzzy_candidates = self._find_fuzzy_candidates_for_missing_volumes(
-            archive=archive,
-            archive_prefix=archive_prefix,
-            style=style,
-            known_paths=set(seen_paths),
-            directory_index=directory_index,
-        )
-        if 1 not in confirmed:
-            archive_name = os.path.basename(archive_prefix).lower()
-            logical_name = (
-                archive_name
-                if self._is_rar_part_style(style)
-                else os.path.splitext(archive_name)[0]
-            )
-            # Without a confirmed first volume, only an exact prefix companion
-            # is strong enough to stand in for it (for example ``lost.7z`` for
-            # ``lost.7z.002``).  Similar size/time and a vaguely similar name
-            # are not sufficient evidence for inventing a head volume.
-            fuzzy_candidates = [
-                path
-                for path in fuzzy_candidates
-                if os.path.basename(path).lower() in {archive_name, logical_name}
-            ]
-
-        assigned_candidates: dict[int, str] = {}
-        available_candidates = list(dict.fromkeys(candidates + fuzzy_candidates))
-        terminal_candidates: List[str] = []
-        if style == "zip_spanned":
-            terminal_name = f"{archive_prefix}.zip"
-            terminal_candidates = [
-                path for path in available_candidates
-                if case_key(normalized_path(path)) == case_key(normalized_path(terminal_name))
-            ]
-            available_candidates = [
-                path for path in available_candidates
-                if path_key(path) not in {path_key(candidate) for candidate in terminal_candidates}
-            ]
-        for number in missing_numbers:
-            match = self._select_candidate_for_missing_number(
-                number,
-                available_candidates,
-                archive_prefix,
-                style,
-            )
-            if not match:
-                continue
-            assigned_candidates[number] = match
-            available_candidates = [path for path in available_candidates if path_key(path) != path_key(match)]
-
-        available_candidates.extend(terminal_candidates)
-        next_number = max_confirmed + 1
-        for path in available_candidates:
-            while next_number in confirmed or next_number in assigned_candidates:
-                next_number += 1
-            assigned_candidates[next_number] = path
-            next_number += 1
-
-        entries: List[SplitVolumeEntry] = [
-            SplitVolumeEntry(
-                path=path,
-                number=number,
-                role=(
-                    "terminal"
-                    if style == "zip_spanned" and path_key(path) in {path_key(item) for item in terminal_candidates}
-                    else "first" if number == 1 else "member"
-                ),
-                source="candidate" if path_key(path) in decorated_paths else "standard",
-                style=style,
-                prefix=archive_prefix,
-                width=width,
-            )
-            for number, path in sorted(confirmed.items())
-        ]
-
-        for number, path in sorted(assigned_candidates.items()):
-            entries.append(SplitVolumeEntry(
-                path=path,
-                number=number,
-                role=(
-                    "terminal"
-                    if style == "zip_spanned" and path_key(path) in {path_key(item) for item in terminal_candidates}
-                    else "first" if number == 1 else "member"
-                ),
-                source="candidate",
-                style=style,
-                prefix=archive_prefix,
-                width=width,
-            ))
-
-        unresolved = [number for number in missing_numbers if number not in assigned_candidates]
-        if unresolved:
-            reason = "missing_head" if 1 in unresolved else "missing_middle"
-            return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), False, reason, unresolved
-
-        if style == "zip_spanned" and not terminal_candidates:
-            return (
-                sorted(entries, key=lambda volume: (volume.number, volume.path.lower())),
-                False,
-                "missing_tail",
-                [max_confirmed + 1],
-            )
-
-        substituted = [number for number in missing_numbers if number in assigned_candidates]
-        if substituted:
-            return (
-                sorted(entries, key=lambda volume: (volume.number, volume.path.lower())),
-                None,
-                "candidate_substitution",
-                substituted,
-            )
-
-        return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), True, "", []
-
-    def _first_parsed_volume(self, all_parts: List[str]):
-        parsed_items = []
-        for path in all_parts:
-            parsed = self.parse_numbered_volume(normalized_path(path))
-            if parsed:
-                parsed_items.append(parsed)
-        if not parsed_items:
-            return None
-        return sorted(parsed_items, key=lambda item: int(item["number"]))[0]
-
-    def _find_fuzzy_candidates_for_missing_volumes(
-        self,
-        archive: str,
-        archive_prefix: str,
-        style: str,
-        known_paths: set[str],
-        directory_index: DirectoryFileIndex | None,
-    ) -> List[str]:
-        reference_path = self._reference_path_for_prefix(archive, archive_prefix, style, directory_index)
-        if not reference_path:
-            return []
-        return self._collect_fuzzy_volume_candidates(
-            reference_path,
-            archive_prefix,
-            style,
-            set(known_paths),
-            directory_index=directory_index,
-        )
-
-    def _reference_path_for_prefix(
-        self,
-        archive: str,
-        archive_prefix: str,
-        style: str,
-        directory_index: DirectoryFileIndex | None,
-    ) -> str:
-        parsed_archive = self.parse_numbered_volume(normalized_path(archive))
-        if parsed_archive and self._split_styles_match(str(parsed_archive["style"]), style) and case_key(parsed_archive["prefix"]) == case_key(archive_prefix):
-            return normalized_path(archive)
-        entries = self._iter_directory_files(os.path.dirname(archive), directory_index)
-        candidates = []
-        for entry in entries:
-            parsed = self.parse_numbered_volume(normalized_path(entry.path))
-            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
-                candidates.append((int(parsed["number"]), normalized_path(entry.path)))
-        return sorted(candidates)[0][1] if candidates else ""
-
-    def _select_candidate_for_missing_number(
-        self,
-        number: int,
-        candidates: List[str],
-        archive_prefix: str,
-        style: str,
-    ) -> str:
-        if not candidates:
-            return ""
-        archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = archive_name if self._is_rar_part_style(style) else os.path.splitext(archive_name)[0]
-        exact_names = set()
-        if number == 1:
-            exact_names.update({archive_name, logical_name})
-            if self._is_rar_part_style(style):
-                exact_names.add(f"{logical_name}.rar")
-        exact_names.add(f"{archive_name}.{number}")
-        exact_names.add(f"{archive_name}.{number:02d}")
-        if self._is_rar_part_style(style):
-            exact_names.add(f"{logical_name}.rar.{number}")
-            exact_names.add(f"{logical_name}.rar.{number:02d}")
-
-        for path in sorted(candidates, key=lambda item: os.path.basename(item).lower()):
-            if os.path.basename(path).lower() in exact_names:
-                return path
-        return sorted(candidates, key=lambda item: os.path.basename(item).lower())[0]
-
-    def _build_group(
-        self,
-        group_entries: List[FileEntry],
-        relations: Dict[str, FileRelation],
-        directory_index: DirectoryFileIndex | None = None,
-    ) -> CandidateGroup:
-        if len(group_entries) == 1:
-            entry = group_entries[0]
-            relation = relations[entry.path.name]
-            all_parts = [str(entry.path)]
-            if self.detect_split_role(entry.path.name) == "first":
-                all_parts = self.expand_misnamed_split_parts(str(entry.path), all_parts, directory_index)
-            split_volumes, split_complete, missing_reason, missing_indices = self.build_split_volume_entries(
-                str(entry.path),
-                all_parts,
-                directory_index,
-            )
-            head_path = str(entry.path)
-            first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
-            if first_volume:
-                head_path = first_volume.path
-            metadata_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else entry
-            return CandidateGroup(
-                head_path=head_path,
-                logical_name=relation.logical_name,
-                relation=relation,
-                member_paths=[path for path in all_parts if path_key(path) != path_key(head_path)],
-                is_split_candidate=relation.is_split_related,
-                head_size=entry.size,
-                split_volumes=split_volumes,
-                split_group_complete=split_complete,
-                split_missing_reason=missing_reason,
-                split_missing_indices=missing_indices,
-                head_metadata=dict(metadata_entry.metadata or {}) if metadata_entry is not None else {},
-            )
-
-        head_entry = None
-        for entry in group_entries:
-            if entry.path.name.lower().endswith(".exe"):
-                head_entry = entry
-                break
-
-        if not head_entry:
-            for entry in group_entries:
-                if self.detect_split_role(entry.path.name) == "first":
-                    head_entry = entry
-                    break
-
-        if not head_entry:
-            head_entry = sorted(group_entries, key=lambda item: item.path.name)[0]
-
-        members = [str(entry.path) for entry in group_entries if entry != head_entry]
-        all_parts = self.expand_misnamed_split_parts(
-            str(head_entry.path),
-            [str(head_entry.path)] + members,
-            directory_index,
-        )
-        relation = relations[head_entry.path.name]
-        split_role = relation.split_role
-        if self.detect_split_role(head_entry.path.name) == "first" or head_entry.path.name.lower().endswith(".exe"):
-            split_role = "first"
-            relation = FileRelation(**{**relation.__dict__, "split_role": split_role})
-
-        split_volumes, split_complete, missing_reason, missing_indices = self.build_split_volume_entries(
-            str(head_entry.path),
-            all_parts,
-            directory_index,
-        )
-        head_path = str(head_entry.path)
-        first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
-        if first_volume:
-            head_path = first_volume.path
-        metadata_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else head_entry
-
-        return CandidateGroup(
-            head_path=head_path,
-            logical_name=relation.logical_name,
-            relation=relation,
-            member_paths=[path for path in all_parts if path_key(path) != path_key(head_path)],
-            is_split_candidate=True,
-            head_size=head_entry.size,
-            split_volumes=split_volumes,
-            split_group_complete=split_complete,
-            split_missing_reason=missing_reason,
-            split_missing_indices=missing_indices,
-            head_metadata=dict(metadata_entry.metadata or {}) if metadata_entry is not None else {},
-        )
-
-    def _has_split_companions_in_dir(self, sibling_names: Set[str], base_name: str) -> bool:
-        patterns = [
-            re.compile(re.escape(base_name) + r"\.(7z|zip|rar)\.\d+(?:\.[^.]+)?$", re.IGNORECASE),
-            re.compile(re.escape(base_name) + r"\.\d{3}(?:\.[^.]+)?$", re.IGNORECASE),
-            re.compile(re.escape(base_name) + r"\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$", re.IGNORECASE),
-        ]
-        return any(any(pattern.match(candidate) for pattern in patterns) for candidate in sibling_names)
-
-    def _looks_like_misnamed_volume(self, path: str, archive_prefix: str, logical_base: str, style: str) -> bool:
-        name = os.path.basename(path).lower()
-        archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = os.path.basename(logical_base).lower()
-        if name == archive_name or name == logical_name:
-            return True
-        if self._is_rar_part_style(style):
-            return (
-                name == f"{logical_name}.rar"
-                or re.match(rf"^{re.escape(logical_name)}\.rar\.\d{{1,2}}$", name, re.IGNORECASE) is not None
-                or re.match(rf"^{re.escape(logical_name)}\.part\d+\.rar\.[^.]+$", name, re.IGNORECASE) is not None
-            )
-        return re.match(rf"^{re.escape(archive_name)}\.\d{{1,2}}$", name, re.IGNORECASE) is not None
-
-    def _looks_like_fuzzy_volume_candidate(self, path: str, archive_prefix: str, style: str) -> bool:
-        name = os.path.basename(path).lower()
-        archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = archive_name if self._is_rar_part_style(style) else os.path.splitext(archive_name)[0]
-        if name == archive_name or name == logical_name:
-            return True
-        if re.search(r"\.\d{1,3}$", name):
-            return True
-        if style == "numeric_suffix" and re.search(r"\.(7z|zip|rar|\d{1,2})$", name):
-            return True
-        if self._is_rar_part_style(style) and (".rar" in name or ".part" in name or ".exe" in name):
-            return True
-        return False
-
-    def _iter_directory_files(
-        self,
-        directory: str,
-        directory_index: DirectoryFileIndex | None = None,
-    ) -> List[FileEntry]:
-        if directory_index is not None:
-            return list(directory_index.entries)
-
-        rows = _native_list_regular_files_in_directory(directory)
-        entries: List[FileEntry] = []
-        for row in rows:
-            if not isinstance(row, dict) or not row.get("path"):
-                continue
-            entries.append(
-                FileEntry(
-                    path=Path(row["path"]),
-                    is_dir=False,
-                    size=row.get("size"),
-                    mtime_ns=row.get("mtime_ns"),
-                )
-            )
-        return entries
-
-    def _collect_fuzzy_volume_candidates(
-        self,
-        archive: str,
-        archive_prefix: str,
-        style: str,
-        known: set[str],
-        directory_index: DirectoryFileIndex | None = None,
-    ):
-        directory = os.path.dirname(archive)
-        archive_key = path_key(archive)
-        archive_entry = directory_index.by_norm_path.get(archive_key) if directory_index is not None else None
-        if archive_entry is not None and archive_entry.size is not None and archive_entry.mtime_ns is not None:
-            main_size = max(archive_entry.size, 1)
-            archive_mtime_ns = archive_entry.mtime_ns
-        else:
-            try:
-                archive_stat = os.stat(archive)
-            except OSError:
-                return []
-            main_size = max(archive_stat.st_size, 1)
-            archive_mtime_ns = archive_stat.st_mtime_ns
-
-        entries = self._iter_directory_files(directory, directory_index)
-        if not entries:
-            return []
-
-        fuzzy = []
-        min_size = max(1024 * 1024, main_size // 16)
-        if min_size > main_size:
-            return []
-        for entry in entries:
-            path = normalized_path(entry.path)
-            norm_key = path_key(path)
-            if norm_key in known:
-                continue
-
-            parsed = self.parse_numbered_volume(path)
-            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
-                continue
-
-            if entry.size is None or entry.mtime_ns is None:
-                continue
-            if entry.size < min_size or entry.size > main_size:
-                continue
-            if abs(entry.mtime_ns - archive_mtime_ns) > self.FUZZY_TIME_WINDOW_NS:
-                continue
-            if not self._looks_like_fuzzy_volume_candidate(path, archive_prefix, style):
-                continue
-            fuzzy.append(path)
-            known.add(norm_key)
-        return fuzzy

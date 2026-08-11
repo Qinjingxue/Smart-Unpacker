@@ -30,6 +30,7 @@ from sunpack.coordinator.scheduling import (
 from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.space_guard import ExtractionSpaceGuard
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
+from sunpack.coordinator.target_groups import relation_group_to_fact_bag
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.i18n import I18nContext
 from sunpack.postprocess.actions import PostProcessActions
@@ -587,6 +588,37 @@ class _RequestRuntime:
         )
         return executor.execute_all(tasks, worker, workload_label=workload_label)
 
+    def _resolve_missing_volume_once(self, task, _outcome):
+        current_paths = list(task.all_parts or [task.main_path])
+        try:
+            format_hint = task.archive_input().format_hint
+        except (TypeError, ValueError, AttributeError):
+            format_hint = str(task.detected_ext or "").lstrip(".")
+        group = self.task_scanner.provider.resolve_volume_once_in_directory(
+            current_paths,
+            format_hint=format_hint,
+        )
+        if group is None:
+            return None
+        bag = relation_group_to_fact_bag(group)
+        bag.set("relation.volume_retry_attempted", True)
+        bag.set(
+            "relation.volume_retry_basis",
+            ["confirmed_structure", "anchor_constrained_filename"],
+        )
+        replacement = self.task_scanner.provider.task_from_candidate_bag(bag)
+        if replacement is None:
+            return None
+        planned = self.input_planning_stage.plan_task_to_tasks(replacement)
+        if len(planned) != 1:
+            return None
+        replacement = planned[0]
+        self.path_leases.acquire(
+            self.submission.request_id,
+            replacement.all_parts or [replacement.main_path],
+        )
+        return replacement
+
     def execute(self) -> PipelineResponse:
         start_time = time.time()
         submission = self.submission
@@ -639,6 +671,7 @@ class _RequestRuntime:
                 new_roots = self.batch_runner.execute(
                     tasks,
                     default_output_dir_for_task=ownership.output_dir_for_task,
+                    missing_volume_retry=self._resolve_missing_volume_once,
                 )
                 next_scan_session = self.output_scan_policy.take_scan_session(new_roots)
                 ownership.remember_results(self.context.target_results[before_results:])

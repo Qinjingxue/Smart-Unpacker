@@ -28,22 +28,17 @@ def test_archive_task_exposes_default_descriptor_from_task_paths(tmp_path):
     assert task.archive_descriptor().relation.is_split is True
 
 
-def test_obfuscated_rar_names_keep_real_paths_and_canonical_volume_names(tmp_path):
+def test_obfuscated_rar_names_without_valid_structure_stay_separate(tmp_path):
     first = tmp_path / "488.part1.rar123"
     second = tmp_path / "488.part2.rar123"
     first.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"x" * 64)
     second.write_bytes(b"x" * 72)
 
     groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
-    group = next(item for item in groups if item.logical_name == "488")
-    descriptor = ArchiveInputDescriptor.from_dict(relation_group_to_fact_bag(group).get("archive.input"))
-
-    assert descriptor.part_paths() == [str(first), str(second)]
-    assert [part.volume_number for part in descriptor.parts] == [1, 2]
-    assert [part.canonical_name for part in descriptor.parts] == ["488.part1.rar", "488.part2.rar"]
+    assert all(len(group.all_paths) == 1 for group in groups)
 
 
-def test_plain_name_sfx_uses_structured_external_volume_aliases(tmp_path):
+def test_plain_name_sfx_does_not_attach_raw_camouflaged_volumes(tmp_path):
     stub = tmp_path / "bundle.exe"
     first = tmp_path / "bundle.7z.001.camouflage"
     second = tmp_path / "bundle.7z.002.camouflage"
@@ -53,15 +48,8 @@ def test_plain_name_sfx_uses_structured_external_volume_aliases(tmp_path):
     entries, complete, _, _ = RelationsGroupBuilder().build_split_volume_entries(
         str(stub), [str(stub), str(first), str(second)]
     )
-    descriptor = ArchiveInputDescriptor.from_split_volumes(
-        archive_path=str(stub), volumes=entries, format_hint="7z", logical_name="bundle"
-    )
-
-    assert complete is True
-    assert descriptor.open_mode == "sfx_with_volumes"
-    assert [part.canonical_name for part in descriptor.parts] == [
-        "bundle.exe", "bundle.7z.001", "bundle.7z.002",
-    ]
+    assert entries == []
+    assert complete is None
 
 
 def test_archive_task_from_detection_fact_bag_carries_empty_archive_state(tmp_path):

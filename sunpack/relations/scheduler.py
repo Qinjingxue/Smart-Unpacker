@@ -18,6 +18,30 @@ class RelationsScheduler:
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> list[CandidateGroup]:
         return self._builder.build_candidate_groups(snapshot)
 
+    def resolve_volume_once(
+        self,
+        current_paths: list[str],
+        candidate_paths: list[str],
+        *,
+        format_hint: str = "",
+    ) -> CandidateGroup | None:
+        return self._builder.resolve_volume_once(
+            current_paths,
+            candidate_paths,
+            format_hint=format_hint,
+        )
+
+    def resolve_volume_once_in_directory(
+        self,
+        current_paths: list[str],
+        *,
+        format_hint: str = "",
+    ) -> CandidateGroup | None:
+        return self._builder.resolve_volume_once_in_directory(
+            current_paths,
+            format_hint=format_hint,
+        )
+
     def detect_split_role(self, filename: str) -> str | None:
         return self._builder.detect_split_role(filename)
 

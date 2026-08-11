@@ -12,6 +12,7 @@ Run a scenario by group and name. Arguments after the scenario are passed to tha
 
 ```powershell
 python -m benchmarks reader password-fast-path --rounds 5
+python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 5
 python -m benchmarks scan hotspots . --mode full --json-out build/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out build/extraction-benchmark.json
 python -m benchmarks extraction split-pressure --profile acceptance --strict

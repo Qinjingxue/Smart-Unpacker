@@ -1,10 +1,9 @@
+use crate::analysis_native::volume_anchor::{probe_volume_anchor_paths, VolumeAnchor};
 use crate::scan::directory::NativeDirectorySnapshot;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use regex::{Regex, RegexBuilder};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -13,6 +12,7 @@ struct RelationInput {
     path: String,
     name: String,
     size: Option<u64>,
+    anchor: Option<VolumeAnchor>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ pub(crate) fn relations_parse_numbered_volume(
     py: Python<'_>,
     path: &str,
 ) -> PyResult<Option<Py<PyDict>>> {
-    Ok(parse_numbered_volume(path)
+    Ok(parse_strict_numbered_volume(path)
         .map(|parsed| parsed_volume_to_dict(py, &parsed))
         .transpose()?)
 }
@@ -96,10 +96,20 @@ pub(crate) fn relations_build_candidate_groups_from_snapshot(
     py: Python<'_>,
     snapshot: PyRef<'_, NativeDirectorySnapshot>,
 ) -> PyResult<Vec<Py<PyDict>>> {
+    let records: Vec<(String, Option<u64>)> = snapshot
+        .file_records()
+        .map(|(path, size)| (path.to_string(), size))
+        .collect();
+    let paths: Vec<String> = records.iter().map(|(path, _)| path.clone()).collect();
+    let anchors = py.detach(|| probe_volume_anchor_paths(&paths, 1024 * 1024, 65_557));
+    let mut anchors_by_path: HashMap<String, VolumeAnchor> = anchors
+        .into_iter()
+        .map(|anchor| (anchor.path.to_ascii_lowercase(), anchor))
+        .collect();
     let mut dir_files: HashMap<String, Vec<RelationInput>> = HashMap::new();
     let mut dir_order: Vec<String> = Vec::new();
-    for (path, size) in snapshot.file_records() {
-        let path_value = Path::new(path);
+    for (path, size) in records {
+        let path_value = Path::new(&path);
         let parent = path_value
             .parent()
             .map(|value| value.to_string_lossy().to_string())
@@ -112,12 +122,422 @@ pub(crate) fn relations_build_candidate_groups_from_snapshot(
             dir_order.push(parent.clone());
         }
         dir_files.entry(parent).or_default().push(RelationInput {
-            path: path.to_string(),
+            anchor: anchors_by_path.remove(&path.to_ascii_lowercase()),
+            path,
             name,
             size,
         });
     }
     build_candidate_groups_from_inputs(py, dir_files, dir_order)
+}
+
+#[pyfunction]
+#[pyo3(signature = (current_paths, candidate_paths, format_hint=""))]
+pub(crate) fn relations_resolve_volume_once(
+    py: Python<'_>,
+    current_paths: Vec<String>,
+    candidate_paths: Vec<String>,
+    format_hint: &str,
+) -> PyResult<Option<Py<PyDict>>> {
+    if current_paths.is_empty() || candidate_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut all_paths = current_paths.clone();
+    all_paths.extend(candidate_paths);
+    all_paths.sort_by_key(|path| path.to_ascii_lowercase());
+    all_paths.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    let anchors = py.detach(|| probe_volume_anchor_paths(&all_paths, 1024 * 1024, 65_557));
+    let anchor_by_path: HashMap<String, VolumeAnchor> = anchors
+        .into_iter()
+        .map(|anchor| (anchor.path.to_ascii_lowercase(), anchor))
+        .collect();
+
+    let hint = normalize_retry_format(format_hint);
+    let current_structural: Vec<&VolumeAnchor> = current_paths
+        .iter()
+        .filter_map(|path| anchor_by_path.get(&path.to_ascii_lowercase()))
+        .filter(|anchor| {
+            anchor.confidence == "strong"
+                && anchor.multivolume
+                && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
+        })
+        .collect();
+    if current_structural.is_empty() {
+        return Ok(None);
+    }
+    let structural_formats: HashSet<&str> = current_structural
+        .iter()
+        .map(|anchor| anchor.format.as_str())
+        .collect();
+    let target_format = if structural_formats.len() == 1 {
+        *structural_formats.iter().next().unwrap_or(&"")
+    } else if !hint.is_empty() && structural_formats.contains(hint) {
+        hint
+    } else {
+        return Ok(None);
+    };
+    let anchor_path = current_paths
+        .iter()
+        .find(|path| {
+            anchor_by_path
+                .get(&path.to_ascii_lowercase())
+                .is_some_and(|anchor| {
+                    anchor.confidence == "strong"
+                        && anchor.multivolume
+                        && anchor.format == target_format
+                })
+        })
+        .cloned()
+        .unwrap_or_else(|| current_paths[0].clone());
+    let anchor_name = basename(&anchor_path);
+    let primary_stem = retry_primary_stem(anchor_name);
+    if primary_stem.is_empty() {
+        return Ok(None);
+    }
+    let structural_formats: HashSet<&str> = anchor_by_path
+        .values()
+        .filter(|anchor| {
+            anchor.confidence == "strong"
+                && anchor.multivolume
+                && retry_primary_stem(basename(&anchor.path)) == primary_stem
+                && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
+        })
+        .map(|anchor| anchor.format.as_str())
+        .collect();
+    let allow_generic_name_fallback =
+        structural_formats.len() == 1 && structural_formats.contains(target_format);
+    let anchor_is_sfx = anchor_by_path
+        .get(&anchor_path.to_ascii_lowercase())
+        .is_some_and(|anchor| anchor.sfx);
+    let structural_upper_bound =
+        retry_structural_upper_bound(&all_paths, &anchor_by_path, target_format, &primary_stem);
+
+    let mut selected: HashMap<u32, ResolvedVolume> = HashMap::new();
+    let mut structural_number_conflict = false;
+    for path in &all_paths {
+        let name = basename(path);
+        if retry_primary_stem(name) != primary_stem {
+            continue;
+        }
+        let evidence = anchor_by_path.get(&path.to_ascii_lowercase());
+        if let Some(anchor) = evidence.filter(|anchor| {
+            anchor.confidence == "strong" && anchor.multivolume && anchor.format == target_format
+        }) {
+            let number = if target_format == "rar" {
+                anchor.internal_volume_number
+            } else if anchor.anchor_roles.contains(&"first") {
+                Some(1)
+            } else {
+                retry_volume_number(name, target_format)
+            };
+            if let Some(number) = number.filter(|number| *number > 0) {
+                structural_number_conflict |= insert_resolved_volume(
+                    &mut selected,
+                    ResolvedVolume {
+                        path: path.clone(),
+                        number,
+                        source: "structure",
+                    },
+                );
+            }
+            continue;
+        }
+        // Do not reinterpret a structurally identified archive of another
+        // format as an opaque middle part.
+        if evidence.is_some_and(|anchor| anchor.confidence == "strong" && !anchor.format.is_empty())
+        {
+            continue;
+        }
+        // Native RAR volumes carry their own headers. Generic byte-split RAR
+        // and every byte-split SFX layout are deliberately unsupported.
+        if target_format == "rar" || anchor_is_sfx {
+            continue;
+        }
+        let Some(number) = retry_volume_number(name, target_format).or_else(|| {
+            allow_generic_name_fallback
+                .then(|| retry_generic_volume_number(name))
+                .flatten()
+        }) else {
+            continue;
+        };
+        if structural_upper_bound.is_some_and(|upper_bound| number > upper_bound) {
+            continue;
+        }
+        let _ = insert_resolved_volume(
+            &mut selected,
+            ResolvedVolume {
+                path: path.clone(),
+                number,
+                source: "anchored_name",
+            },
+        );
+    }
+    if structural_number_conflict || selected.len() < 2 || !selected.contains_key(&1) {
+        return Ok(None);
+    }
+    let current_keys: HashSet<String> = current_paths
+        .iter()
+        .map(|path| path.to_ascii_lowercase())
+        .collect();
+    if selected
+        .values()
+        .all(|volume| current_keys.contains(&volume.path.to_ascii_lowercase()))
+    {
+        return Ok(None);
+    }
+    let mut volumes: Vec<ResolvedVolume> = selected.into_values().collect();
+    volumes.sort_by(|left, right| {
+        left.number
+            .cmp(&right.number)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    resolved_volume_group_to_dict(
+        py,
+        &volumes,
+        target_format,
+        &primary_stem,
+        anchor_by_path.get(&anchor_path.to_ascii_lowercase()),
+    )
+    .map(Some)
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedVolume {
+    path: String,
+    number: u32,
+    source: &'static str,
+}
+
+fn insert_resolved_volume(
+    selected: &mut HashMap<u32, ResolvedVolume>,
+    candidate: ResolvedVolume,
+) -> bool {
+    match selected.get(&candidate.number) {
+        Some(existing) if existing.source == "structure" => {
+            return candidate.source == "structure"
+                && !existing.path.eq_ignore_ascii_case(&candidate.path);
+        }
+        _ => {
+            selected.insert(candidate.number, candidate);
+        }
+    }
+    false
+}
+
+fn retry_structural_upper_bound(
+    paths: &[String],
+    anchors: &HashMap<String, VolumeAnchor>,
+    target_format: &str,
+    primary_stem: &str,
+) -> Option<u32> {
+    if target_format == "zip" {
+        return paths.iter().find_map(|path| {
+            let name = basename(path);
+            let anchor = anchors.get(&path.to_ascii_lowercase())?;
+            (retry_primary_stem(name) == primary_stem
+                && anchor.confidence == "strong"
+                && anchor.format == "zip"
+                && anchor.anchor_roles.contains(&"terminal"))
+            .then(|| retry_volume_number(name, "zip"))
+            .flatten()
+        });
+    }
+    if target_format == "7z" {
+        return paths.iter().find_map(|path| {
+            let name = basename(path);
+            let anchor = anchors.get(&path.to_ascii_lowercase())?;
+            if retry_primary_stem(name) != primary_stem
+                || anchor.confidence != "strong"
+                || anchor.format != "7z"
+                || !anchor.anchor_roles.contains(&"first")
+                || anchor.sfx
+                || anchor.size == 0
+            {
+                return None;
+            }
+            let logical_size = anchor.expected_logical_size?;
+            let count = logical_size
+                .saturating_add(anchor.size.saturating_sub(1))
+                .checked_div(anchor.size)?;
+            u32::try_from(count).ok().filter(|value| *value > 0)
+        });
+    }
+    None
+}
+
+fn normalize_retry_format(format_hint: &str) -> &str {
+    match format_hint
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "7z" => "7z",
+        "zip" => "zip",
+        "rar" => "rar",
+        _ => "",
+    }
+}
+
+fn retry_primary_stem(name: &str) -> String {
+    name.split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn retry_volume_number(name: &str, target_format: &str) -> Option<u32> {
+    parse_volume_candidates(name)
+        .into_iter()
+        .find(|parsed| parsed.family == target_format && parsed.number > 0)
+        .map(|parsed| parsed.number)
+        .or_else(|| scan_retry_tokens(name, target_format))
+}
+
+fn retry_generic_volume_number(name: &str) -> Option<u32> {
+    parse_volume_candidates(name)
+        .into_iter()
+        .find(|parsed| parsed.family == "generic" && parsed.number > 0)
+        .map(|parsed| parsed.number)
+}
+
+fn scan_retry_tokens(name: &str, target_format: &str) -> Option<u32> {
+    let tokens: Vec<String> = name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let format_index = tokens.iter().position(|token| token == target_format)?;
+    for distance in 1..=2 {
+        for index in [
+            format_index.checked_sub(distance),
+            format_index.checked_add(distance),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|index| *index < tokens.len())
+        {
+            let token = &tokens[index];
+            let digits = token
+                .strip_prefix("part")
+                .or_else(|| token.strip_prefix("vol"))
+                .unwrap_or(token);
+            if let Some(number) = digits.parse::<u32>().ok().filter(|number| *number > 0) {
+                return Some(number);
+            }
+        }
+    }
+    None
+}
+
+fn resolved_volume_group_to_dict(
+    py: Python<'_>,
+    volumes: &[ResolvedVolume],
+    format: &str,
+    logical_name: &str,
+    anchor: Option<&VolumeAnchor>,
+) -> PyResult<Py<PyDict>> {
+    let head = volumes
+        .iter()
+        .find(|volume| volume.number == 1)
+        .unwrap_or(&volumes[0]);
+    let relation = FileRelationNative {
+        filename: basename(&head.path).to_string(),
+        logical_name: logical_name.to_string(),
+        split_role: Some("first".to_string()),
+        is_split_member: true,
+        has_generic_001_head: false,
+        is_plain_numeric_member: false,
+        has_split_companions: false,
+        is_split_exe_companion: false,
+        is_disguised_split_exe_companion: false,
+        is_split_related: true,
+        match_rar_disguised: false,
+        match_rar_head: format == "rar",
+        match_001_head: true,
+        split_family: format!("{format}_structure_retry"),
+        split_index: 1,
+    };
+    let all_parts: Vec<&str> = volumes.iter().map(|volume| volume.path.as_str()).collect();
+    let volume_dicts: Vec<Py<PyDict>> = volumes
+        .iter()
+        .map(|volume| {
+            let dict = PyDict::new(py);
+            dict.set_item("path", &volume.path)?;
+            dict.set_item("number", volume.number)?;
+            dict.set_item(
+                "role",
+                if volume.number == 1 {
+                    "first"
+                } else {
+                    "member"
+                },
+            )?;
+            dict.set_item("source", volume.source)?;
+            dict.set_item("style", format!("{format}_structure_retry"))?;
+            dict.set_item("prefix", logical_name)?;
+            dict.set_item("width", 3)?;
+            Ok(dict.unbind())
+        })
+        .collect::<PyResult<_>>()?;
+    let present_numbers: HashSet<u32> = volumes.iter().map(|volume| volume.number).collect();
+    let max_number = present_numbers.iter().copied().max().unwrap_or(0);
+    let (missing_ranges, missing_indices) = observed_missing(&present_numbers, max_number);
+    let has_observed_gap = !missing_ranges.is_empty();
+    let dict = PyDict::new(py);
+    dict.set_item("head_path", &head.path)?;
+    dict.set_item("logical_name", logical_name)?;
+    dict.set_item("relation", relation_to_dict(py, &relation)?)?;
+    dict.set_item("all_parts", PyList::new(py, &all_parts)?)?;
+    dict.set_item("is_split_candidate", true)?;
+    dict.set_item("head_size", anchor.map(|value| value.size))?;
+    dict.set_item("split_volumes", PyList::new(py, &volume_dicts)?)?;
+    let split_group_complete = has_observed_gap.then_some(false);
+    dict.set_item("split_group_complete", split_group_complete)?;
+    dict.set_item(
+        "split_missing_reason",
+        if has_observed_gap {
+            "missing_middle"
+        } else {
+            ""
+        },
+    )?;
+    dict.set_item("split_missing_indices", &missing_indices)?;
+    dict.set_item("split_observed_missing_ranges", &missing_ranges)?;
+    dict.set_item(
+        "split_layout_status",
+        if has_observed_gap {
+            "observed_gap"
+        } else {
+            "structure_resolved"
+        },
+    )?;
+    dict.set_item(
+        "split_completeness_status",
+        if has_observed_gap {
+            "middle_gap"
+        } else {
+            "retry_pending_validation"
+        },
+    )?;
+    dict.set_item("split_completeness_confidence", "strong")?;
+    let completeness_basis = if has_observed_gap {
+        vec![
+            "volume_anchor_structure",
+            "single_retry_hypothesis",
+            "bracketed_number_gap",
+        ]
+    } else {
+        vec!["volume_anchor_structure", "single_retry_hypothesis"]
+    };
+    dict.set_item("split_completeness_basis", completeness_basis)?;
+    dict.set_item(
+        "head_metadata",
+        anchor
+            .map(|value| volume_anchor_to_dict(py, value))
+            .transpose()?,
+    )?;
+    Ok(dict.unbind())
 }
 
 fn build_candidate_groups_from_inputs(
@@ -138,10 +558,9 @@ fn build_candidate_groups_from_inputs(
         for entry in &entries {
             relations.insert(
                 entry.name.clone(),
-                build_file_relation(&entry.name, &lower_names),
+                build_file_relation(&entry.name, &lower_names, entry.anchor.as_ref()),
             );
         }
-        promote_content_confirmed_plain_numeric_groups(&entries, &mut relations);
 
         let mut logical_groups: HashMap<String, Vec<RelationInput>> = HashMap::new();
         let mut logical_order: Vec<String> = Vec::new();
@@ -377,73 +796,6 @@ fn build_candidate_groups_from_inputs(
     Ok(groups)
 }
 
-fn promote_content_confirmed_plain_numeric_groups(
-    entries: &[RelationInput],
-    relations: &mut HashMap<String, FileRelationNative>,
-) {
-    let mut by_prefix: HashMap<String, Vec<(&RelationInput, ParsedVolume)>> = HashMap::new();
-    for entry in entries {
-        let Some(parsed) = parse_numbered_volume(&entry.path) else {
-            continue;
-        };
-        if parsed.style != "plain_numeric_suffix" {
-            continue;
-        }
-        by_prefix
-            .entry(parsed.prefix.to_ascii_lowercase())
-            .or_default()
-            .push((entry, parsed));
-    }
-
-    for members in by_prefix.into_values() {
-        if members.len() < 2 {
-            continue;
-        }
-        let Some((head, _)) = members.iter().find(|(_, parsed)| parsed.number == 1) else {
-            continue;
-        };
-        if !has_archive_or_sfx_magic(&head.path) {
-            continue;
-        }
-        for (entry, parsed) in members {
-            let Some(relation) = relations.get_mut(&entry.name) else {
-                continue;
-            };
-            relation.split_role = Some(
-                if parsed.number == 1 {
-                    "first"
-                } else {
-                    "member"
-                }
-                .to_string(),
-            );
-            relation.is_split_member = true;
-            relation.is_split_related = true;
-            relation.split_family = "generic_numbered".to_string();
-            relation.split_index = parsed.number;
-            relation.logical_name = clean_logical_name(basename(&parsed.prefix));
-        }
-    }
-}
-
-fn has_archive_or_sfx_magic(path: &str) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut header = [0u8; 16];
-    let Ok(read) = file.read(&mut header) else {
-        return false;
-    };
-    let bytes = &header[..read];
-    bytes.starts_with(b"7z\xBC\xAF\x27\x1C")
-        || bytes.starts_with(b"PK\x03\x04")
-        || bytes.starts_with(b"PK\x05\x06")
-        || bytes.starts_with(b"PK\x07\x08")
-        || bytes.starts_with(b"Rar!\x1A\x07\x00")
-        || bytes.starts_with(b"Rar!\x1A\x07\x01\x00")
-        || bytes.starts_with(b"MZ")
-}
-
 fn native_group_to_dict(
     py: Python<'_>,
     directory: &str,
@@ -466,7 +818,7 @@ fn native_group_to_dict(
     let mut relation = relations
         .get(&head.name)
         .cloned()
-        .unwrap_or_else(|| build_file_relation(&head.name, &HashSet::new()));
+        .unwrap_or_else(|| build_file_relation(&head.name, &HashSet::new(), head.anchor.as_ref()));
     if relation.split_family == "generic_part" {
         let concrete_families: HashSet<String> = group_entries
             .iter()
@@ -483,7 +835,7 @@ fn native_group_to_dict(
 
     if group_entries.len() > 1 {
         is_split_candidate = allow_multi_split_candidate;
-        if detect_split_role(&head.name) == Some("first")
+        if relation.split_role.as_deref() == Some("first")
             || head.name.to_ascii_lowercase().ends_with(".exe")
         {
             relation.split_role = Some("first".to_string());
@@ -537,6 +889,13 @@ fn native_group_to_dict(
     dict.set_item("split_completeness_status", completeness_status)?;
     dict.set_item("split_completeness_confidence", completeness_confidence)?;
     dict.set_item("split_completeness_basis", completeness_basis)?;
+    dict.set_item(
+        "head_metadata",
+        head.anchor
+            .as_ref()
+            .map(|anchor| volume_anchor_to_dict(py, anchor))
+            .transpose()?,
+    )?;
     Ok(dict.unbind())
 }
 
@@ -545,11 +904,15 @@ fn split_completeness_assessment(
     group_entries: &[RelationInput],
     relation: &FileRelationNative,
 ) -> (&'static str, &'static str, Vec<&'static str>) {
-    let head_content_confirmed = contract
-        .volumes
-        .iter()
-        .find(|volume| volume.number == 1)
-        .is_some_and(|volume| has_archive_or_sfx_magic(&volume.path));
+    let head_content_confirmed = contract.volumes.iter().any(|volume| {
+        volume.number == 1
+            && group_entries.iter().any(|entry| {
+                entry.path == volume.path
+                    && entry.anchor.as_ref().is_some_and(|anchor| {
+                        anchor.confidence == "strong" && !anchor.format.is_empty()
+                    })
+            })
+    });
     let canonical_scheme = !contract.volumes.is_empty()
         && contract
             .volumes
@@ -591,20 +954,7 @@ fn split_completeness_assessment(
         }
         "missing_tail" => {
             basis.push("required_terminal_absent");
-            let proven_zip_terminal = relation.split_family == "zip_spanned"
-                && (canonical_scheme || head_content_confirmed)
-                && group_entries.iter().all(|entry| {
-                    !relations_name_is_zip_terminal(&entry.name, &relation.logical_name)
-                });
-            (
-                "tail_missing",
-                if proven_zip_terminal {
-                    "proven"
-                } else {
-                    "hint"
-                },
-                basis,
-            )
+            ("tail_missing", "hint", basis)
         }
         _ if contract.complete == Some(true) => (
             "coherent",
@@ -619,15 +969,6 @@ fn split_completeness_assessment(
     }
 }
 
-fn relations_name_is_zip_terminal(name: &str, logical_name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let logical = logical_name.to_ascii_lowercase();
-    lower == format!("{logical}.zip")
-        || disguised_zip_terminal_base(name).is_some_and(|base| {
-            clean_logical_name(basename(&base)).eq_ignore_ascii_case(logical_name)
-        })
-}
-
 fn native_split_volume_to_dict(py: Python<'_>, volume: &NativeSplitVolume) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("path", &volume.path)?;
@@ -637,6 +978,30 @@ fn native_split_volume_to_dict(py: Python<'_>, volume: &NativeSplitVolume) -> Py
     dict.set_item("style", &volume.style)?;
     dict.set_item("prefix", &volume.prefix)?;
     dict.set_item("width", volume.width)?;
+    Ok(dict.unbind())
+}
+
+fn volume_anchor_to_dict(py: Python<'_>, anchor: &VolumeAnchor) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("path", &anchor.path)?;
+    dict.set_item("size", anchor.size)?;
+    dict.set_item("format", &anchor.format)?;
+    dict.set_item("confidence", &anchor.confidence)?;
+    dict.set_item("standalone", anchor.standalone)?;
+    dict.set_item("multivolume", anchor.multivolume)?;
+    dict.set_item("anchor_roles", PyList::new(py, &anchor.anchor_roles)?)?;
+    dict.set_item("internal_volume_number", anchor.internal_volume_number)?;
+    dict.set_item("structure_offset", anchor.structure_offset)?;
+    dict.set_item("expected_logical_size", anchor.expected_logical_size)?;
+    dict.set_item(
+        "continuation_from_previous",
+        anchor.continuation_from_previous,
+    )?;
+    dict.set_item("continuation_to_next", anchor.continuation_to_next)?;
+    dict.set_item("sfx", anchor.sfx)?;
+    dict.set_item("evidence", PyList::new(py, &anchor.evidence)?)?;
+    dict.set_item("error", &anchor.error)?;
+    dict.set_item("bytes_read", anchor.bytes_read)?;
     Ok(dict.unbind())
 }
 
@@ -652,8 +1017,41 @@ fn build_native_split_contract(
 ) -> NativeSplitContract {
     let parsed: Vec<(&RelationInput, ParsedVolume)> = group_entries
         .iter()
-        .filter_map(|entry| parse_numbered_volume(&entry.path).map(|parsed| (entry, parsed)))
+        .filter_map(|entry| parse_strict_numbered_volume(&entry.path).map(|parsed| (entry, parsed)))
         .collect();
+    if parsed.is_empty() && group_entries.len() == 1 {
+        let entry = &group_entries[0];
+        if let Some(anchor) = entry.anchor.as_ref().filter(|anchor| {
+            anchor.confidence == "strong" && anchor.multivolume && !anchor.format.is_empty()
+        }) {
+            let number = anchor.internal_volume_number.unwrap_or(1);
+            let missing_reason = if number > 1 {
+                "missing_head"
+            } else {
+                "missing_tail"
+            };
+            return NativeSplitContract {
+                volumes: vec![NativeSplitVolume {
+                    path: entry.path.clone(),
+                    number,
+                    role: if number == 1 { "first" } else { "member" },
+                    source: "structure",
+                    style: format!("{}_volume_anchor", anchor.format),
+                    prefix: retry_primary_stem(&entry.name),
+                    width: 3,
+                }],
+                complete: Some(false),
+                missing_reason: missing_reason.to_string(),
+                missing_indices: if number > 1 { vec![1] } else { Vec::new() },
+                missing_ranges: if number > 1 {
+                    vec![(1, number - 1)]
+                } else {
+                    Vec::new()
+                },
+                layout_status: "observed_gap",
+            };
+        }
+    }
     let sfx_head = group_entries.iter().find(|entry| {
         relations.get(&entry.name).is_some_and(|relation| {
             relation.is_split_exe_companion || relation.is_disguised_split_exe_companion
@@ -836,34 +1234,7 @@ fn build_native_split_contract(
 
     let max_number = by_number.keys().copied().max().unwrap_or(0);
     let present_numbers: HashSet<u32> = by_number.keys().copied().collect();
-    let (mut missing_ranges, mut missing) = observed_missing(&present_numbers, max_number);
-
-    if anchor.style == "zip_spanned" {
-        let terminal = group_entries.iter().find(|entry| {
-            relations.get(&entry.name).is_some_and(|relation| {
-                relation.split_family == "zip_spanned"
-                    && relation.split_role.as_deref() == Some("terminal")
-            })
-        });
-        if let Some(entry) = terminal {
-            by_number.insert(
-                max_number.saturating_add(1),
-                NativeSplitVolume {
-                    path: entry.path.clone(),
-                    number: max_number.saturating_add(1),
-                    role: "terminal",
-                    source: "standard",
-                    style: anchor.style.to_string(),
-                    prefix: anchor.prefix.clone(),
-                    width: anchor.width,
-                },
-            );
-        } else if missing_ranges.is_empty() {
-            let tail = max_number.saturating_add(1);
-            missing_ranges.push((tail, tail));
-            missing.push(tail);
-        }
-    }
+    let (missing_ranges, missing) = observed_missing(&present_numbers, max_number);
 
     let mut volumes: Vec<NativeSplitVolume> = by_number.into_values().collect();
     volumes.sort_by(|left, right| {
@@ -877,11 +1248,6 @@ fn build_native_split_contract(
         String::new()
     } else if missing.contains(&1) {
         "missing_head".to_string()
-    } else if anchor.style == "zip_spanned"
-        && missing.len() == 1
-        && missing[0] == max_number.saturating_add(1)
-    {
-        "missing_tail".to_string()
     } else {
         "missing_middle".to_string()
     };
@@ -966,11 +1332,40 @@ fn select_head_index(entries: &[RelationInput]) -> usize {
         .unwrap_or(0)
 }
 
-fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRelationNative {
+fn build_file_relation(
+    filename: &str,
+    lower_names: &HashSet<String>,
+    anchor: Option<&VolumeAnchor>,
+) -> FileRelationNative {
     let (base, ext) = split_ext(filename);
     let ext = ext.to_ascii_lowercase();
-    let mut split_role = detect_split_role(filename).map(str::to_string);
-    let parsed_volume = parse_numbered_volume(filename);
+    let structural_standalone = anchor.is_some_and(|value| {
+        value.confidence == "strong" && value.standalone && !value.multivolume
+    });
+    let mut parsed_volume = if structural_standalone {
+        None
+    } else {
+        parse_strict_numbered_volume(filename)
+    };
+    if let (Some(parsed), Some(anchor)) = (parsed_volume.as_mut(), anchor) {
+        if anchor.confidence == "strong" && !anchor.format.is_empty() {
+            if parsed.family != "generic" && parsed.family != anchor.format {
+                parsed_volume = None;
+            } else if anchor.format == "rar" {
+                if let Some(number) = anchor.internal_volume_number {
+                    parsed.number = number;
+                }
+            }
+        }
+    }
+    let mut split_role = parsed_volume.as_ref().map(|parsed| {
+        if parsed.number == 1 {
+            "first"
+        } else {
+            "member"
+        }
+        .to_string()
+    });
     let mut split_family = String::new();
     let mut split_index = 0;
     if let Some(parsed) = &parsed_volume {
@@ -981,7 +1376,6 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
             ("zip", "part_numbered") => "zip_part",
             (_, "part_numbered") => "generic_part",
             ("rar", "rar_oldstyle") => "rar_oldstyle",
-            ("zip", "zip_spanned") => "zip_spanned",
             ("7z", _) => "7z_numbered",
             ("zip", _) => "zip_numbered",
             ("rar", _) => "rar_numbered",
@@ -1023,28 +1417,13 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
         split_role = None;
     }
 
-    let mut has_split_companions = false;
-    let mut is_split_exe_companion = false;
-    let mut is_disguised_split_exe_companion = false;
+    let has_split_companions = false;
+    let is_split_exe_companion = false;
+    let is_disguised_split_exe_companion = false;
 
-    if ext == ".exe" {
-        has_split_companions = has_split_companions_in_dir(lower_names, &base);
-        is_split_exe_companion = has_split_companions;
-        if has_split_companions {
-            logical_name = base.clone();
-            split_family = "exe_companion".to_string();
-            split_index = 1;
-        }
-    } else if base.to_ascii_lowercase().ends_with(".exe") {
-        let logical_base = base[..base.len().saturating_sub(4)].to_string();
-        has_split_companions = has_split_companions_in_dir(lower_names, &logical_base);
-        is_disguised_split_exe_companion = has_split_companions;
-        if has_split_companions {
-            logical_name = logical_base;
-            split_family = "exe_companion".to_string();
-            split_index = 1;
-        }
-    }
+    // SFX membership is accepted only when the filename itself declares a
+    // native format sequence (for example part1.exe + part2.rar).  A naked
+    // executable is never attached to raw numbered data by proximity.
 
     if ext == ".rar" && has_oldstyle_rar_members(lower_names, &base) {
         logical_name = base.clone();
@@ -1054,23 +1433,23 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
         split_index = 1;
     }
 
-    if ext == ".zip" {
-        if let Some(max_member) = max_zip_segment_member(lower_names, &base) {
-            logical_name = base.clone();
-            split_role = Some("terminal".to_string());
-            is_split_member = true;
-            split_family = "zip_spanned".to_string();
-            split_index = max_member.saturating_add(1);
-        }
-    } else if parsed_volume.is_none() {
-        if let Some(zip_base) = disguised_zip_terminal_base(filename) {
-            if let Some(max_member) = max_zip_segment_member(lower_names, &zip_base) {
-                logical_name = zip_base;
-                split_role = Some("terminal".to_string());
-                is_split_member = true;
-                split_family = "zip_spanned".to_string();
-                split_index = max_member.saturating_add(1);
+    if let Some(anchor) = anchor.filter(|value| {
+        value.confidence == "strong" && value.multivolume && !value.format.is_empty()
+    }) {
+        is_split_member = true;
+        split_role = Some(
+            if anchor.anchor_roles.contains(&"first") {
+                "first"
+            } else if anchor.anchor_roles.contains(&"terminal") {
+                "terminal"
+            } else {
+                "member"
             }
+            .to_string(),
+        );
+        if split_family.is_empty() {
+            split_family = format!("{}_volume_anchor", anchor.format);
+            split_index = anchor.internal_volume_number.unwrap_or(1);
         }
     }
 
@@ -1138,27 +1517,18 @@ fn parsed_volume_to_dict(py: Python<'_>, parsed: &ParsedVolume) -> PyResult<Py<P
 }
 
 fn detect_split_role(filename: &str) -> Option<&'static str> {
-    if let Some(parsed) = parse_numbered_volume(filename) {
+    if let Some(parsed) = parse_strict_numbered_volume(filename) {
         return Some(if parsed.number == 1 {
             "first"
         } else {
             "member"
         });
     }
-    if split_first_patterns()
-        .iter()
-        .any(|pattern| pattern.is_match(filename))
-    {
-        return Some("first");
-    }
-    if split_member_pattern().is_match(filename) {
-        return Some("member");
-    }
     None
 }
 
 fn get_logical_name(filename: &str, is_archive: bool) -> String {
-    if let Some(parsed) = parse_numbered_volume(filename) {
+    if let Some(parsed) = parse_strict_numbered_volume(filename) {
         return logical_name_from_parsed(&parsed);
     }
     let name = rar_part_suffix_re().replace(filename, "").to_string();
@@ -1178,14 +1548,7 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
         return clean_logical_name(&second);
     }
 
-    let zip_spanned = zip_spanned_suffix_re().replace(&second, "").to_string();
-    if zip_spanned != second {
-        return clean_logical_name(&zip_spanned);
-    }
-
-    let third = plain_numeric_suffix_re()
-        .replace(&zip_spanned, "")
-        .to_string();
+    let third = plain_numeric_suffix_re().replace(&second, "").to_string();
     if third != second {
         return clean_logical_name(&third);
     }
@@ -1206,7 +1569,7 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
 fn logical_name_from_parsed(parsed: &ParsedVolume) -> String {
     if matches!(
         parsed.style,
-        "rar_part" | "rar_sfx_part" | "part_numbered" | "rar_oldstyle" | "zip_spanned"
+        "rar_part" | "rar_sfx_part" | "part_numbered" | "rar_oldstyle"
     ) || parsed.family == "generic"
     {
         return clean_logical_name(&parsed.prefix);
@@ -1228,6 +1591,17 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
     Some(parsed)
 }
 
+fn parse_strict_numbered_volume(path: &str) -> Option<ParsedVolume> {
+    let (directory, filename) = split_relation_path(path);
+    let mut parsed = parse_volume_candidates(filename)
+        .into_iter()
+        .find(|candidate| !candidate.decorated)?;
+    if !directory.is_empty() {
+        parsed.prefix = format!("{directory}{}", parsed.prefix);
+    }
+    Some(parsed)
+}
+
 /// Return the exact split-family identities a path can participate in.
 ///
 /// This is the sole naming seam exposed to the filesystem scanner. The
@@ -1240,11 +1614,10 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
         return Vec::new();
     }
     let mut keys = Vec::new();
-    if let Some(parsed) = parse_numbered_volume(path) {
+    if let Some(parsed) = parse_strict_numbered_volume(path) {
         let scheme = match parsed.style {
             "rar_part" | "rar_sfx_part" => "rar:part",
             "rar_oldstyle" => "rar:oldstyle",
-            "zip_spanned" => "zip:spanned",
             "zip_zero_numbered" => "zip:zero-numbered",
             "numeric_suffix" => "archive:numeric",
             "plain_numeric_suffix" => "generic:numeric",
@@ -1261,7 +1634,6 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
         ".zip" => {
             keys.push(split_size_family_key("archive:numeric", path));
             keys.push(split_size_family_key("zip:zero-numbered", path));
-            keys.push(split_size_family_key("zip:spanned", &base));
         }
         ".rar" => {
             keys.push(split_size_family_key("archive:numeric", path));
@@ -1356,24 +1728,6 @@ fn parse_volume_candidates(filename: &str) -> Vec<ParsedVolume> {
         push_unique_volume_candidate(&mut candidates, parsed);
     }
     let _ = (|| -> Option<()> {
-        if let Some(captures) = parse_zip_spanned_re().captures(filename) {
-            let number = captures
-                .name("number")
-                .and_then(|value| value.as_str().parse().ok());
-            if let Some(number) = number.filter(|number: &u32| *number > 0) {
-                push_unique_volume_candidate(
-                    &mut candidates,
-                    ParsedVolume {
-                        prefix: captures.name("prefix")?.as_str().to_string(),
-                        number,
-                        style: "zip_spanned",
-                        width: captures.name("number")?.as_str().len(),
-                        family: "zip",
-                        decorated: false,
-                    },
-                );
-            }
-        }
         if let Some(captures) = parse_zip_zero_numbered_re().captures(filename) {
             if let Some(raw_number) = captures
                 .name("number")
@@ -1623,17 +1977,6 @@ fn parse_decorated_numbered_volume(path: &str) -> Option<ParsedVolume> {
             false,
         );
     }
-    if let Some(captures) = decorated_zip_spanned_re().captures(path) {
-        let number = captures.name("number")?.as_str();
-        return Some(ParsedVolume {
-            prefix: captures.name("prefix")?.as_str().to_string(),
-            number: number.parse().ok()?,
-            style: "zip_spanned",
-            width: number.len(),
-            family: "zip",
-            decorated: true,
-        });
-    }
     if let Some(captures) = decorated_old_rar_re().captures(path) {
         let number = captures.name("number")?.as_str();
         return Some(ParsedVolume {
@@ -1756,35 +2099,6 @@ fn split_sort_key(path: &str) -> (u8, u32, String) {
     (2, 0, path.to_ascii_lowercase())
 }
 
-fn has_split_companions_in_dir(lower_names: &HashSet<String>, base_name: &str) -> bool {
-    let expected = clean_logical_name(base_name).to_ascii_lowercase();
-    if lower_names.iter().any(|candidate| {
-        parse_numbered_volume(candidate).is_some_and(|parsed| {
-            logical_name_from_parsed(&parsed).to_ascii_lowercase() == expected
-        })
-    }) {
-        return true;
-    }
-    let escaped = regex::escape(base_name);
-    let patterns = [
-        format!(r"^{escaped}\.(7z|zip|rar)\.\d+(?:\.[^.]+)?$"),
-        format!(r"^{escaped}\.\d{{3}}(?:\.[^.]+)?$"),
-        format!(r"^{escaped}\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$"),
-        format!(r"^{escaped}\.z\d{{2}}$"),
-    ];
-    patterns.iter().any(|pattern| {
-        RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .build()
-            .map(|regex| {
-                lower_names
-                    .iter()
-                    .any(|candidate| regex.is_match(candidate))
-            })
-            .unwrap_or(false)
-    })
-}
-
 fn has_matching_marker_companion(
     lower_names: &HashSet<String>,
     filename: &str,
@@ -1821,22 +2135,6 @@ fn has_oldstyle_rar_members(lower_names: &HashSet<String>, base_name: &str) -> b
         .unwrap_or(false)
 }
 
-fn max_zip_segment_member(lower_names: &HashSet<String>, base_name: &str) -> Option<u32> {
-    lower_names
-        .iter()
-        .filter_map(|candidate| parse_numbered_volume(candidate))
-        .filter_map(|parsed| {
-            (parsed.style == "zip_spanned" && parsed.prefix.eq_ignore_ascii_case(base_name))
-                .then_some(parsed.number)
-        })
-        .max()
-}
-
-fn disguised_zip_terminal_base(filename: &str) -> Option<String> {
-    let captures = disguised_zip_terminal_re().captures(filename)?;
-    Some(captures.name("prefix")?.as_str().to_string())
-}
-
 fn split_ext(filename: &str) -> (String, String) {
     let basename_start = filename
         .rfind(['\\', '/'])
@@ -1868,24 +2166,10 @@ fn re(pattern: &str) -> Regex {
         .expect("relation regex should compile")
 }
 
-fn split_first_patterns() -> &'static [Regex; 5] {
-    static VALUE: OnceLock<[Regex; 5]> = OnceLock::new();
-    VALUE.get_or_init(|| {
-        [
-            re(r"\.part0*1\.(?:rar|exe)(?:\.[^.]+)?$"),
-            re(r"\.zip\.0000(?:\.[^.]+)?$"),
-            re(r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$"),
-            re(r"\.001(?:\.[^.]+)?$"),
-            re(r"\.z01$"),
-        ]
-    })
-}
-
 fn relation_group_key(relation: &FileRelationNative) -> String {
     let family_and_scheme = match relation.split_family.as_str() {
         "7z_numbered" => "7z:numeric",
         "zip_numbered" => "zip:numeric",
-        "zip_spanned" => "zip:spanned",
         "rar_numbered" => "rar:numeric",
         "rar_part" => "rar:part",
         "7z_part" => "7z:part",
@@ -1945,16 +2229,6 @@ fn disguised_archive_numbered_re() -> &'static Regex {
     VALUE.get_or_init(|| re(r"\.(7z|zip|rar)\.\d+\.[^.]+$"))
 }
 
-fn disguised_zip_terminal_re() -> &'static Regex {
-    static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.zip(?:\.[^.]+)+$"))
-}
-
-fn split_member_pattern() -> &'static Regex {
-    static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"\.(part\d+\.(?:rar|exe)|zip\.\d{4}|\d{3}|z\d{2})(?:\.[^.]+)?$"))
-}
-
 fn rar_disguised_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(.*\.part)0*1\.rar(?:\.[^.]+)?$"))
@@ -1998,16 +2272,6 @@ fn parse_archive_numbered_re() -> &'static Regex {
 fn parse_zip_zero_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$"))
-}
-
-fn zip_spanned_suffix_re() -> &'static Regex {
-    static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"\.z\d{2}$"))
-}
-
-fn parse_zip_spanned_re() -> &'static Regex {
-    static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.z(?P<number>\d+)$"))
 }
 
 fn parse_rar_part_re() -> &'static Regex {
@@ -2061,11 +2325,6 @@ fn decorated_format_numeric_re() -> &'static Regex {
     VALUE.get_or_init(|| {
         re(r"^(?P<prefix>.+)\.[^.]*(?P<format>7z|zip|rar)[^.]*\.[^.]*?(?P<number>0\d{2,3})[^.]*(?:\.[^.]+)*$")
     })
-}
-
-fn decorated_zip_spanned_re() -> &'static Regex {
-    static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.[^.]*z[^.\d]*(?P<number>\d+)[^.]*(?:\.[^.]+)*$"))
 }
 
 fn decorated_old_rar_re() -> &'static Regex {

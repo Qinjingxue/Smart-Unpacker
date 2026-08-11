@@ -124,7 +124,7 @@ def test_relationship_grouping_scenarios(tmp_path, name, files, expected):
     assert _scan_parts(tmp_path / name) == expected
 
 
-def test_disguised_sfx_companion_groups_with_disguised_parts_not_noise(tmp_path):
+def test_naked_executable_does_not_attach_disguised_parts(tmp_path):
     root = tmp_path / "disguised_exe_companion_with_regular_exe"
     _write_files(
         root,
@@ -143,12 +143,8 @@ def test_disguised_sfx_companion_groups_with_disguised_parts_not_noise(tmp_path)
     actual = _scan_parts(root)
 
     assert actual == {
-        "bundle": [
-            "bundle.7z.001.camouflage",
-            "bundle.7z.002.camouflage",
-            "bundle.7z.003.camouflage",
-            "bundle.exe",
-        ],
+        "bundle.exe": ["bundle.exe"],
+        "helper": ["helper.part1.rar"],
     }
 
 

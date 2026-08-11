@@ -50,8 +50,8 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
 
 
 def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
-    archive = tmp_path / "sample.zip"
-    sidecar = tmp_path / "sample.z01"
+    archive = tmp_path / "sample.zip.001"
+    sidecar = tmp_path / "sample.zip.002"
     archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
     sidecar.write_bytes(b"sidecar")
     task = direct_file_task(str(archive), all_parts=[str(archive), str(sidecar)])
@@ -66,7 +66,7 @@ def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
             success=False,
             archive=str(archive),
             out_dir=str(tmp_path / "out"),
-            all_parts=[str(archive), str(tmp_path / "sample.z01")],
+            all_parts=[str(archive), str(sidecar)],
             error="checksum error",
             diagnostics={"result": {"status": "failed", "failure_stage": "item_extract", "failure_kind": "checksum_error", "native_status": "damaged"}},
             partial_outputs=True,

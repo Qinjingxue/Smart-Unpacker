@@ -80,6 +80,67 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(result.fact_bag.get("file.embedded_archive_found"))
             self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
+    def test_relations_volume_anchor_is_opaque_to_detection(self):
+        bag = FactBag()
+        bag.set("file.path", "payload.part5.zip.hidden-5")
+        bag.set("file.size", 8192)
+        bag.set("candidate.entry_path", "payload.part5.zip.hidden-5")
+        bag.set("candidate.embedded_payload_precheck_enabled", True)
+        bag.set("relation.volume_anchor", {
+            "format": "zip",
+            "confidence": "strong",
+            "multivolume": True,
+            "anchor_roles": ["terminal"],
+        })
+        bag.set("embedded_archive.analysis", {
+            "found": True,
+            "complete": True,
+            "read_bytes": 8192,
+            "file_size": 8192,
+            "hits": [{"name": "7z", "offset": 2048}],
+            "candidates": [{
+                "format": "7z",
+                "detected_ext": ".7z",
+                "offset": 2048,
+                "end_offset": 6144,
+                "confidence": 1.0,
+                "validation": "next-header-crc",
+            }],
+        })
+
+        decision = DetectionScheduler(embedded_config()).evaluate_bag(bag)
+
+        self.assertTrue(decision.should_extract)
+        self.assertEqual(bag.get("file.detected_ext"), ".7z")
+        self.assertEqual(bag.get("file.probe_offset"), 2048)
+        self.assertTrue(bag.get("file.embedded_archive_found"))
+
+    def test_relations_volume_anchor_cannot_accept_a_candidate(self):
+        bag = FactBag()
+        bag.set("file.path", "opaque-volume.bin")
+        bag.set("candidate.entry_path", "opaque-volume.bin")
+        bag.set("relation.volume_anchor", {
+            "format": "7z",
+            "confidence": "strong",
+            "multivolume": True,
+            "anchor_roles": ["first"],
+        })
+        bag.set("7z.structure", {
+            "magic_matched": False,
+            "plausible": False,
+            "strong_accept": False,
+        })
+        config = with_detection_pipeline(
+            {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
+            precheck=[{"name": "seven_zip_structure_accept", "enabled": True}],
+            scoring=[],
+        )
+
+        decision = DetectionScheduler(config).evaluate_bag(bag)
+
+        self.assertFalse(decision.should_extract)
+        self.assertEqual(decision.matched_rules, [])
+
     def test_shared_embedded_scan_switch_disables_detection_and_analysis_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
             carrier = Path(tmp) / "movie.mp4"
@@ -186,6 +247,36 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertTrue(decision.should_extract)
         self.assertEqual(bag.get("file.container_type"), "pe")
         self.assertEqual(bag.get("file.probe_offset"), 434176)
+
+    def test_runtime_executable_guard_precedes_internal_zip_identity(self):
+        bag = FactBag()
+        bag.set("file.path", "application.exe")
+        bag.set("candidate.entry_path", "application.exe")
+        bag.set("executable.carrier", {
+            "kind": "runtime_bundle",
+            "runtime_profile": "par_packer",
+            "is_executable": True,
+        })
+        bag.set("zip.eocd_structure", {
+            "plausible": True,
+            "central_directory_present": True,
+            "central_directory_walk_ok": True,
+            "local_header_links_ok": True,
+            "archive_offset": 0,
+        })
+        config = with_detection_pipeline(
+            {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
+            precheck=[
+                {"name": "zip_structure_accept", "enabled": True},
+                {"name": "embedded_payload_identity", "enabled": True},
+            ],
+        )
+
+        decision = DetectionScheduler(config).evaluate_bag(bag)
+
+        self.assertFalse(decision.should_extract)
+        self.assertEqual(decision.deciding_rule, "embedded_payload_identity")
+        self.assertIn("par_packer", decision.stop_reason)
 
 
 if __name__ == "__main__":

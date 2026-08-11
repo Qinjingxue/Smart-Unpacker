@@ -134,7 +134,7 @@ contracts
 
 ### relations
 
-`relations` 负责文件之间的关系：分卷主文件、成员、SFX companion、模糊分卷候选和逻辑名。外部模块只能调用 `RelationsScheduler`，不要直接依赖 `relations.internal`。
+`relations` 负责文件之间的关系：严格分卷主文件、成员、SFX companion、结构证据仲裁和逻辑名。初始发现不得用宽松文件名直接建组；确认缺卷后只允许执行一次由结构锚点约束的重找。外部模块只能调用 `RelationsScheduler`，不要直接依赖 `relations.internal`。完整契约见 [Structure-first volume resolution](volume_resolution.md)。
 
 允许公开的关系能力包括：
 
@@ -145,6 +145,8 @@ contracts
 - `should_scan_split_siblings(...)`
 - `find_standard_split_siblings(archive)`
 - `parse_numbered_volume(path)`
+- `resolve_volume_once(current_paths, candidate_paths, format_hint=...)`
+- `resolve_volume_once_in_directory(current_paths, directory, format_hint=...)`
 
 ### detection
 
@@ -160,7 +162,7 @@ contracts
 
 ### analysis
 
-`analysis` 是无业务策略的通用归档分析能力层。公共入口 `ArchiveAnalyzer` 接收 file、multi-volume、range 或 patched source 和 `AnalysisRequest`，输出格式证据、片段边界、置信度与损坏标记。它内部可以执行 signature prepass、fuzzy、格式 probe 和 embedded fallback，但不得依赖 `ArchiveTask`、Detection、Repair Inspection、Repair 或 Coordinator，也不得写业务 knowledge。
+`analysis` 是无业务策略的通用归档分析能力层。公共入口 `ArchiveAnalyzer` 接收 file、multi-volume、range 或 patched source 和 `AnalysisRequest`，输出格式证据、片段边界、置信度与损坏标记；`probe_volume_anchor_paths` 为 Relations 提供批量、有界、只读的原生分卷结构证据。它内部可以执行 signature prepass、fuzzy、格式 probe 和 embedded fallback，但不得依赖 `ArchiveTask`、Detection、Repair Inspection、Repair 或 Coordinator，也不得写业务 knowledge。
 
 ### repair_inspection
 

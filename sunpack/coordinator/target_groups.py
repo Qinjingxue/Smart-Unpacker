@@ -117,6 +117,8 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
         ])
     if member_paths:
         bag.set("relation.member_paths", list(member_paths))
+    if isinstance(group.head_metadata, dict) and group.head_metadata:
+        bag.set("relation.volume_anchor", dict(group.head_metadata))
     return bag
 
 

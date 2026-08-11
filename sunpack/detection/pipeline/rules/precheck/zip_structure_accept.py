@@ -3,7 +3,6 @@ from typing import Any, Dict
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleEffect
 from sunpack.detection.pipeline.rules.base import RuleBase
-from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement, MagicBytesStartsWith
 from sunpack.detection.pipeline.rules.registry import register_rule
 
 
@@ -16,7 +15,7 @@ class ZipStructureAcceptRule(RuleBase):
     routing_extensions = {".zip", ".zipx", ".jar", ".apk", ".docx", ".xlsx", ".z01"}
     can_be_promoted = True
     required_facts = {"zip.eocd_structure"}
-    fact_requirements = [FactRequirement("zip.eocd_structure", MagicBytesStartsWith(ZIP_START_MAGICS))]
+    fact_requirements = []
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {
         "accept_empty_zip": {

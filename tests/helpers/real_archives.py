@@ -127,6 +127,7 @@ class ArchiveFixtureFactory:
         carrier: str | None = None,
         disguise_ext: str | None = None,
         payload_size: int = 256 * 1024,
+        split_volume_size: int = 100 * 1024,
     ) -> ArchiveCase:
         if carrier and carrier not in SUPPORTED_CARRIERS:
             raise ValueError(f"Unsupported carrier: {carrier}")
@@ -147,6 +148,7 @@ class ArchiveFixtureFactory:
             password=password,
             split=split,
             sfx=sfx,
+            split_volume_size=split_volume_size,
         )
         shutil.rmtree(source_dir, ignore_errors=True)
 
@@ -187,21 +189,43 @@ class ArchiveFixtureFactory:
         password: str | None,
         split: bool,
         sfx: bool,
+        split_volume_size: int,
     ):
         archive_format = normalize_archive_format(archive_format)
         if archive_format in TAR_FORMATS | STREAM_FORMATS and (password or split or sfx):
             raise ValueError(f"{archive_format} fixtures do not support password, split, or sfx variants.")
         if archive_format == "7z":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.7z'}"
-            create_7z_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
+            create_7z_archive(
+                source_dir,
+                archive_path,
+                password=password,
+                split=split,
+                sfx=sfx,
+                split_volume_size=split_volume_size,
+            )
             return
         if archive_format == "zip":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.zip'}"
-            create_zip_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
+            create_zip_archive(
+                source_dir,
+                archive_path,
+                password=password,
+                split=split,
+                sfx=sfx,
+                split_volume_size=split_volume_size,
+            )
             return
         if archive_format == "rar":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.rar'}"
-            create_rar_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
+            create_rar_archive(
+                source_dir,
+                archive_path,
+                password=password,
+                split=split,
+                sfx=sfx,
+                split_volume_size=split_volume_size,
+            )
             return
         if archive_format in TAR_FORMATS:
             archive_path = archive_dir / f"{case_id}{ARCHIVE_EXTENSIONS[archive_format]}"
@@ -234,14 +258,21 @@ def write_payload(source_dir: Path, case_id: str, size_bytes: int = 256 * 1024) 
     return {"marker_name": marker_name, "marker_text": marker_text}
 
 
-def create_7z_archive(source_dir: Path, output_path: Path, password: str | None = None, split: bool = False, sfx: bool = False):
+def create_7z_archive(
+    source_dir: Path,
+    output_path: Path,
+    password: str | None = None,
+    split: bool = False,
+    sfx: bool = False,
+    split_volume_size: int = 100 * 1024,
+):
     tools = get_test_tools()
     seven_zip = require_7z()
     cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-mx=0", "-y"]
     if password:
         cmd.extend([f"-p{password}", "-mhe=on"])
     if split:
-        cmd.append("-v100k")
+        cmd.append(f"-v{max(1024, int(split_volume_size))}b")
     if sfx:
         sfx_path = tools["seven_zip_sfx"]
         if not sfx_path or not sfx_path.is_file():
@@ -250,14 +281,21 @@ def create_7z_archive(source_dir: Path, output_path: Path, password: str | None 
     run_cmd(cmd, output_path.parent)
 
 
-def create_zip_archive(source_dir: Path, output_path: Path, password: str | None = None, split: bool = False, sfx: bool = False):
+def create_zip_archive(
+    source_dir: Path,
+    output_path: Path,
+    password: str | None = None,
+    split: bool = False,
+    sfx: bool = False,
+    split_volume_size: int = 100 * 1024,
+):
     tools = get_test_tools()
     seven_zip = require_7z()
     cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-tzip", "-mx=0", "-y"]
     if password:
         cmd.append(f"-p{password}")
     if split:
-        cmd.append("-v100k")
+        cmd.append(f"-v{max(1024, int(split_volume_size))}b")
     if sfx:
         sfx_path = tools["seven_zip_sfx"]
         if not sfx_path or not sfx_path.is_file():
@@ -266,7 +304,14 @@ def create_zip_archive(source_dir: Path, output_path: Path, password: str | None
     run_cmd(cmd, output_path.parent)
 
 
-def create_rar_archive(source_dir: Path, output_path: Path, password: str | None = None, split: bool = False, sfx: bool = False):
+def create_rar_archive(
+    source_dir: Path,
+    output_path: Path,
+    password: str | None = None,
+    split: bool = False,
+    sfx: bool = False,
+    split_volume_size: int = 100 * 1024,
+):
     rar = get_optional_rar()
     if not rar:
         raise FileNotFoundError("RAR generator is not configured.")
@@ -274,7 +319,7 @@ def create_rar_archive(source_dir: Path, output_path: Path, password: str | None
     if password:
         cmd.append(f"-hp{password}")
     if split:
-        cmd.append("-v100k")
+        cmd.append(f"-v{max(1024, int(split_volume_size))}b")
     if sfx:
         cmd.append("-sfx")
     cmd.extend([str(output_path), str(source_dir)])

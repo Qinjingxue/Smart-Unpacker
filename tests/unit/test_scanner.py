@@ -134,7 +134,6 @@ def test_directory_scanner_promotes_small_split_member_with_accepted_family_anch
         ("payload.7z.001", "payload.7z.002"),
         ("payload.zip.001", "payload.zip.002"),
         ("payload.zip.0000", "payload.zip.0001"),
-        ("payload.z01", "payload.zip"),
         ("payload.rar.001", "payload.rar.002"),
         ("payload.part1.rar", "payload.part2.rar"),
         ("payload.part1.exe", "payload.part2.rar"),

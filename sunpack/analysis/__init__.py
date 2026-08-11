@@ -31,6 +31,7 @@ from sunpack.analysis.embedded import (
     embedded_result_from_dict,
     scan_embedded_archives,
 )
+from sunpack.analysis.volume_anchor import VolumeAnchorEvidence, VolumeEvidenceIndex, probe_volume_anchor_paths
 
 __all__ = [
     "AnalysisStatus",
@@ -59,4 +60,7 @@ __all__ = [
     "MultiVolumeAnalysisSource",
     "PatchedAnalysisSource",
     "analysis_source",
+    "VolumeAnchorEvidence",
+    "VolumeEvidenceIndex",
+    "probe_volume_anchor_paths",
 ]

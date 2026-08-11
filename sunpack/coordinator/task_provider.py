@@ -58,6 +58,31 @@ class ArchiveTaskProvider:
                 tasks.append(task)
         return tasks
 
+    def task_from_candidate_bag(self, bag: FactBag) -> ArchiveTask | None:
+        """Re-enter detection for one Relations hypothesis."""
+        if not bag.get("candidate.entry_path"):
+            return None
+        if self._detection_pipeline_disabled():
+            task = ArchiveTask.from_fact_bag(bag, score=0)
+        else:
+            decision = self.detector.evaluate_bag(bag)
+            if not decision.should_extract:
+                return None
+            task = ArchiveTask.from_fact_bag(bag, decision.total_score, decision=decision)
+        _write_initial_task_knowledge(task)
+        return task
+
+    def resolve_volume_once_in_directory(
+        self,
+        current_paths: list[str],
+        *,
+        format_hint: str = "",
+    ):
+        return self._relations.resolve_volume_once_in_directory(
+            current_paths,
+            format_hint=format_hint,
+        )
+
     def _scan_standard_archive_targets(
         self,
         scan_roots: list[str],

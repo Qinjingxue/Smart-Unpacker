@@ -208,6 +208,7 @@ class ExtractionBatchRunner:
         tasks: List[ArchiveTask],
         *,
         default_output_dir_for_task=None,
+        missing_volume_retry=None,
     ) -> List[str]:
         if not tasks:
             if self.progress_reporter is not None:
@@ -224,7 +225,11 @@ class ExtractionBatchRunner:
         tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
         if self.progress_reporter is not None:
             self.progress_reporter.begin_round(self.progress_round_index, tasks, direct=self.progress_direct_mode)
-        results = self._execute_ready_tasks(tasks, output_dir_resolver)
+        results = self._execute_ready_tasks(
+            tasks,
+            output_dir_resolver,
+            missing_volume_retry=missing_volume_retry,
+        )
 
         output_dirs = []
         output_inventories: dict[str, OutputInventory] = {}
@@ -246,12 +251,32 @@ class ExtractionBatchRunner:
             )
         return self.output_scan_policy.scan_roots_from_outputs(output_dirs)
 
-    def _execute_ready_tasks(self, tasks: List[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
+    def _execute_ready_tasks(
+        self,
+        tasks: List[ArchiveTask],
+        output_dir_resolver,
+        *,
+        missing_volume_retry=None,
+    ) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
         ready_tasks: list[ArchiveTask] = []
         skipped_results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
         for _index, task, _out_dir, preflight in self._inspect_tasks_before_extract(tasks, output_dir_resolver):
             if preflight.skip_result is not None:
                 outcome = BatchExtractionOutcome(preflight.skip_result)
+                if (
+                    callable(missing_volume_retry)
+                    and preflight.skip_result.failure is not None
+                    and preflight.skip_result.failure.contains(FailureKind.MISSING_VOLUME)
+                    and not bool(task.fact_bag.get("relation.volume_retry_attempted"))
+                ):
+                    replacement = missing_volume_retry(task, outcome)
+                    if isinstance(replacement, ArchiveTask):
+                        task.adopt_detection_plan(replacement)
+                        task.fact_bag.set("relation.volume_retry_attempted", True)
+                        self.prepare_tasks([task])
+                        self.directory_password_contexts.annotate([task])
+                        ready_tasks.append(task)
+                        continue
                 skipped_results.append((task, outcome))
                 self._report_task_finished(task, outcome)
                 continue
@@ -285,7 +310,12 @@ class ExtractionBatchRunner:
         )
         def execute_one(task, runtime_scheduler):
             planned_out_dir = output_dir_resolver(task)
-            outcome = self._extract_verify_with_retries(task, planned_out_dir, runtime_scheduler)
+            outcome = self._extract_verify_with_retries(
+                task,
+                planned_out_dir,
+                runtime_scheduler,
+                missing_volume_retry=missing_volume_retry,
+            )
             outcome.planned_out_dir = planned_out_dir
             self._report_task_finished(task, outcome)
             return task, outcome
@@ -476,6 +506,8 @@ class ExtractionBatchRunner:
         task: ArchiveTask,
         out_dir: str,
         runtime_scheduler: ConcurrencyScheduler,
+        *,
+        missing_volume_retry=None,
     ) -> BatchExtractionOutcome:
         task.fact_bag.set(REPAIR_ENTERED_FACT, False)
         verification_config = self.verifier.config
@@ -484,6 +516,7 @@ class ExtractionBatchRunner:
         attempts = max_verification_retries + 1
         last_outcome: BatchExtractionOutcome | None = None
         incumbent_outcome: BatchExtractionOutcome | None = None
+        volume_retry_attempted = bool(task.fact_bag.get("relation.volume_retry_attempted"))
 
         attempt_index = 0
         attempt_sequence = 0
@@ -502,6 +535,30 @@ class ExtractionBatchRunner:
                     attempts=attempt_index + 1,
                 )
                 self._annotate_recovery_outcome(task, current_outcome, source="original", round_index=current_sequence)
+                if (
+                    not volume_retry_attempted
+                    and callable(missing_volume_retry)
+                    and _should_retry_missing_volume_resolution(task, result)
+                ):
+                    volume_retry_attempted = True
+                    self._report_task_status(task, "resolving_volumes")
+                    replacement = missing_volume_retry(task, current_outcome)
+                    if isinstance(replacement, ArchiveTask):
+                        remove_output(
+                            result.out_dir,
+                            event=OutputCleanupEvent.VERIFICATION_RETRY,
+                            planned_output_dir=out_dir,
+                        )
+                        task.adopt_detection_plan(replacement)
+                        task.fact_bag.set("relation.volume_retry_attempted", True)
+                        task.fact_bag.set(
+                            "relation.volume_retry_basis",
+                            ["confirmed_structure", "anchor_constrained_filename"],
+                        )
+                        self.prepare_tasks([task])
+                        self.directory_password_contexts.annotate([task])
+                        incumbent_outcome = None
+                        continue
                 incumbent_outcome = self._select_better_recovery_outcome(
                     incumbent_outcome,
                     current_outcome,
@@ -2318,6 +2375,31 @@ def _json_pretty_reports(config: dict[str, Any] | None) -> bool:
         return not bool(reporting.get("compact_json"))
     debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
     return bool(debug.get("pretty_json_reports", False))
+
+
+def _should_retry_missing_volume_resolution(
+    task: ArchiveTask,
+    result: ExtractionResult,
+) -> bool:
+    failure = result.failure
+    if failure is not None and failure.contains(FailureKind.MISSING_VOLUME):
+        return True
+    anchor = task.fact_bag.get("relation.volume_anchor") or {}
+    structurally_incomplete = bool(
+        isinstance(anchor, dict)
+        and anchor.get("confidence") == "strong"
+        and anchor.get("multivolume")
+        and task.fact_bag.get("relation.split_group_complete") is False
+    )
+    return bool(
+        structurally_incomplete
+        and failure is not None
+        and failure.kind in {
+            FailureKind.UNSUPPORTED,
+            FailureKind.DAMAGED,
+            FailureKind.UNKNOWN,
+        }
+    )
 
 
 def _possible_missing_volume_failure(

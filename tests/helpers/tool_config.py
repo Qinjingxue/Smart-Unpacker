@@ -58,3 +58,10 @@ def require_zstd() -> Path:
 def get_optional_rar() -> Path | None:
     rar = get_test_tools()["rar_exe"]
     return rar if rar and rar.is_file() else None
+
+
+def get_optional_rar_sfx() -> Path | None:
+    rar = get_optional_rar()
+    if rar is None or not (rar.parent / "Default.SFX").is_file():
+        return None
+    return rar
