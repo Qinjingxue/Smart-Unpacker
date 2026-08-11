@@ -17,6 +17,19 @@ class WatchDispatch:
     group: WatchGroupSnapshot | None = None
 
 
+@dataclass(frozen=True)
+class DeferredWatch:
+    """A ready split member postponed for group coordination.
+
+    ``group`` is populated for members deferred because another member of the
+    same split group is still pending or in flight.  ``group`` is ``None`` for
+    dispatch-level deferrals such as output-root conflicts.
+    """
+
+    candidate: WatchCandidate
+    group: WatchGroupSnapshot | None = None
+
+
 class WatchGroupResolver(Protocol):
     def resolve_paths(self, paths: list[str]) -> dict[str, WatchGroupSnapshot | None]: ...
 
@@ -33,15 +46,16 @@ def plan_watch_dispatches(
     coordinator: WatchGroupResolver,
     state: WatchStateStore,
     prepare_candidate: Callable[[str], WatchCandidate | None],
-) -> tuple[list[WatchDispatch], list[WatchGroupSnapshot], list[WatchCandidate]]:
+) -> tuple[list[WatchDispatch], list[WatchGroupSnapshot], list[DeferredWatch]]:
     """Collapse quiet part events into one canonical head dispatch per split group."""
     if not ready:
         return [], [], []
     resolved = coordinator.resolve_paths([candidate.path for candidate in ready])
     dispatches: list[WatchDispatch] = []
     waiting: list[WatchGroupSnapshot] = []
-    deferred: list[WatchCandidate] = []
+    deferred: list[DeferredWatch] = []
     seen_groups: set[str] = set()
+    deferred_groups: set[str] = set()
 
     for candidate in ready:
         snapshot = resolved.get(path_key(candidate.path))
@@ -53,10 +67,17 @@ def plan_watch_dispatches(
             dispatches.append(WatchDispatch(candidate=candidate))
             continue
         if snapshot.group_id in seen_groups:
+            # Co-ready members of a group handled earlier in this tick are
+            # covered by that dispatch.  When the group was deferred instead,
+            # keep every co-ready member pending so the whole group can
+            # dispatch together once its remaining members are ready.
+            if snapshot.group_id in deferred_groups:
+                deferred.append(DeferredWatch(candidate=candidate, group=snapshot))
             continue
         seen_groups.add(snapshot.group_id)
         if any(path_key(member) in active_paths for member in snapshot.member_paths):
-            deferred.append(candidate)
+            deferred_groups.add(snapshot.group_id)
+            deferred.append(DeferredWatch(candidate=candidate, group=snapshot))
             continue
         if not snapshot.has_head or snapshot.should_wait_for_relation_gap:
             state.record_group_waiting(snapshot)

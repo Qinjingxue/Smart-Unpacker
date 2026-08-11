@@ -8,6 +8,7 @@ import pytest
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
+import sunpack.filesystem.watcher.scheduler as scheduler_module
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
 
@@ -29,7 +30,7 @@ def _partial_summary(*failures: FailureInfo):
     )
 
 
-def _watcher(tmp_path, runner_factory) -> WatchScheduler:
+def _watcher(tmp_path, runner_factory, *, quiet_seconds=0) -> WatchScheduler:
     root = tmp_path / "in"
     root.mkdir(exist_ok=True)
     return WatchScheduler(
@@ -37,11 +38,19 @@ def _watcher(tmp_path, runner_factory) -> WatchScheduler:
         [str(root)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
-        quiet_seconds=0,
+        quiet_seconds=quiet_seconds,
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(runner_factory),
         group_coordinator=WatchGroupCoordinator({}),
     )
+
+
+class _FakeClock:
+    def __init__(self, value: float):
+        self.value = value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
 
 
 def _split_zip_first_bytes() -> bytes:
@@ -88,6 +97,54 @@ def test_watch_holds_orphan_non_head_until_first_volume_arrives(tmp_path):
     assert first.processed == 0
     assert second_result.succeeded == 1
     assert attempts == [str(head.resolve())]
+
+
+def test_watch_aligned_group_deadlines_dispatch_together_without_restarting_quiet(
+    tmp_path,
+    monkeypatch,
+):
+    """Members that become quiet in different ticks must not defer each other forever.
+
+    Each member arrives with a slightly different quiet deadline.  The first
+    members become ready while the rest are still pending; the scheduler must
+    keep them pending with aligned deadlines (and keep co-ready members alive)
+    so the whole group dispatches at the latest member deadline instead of
+    restarting the quiet window every second.
+    """
+    attempts: list[str] = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts.extend(paths)
+            return _summary()
+
+    clock = _FakeClock(1000.0)
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: clock.value)
+    watcher = _watcher(tmp_path, Runner, quiet_seconds=1.0)
+    root = tmp_path / "in"
+    parts = [root / f"aligned.7z.00{index}" for index in (1, 2, 3, 4)]
+    for part in parts:
+        part.write_bytes(b"part")
+        clock.advance(0.02)
+        watcher.enqueue(str(part))
+
+    # Enqueues left the clock at 1000.08; member deadlines are 1001.02,
+    # 1001.04, 1001.06 and 1001.08.  Landing at 1001.05 makes only the first
+    # two members due while the other two are still pending.  Deferred members
+    # must stay pending (not be dropped) and their deadlines must align with
+    # the latest pending member instead of restarting.
+    clock.advance(0.97)
+    first = watcher.run_once()
+    assert first.processed == 0
+    assert watcher.pending_count == 4
+
+    clock.advance(0.06)
+    second = watcher.run_once()
+    assert second.succeeded == 1
+    assert attempts == [str((root / "aligned.7z.001").resolve())]
 
 
 def test_watch_conservatively_holds_old_rar_orphan_until_head_arrives(tmp_path):

@@ -27,7 +27,11 @@ from sunpack.filesystem.directory_scanner import (
 )
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
-from sunpack.filesystem.watcher.group_dispatch import NullWatchGroupResolver, plan_watch_dispatches
+from sunpack.filesystem.watcher.group_dispatch import (
+    DeferredWatch,
+    NullWatchGroupResolver,
+    plan_watch_dispatches,
+)
 from sunpack.filesystem.watcher.group_models import (
     BLOCKER_MISSING_VOLUME,
     BLOCKER_PASSWORD,
@@ -355,11 +359,16 @@ class WatchScheduler:
         )
         dispatches, output_deferred = self._filter_output_conflicts(dispatches)
         deferred.extend(output_deferred)
-        for candidate in deferred:
-            # A different member of this split group is still pending or in
-            # flight.  Preserve this content event so the changed group
-            # fingerprint is reconsidered after that request is harvested.
-            self.enqueue(candidate.path, force=True, event_type="modified")
+        for item in deferred:
+            if item.group is not None:
+                # A different member of this split group is still pending or
+                # in flight.  Keep the ready member pending with its quiet
+                # clock aligned to the group's latest pending member so the
+                # group dispatches together instead of deferring each other
+                # indefinitely one quiet window at a time.
+                self._defer_group_member(item.candidate, item.group)
+            else:
+                self.enqueue(item.candidate.path, force=True, event_type="modified")
         for snapshot in waiting:
             self.log.write(
                 "split_group_suspended",
@@ -402,7 +411,7 @@ class WatchScheduler:
             }
             predicted = self._predicted_output_dirs(candidate.path, output_config)
             if any(_paths_overlap(path, current) for path in predicted for current in reserved):
-                deferred.append(candidate)
+                deferred.append(DeferredWatch(candidate=candidate, group=dispatch.group))
                 continue
             selected.append(dispatch)
             reserved.extend(predicted)
@@ -886,6 +895,63 @@ class WatchScheduler:
             state.filtered_size = candidate.size
             state.filtered_mtime = candidate.mtime
             return True
+
+    def _defer_group_member(
+        self,
+        candidate: WatchCandidate,
+        snapshot: WatchGroupSnapshot,
+    ) -> None:
+        """Re-arm a ready split member without restarting its quiet clock.
+
+        The candidate already passed its quiet boundary, but another member of
+        the same split group is still pending (or in flight).  Re-enqueueing
+        through ``enqueue()`` restarts the quiet window, so members whose
+        deadlines differ by milliseconds can defer each other indefinitely.
+        Instead, keep the candidate pending and align its deadline with the
+        latest pending member so the whole group becomes ready in one tick and
+        dispatches together.  When only in-flight members remain, fall back to
+        the historical retry loop so the candidate is reconsidered after the
+        request is harvested.
+        """
+        with self._lock:
+            if candidate.path in self._pending or candidate.path in self._active_states:
+                # A newer event already re-armed this path after it was popped.
+                return
+            member_keys = {path_key(member) for member in snapshot.member_paths}
+            own_key = path_key(candidate.path)
+            pending_deadlines = [
+                state.last_event_at + state.quiet_seconds
+                for path, state in self._active_states.items()
+                if path_key(path) in member_keys and path_key(path) != own_key
+            ]
+        if not pending_deadlines:
+            self.enqueue(candidate.path, force=True, event_type="modified")
+            return
+        tracker = self._quiet_trackers.get(candidate.path)
+        quiet_seconds = (
+            float(tracker.quiet_seconds) if tracker is not None else self.cold_start_seconds
+        )
+        aligned_deadline = max(pending_deadlines)
+        state = _ActiveCandidateState(
+            last_event_at=aligned_deadline - quiet_seconds,
+            quiet_seconds=quiet_seconds,
+            filtered_size=candidate.size,
+            filtered_mtime=candidate.mtime,
+            # Keep the attempt armed without pinning the in-memory force flag,
+            # mirroring how a plain "modified" event arms a candidate.
+            event_requires_attempt=True,
+            filter_revision=self._filter_revision,
+        )
+        with self._lock:
+            if candidate.path in self._pending or candidate.path in self._active_states:
+                return
+            self._pending[candidate.path] = candidate
+            self._active_states[candidate.path] = state
+            # Persist the armed attempt (the same as enqueue("modified")) so a
+            # restart recovers this member for dispatch once the group is
+            # ready, without keeping the in-memory force flag hot.
+            self.state.queue_active(candidate, force=True)
+        self._wake_service()
 
     def _observe_candidate_activity(
         self,
