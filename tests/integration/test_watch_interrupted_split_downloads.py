@@ -355,9 +355,13 @@ def test_watch_retries_interrupted_split_downloads_without_cross_task_blocking(t
         ]
         assert len(interrupted_responses) == 3
         assert interrupted_responses[-1].summary.success_count == 1
+        # Partial probe data is deliberately discarded under the default
+        # "complete" content requirement (unified partial/complete recovery
+        # semantics): incomplete attempts report plain damage without
+        # promoting any recovered outputs.
         assert all(
-            response.summary.partial_success_count > 0
-            and response.summary.recovered_outputs
+            response.summary.partial_success_count == 0
+            and not response.summary.recovered_outputs
             for response in interrupted_responses[:-1]
         )
     finally:
