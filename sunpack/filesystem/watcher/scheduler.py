@@ -259,6 +259,10 @@ class WatchScheduler:
         self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
         self._recent_passwords: list[str] = []
         self._password_source_signature = self._refresh_password_sources()
+        self._sync_group_coordinator_passwords()
+        set_password_callback = getattr(self.group_coordinator, "set_password_callback", None)
+        if callable(set_password_callback):
+            set_password_callback(self._remember_recent_passwords)
         if self.state.record_password_source_signature(self._password_source_signature):
             self._mark_all_password_failures_dirty()
         self._clipboard_monitor = ClipboardPasswordMonitor(
@@ -704,6 +708,7 @@ class WatchScheduler:
         with self._password_source_lock:
             previous_signature = self._password_source_signature
             signature = self._refresh_password_sources()
+            self._sync_group_coordinator_passwords()
             if reason in {"builtin_password_file", "clipboard"} and signature == previous_signature:
                 return
             self._password_source_signature = signature
@@ -1477,6 +1482,11 @@ class WatchScheduler:
             self.config["user_passwords"] = user_passwords
             self.config["builtin_passwords"] = builtin_passwords
         return signature
+
+    def _sync_group_coordinator_passwords(self) -> None:
+        refresh = getattr(self.group_coordinator, "refresh_password_sources", None)
+        if callable(refresh):
+            refresh()
 
     def _remember_recent_passwords(self, passwords: Iterable[str] | None) -> None:
         incoming = dedupe_passwords([str(value) for value in list(passwords or []) if str(value)])

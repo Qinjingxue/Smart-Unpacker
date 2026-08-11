@@ -21,11 +21,12 @@ class DetectionScanSession:
         *,
         include_raw_snapshots: bool = False,
     ):
-        self.relations = relations or RelationsScheduler()
         self.config = config or {}
+        self.relations = relations or RelationsScheduler(self.config)
         self.include_raw_snapshots = include_raw_snapshots
         self._snapshots: dict[str, DirectorySnapshot] = {}
         self._relation_groups: dict[str, List[CandidateGroup]] = {}
+        self._relation_group_signatures: dict[str, str] = {}
         self._fact_bags: dict[str, List[FactBag]] = {}
         self._file_head_facts: dict[str, dict[str, Any]] = {}
         self._directory_identities: dict[str, tuple[str, int, tuple]] = {}
@@ -99,11 +100,23 @@ class DetectionScanSession:
             ).scan()
         return self._snapshots[key]
 
-    def relation_groups_for_directory(self, directory: str) -> List[CandidateGroup]:
+    def relation_groups_for_directory(
+        self,
+        directory: str,
+        path_passwords: dict[str, str] | None = None,
+        *,
+        refresh: bool = False,
+    ) -> List[CandidateGroup]:
         key = self._directory_key(directory)
-        if key not in self._relation_groups:
+        signature = _password_signature(path_passwords)
+        cached_signature = self._relation_group_signatures.get(key)
+        if refresh or key not in self._relation_groups or cached_signature != signature:
             snapshot = self.snapshot_for_directory(directory)
-            self._relation_groups[key] = self.relations.build_candidate_groups(snapshot)
+            self._relation_groups[key] = self.relations.build_candidate_groups(
+                snapshot,
+                path_passwords=path_passwords,
+            )
+            self._relation_group_signatures[key] = signature
         return self._relation_groups[key]
 
     def fact_bags_for_directory(self, directory: str) -> List[FactBag]:
@@ -198,3 +211,13 @@ class DetectionScanSession:
         if facts is None:
             return True
         return bool(magic_size > 0 and facts.get("is_file") and not facts.get("magic_complete"))
+
+
+def _password_signature(path_passwords: dict[str, str] | None) -> str:
+    if not path_passwords:
+        return ""
+    return repr(sorted(
+        (str(path).lower(), str(password))
+        for path, password in path_passwords.items()
+        if str(password)
+    ))

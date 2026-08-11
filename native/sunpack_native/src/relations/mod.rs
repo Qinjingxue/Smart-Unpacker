@@ -92,16 +92,20 @@ pub(crate) fn relations_split_sort_key(path: &str) -> (u8, u32, String) {
 }
 
 #[pyfunction]
+#[pyo3(signature = (snapshot, path_passwords=None))]
 pub(crate) fn relations_build_candidate_groups_from_snapshot(
     py: Python<'_>,
     snapshot: PyRef<'_, NativeDirectorySnapshot>,
+    path_passwords: Option<Vec<(String, String)>>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let records: Vec<(String, Option<u64>)> = snapshot
         .file_records()
         .map(|(path, size)| (path.to_string(), size))
         .collect();
     let paths: Vec<String> = records.iter().map(|(path, _)| path.clone()).collect();
-    let anchors = py.detach(|| probe_volume_anchor_paths(&paths, 1024 * 1024, 65_557));
+    let anchors = py.detach(|| {
+        probe_volume_anchor_paths(&paths, 1024 * 1024, 65_557, path_passwords.as_deref())
+    });
     let mut anchors_by_path: HashMap<String, VolumeAnchor> = anchors
         .into_iter()
         .map(|anchor| (anchor.path.to_ascii_lowercase(), anchor))
@@ -132,12 +136,13 @@ pub(crate) fn relations_build_candidate_groups_from_snapshot(
 }
 
 #[pyfunction]
-#[pyo3(signature = (current_paths, candidate_paths, format_hint=""))]
+#[pyo3(signature = (current_paths, candidate_paths, format_hint="", path_passwords=None))]
 pub(crate) fn relations_resolve_volume_once(
     py: Python<'_>,
     current_paths: Vec<String>,
     candidate_paths: Vec<String>,
     format_hint: &str,
+    path_passwords: Option<Vec<(String, String)>>,
 ) -> PyResult<Option<Py<PyDict>>> {
     if current_paths.is_empty() || candidate_paths.is_empty() {
         return Ok(None);
@@ -146,7 +151,9 @@ pub(crate) fn relations_resolve_volume_once(
     all_paths.extend(candidate_paths);
     all_paths.sort_by_key(|path| path.to_ascii_lowercase());
     all_paths.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    let anchors = py.detach(|| probe_volume_anchor_paths(&all_paths, 1024 * 1024, 65_557));
+    let anchors = py.detach(|| {
+        probe_volume_anchor_paths(&all_paths, 1024 * 1024, 65_557, path_passwords.as_deref())
+    });
     let anchor_by_path: HashMap<String, VolumeAnchor> = anchors
         .into_iter()
         .map(|anchor| (anchor.path.to_ascii_lowercase(), anchor))
@@ -1116,6 +1123,9 @@ fn volume_anchor_to_dict(py: Python<'_>, anchor: &VolumeAnchor) -> PyResult<Py<P
     dict.set_item("confidence", &anchor.confidence)?;
     dict.set_item("standalone", anchor.standalone)?;
     dict.set_item("multivolume", anchor.multivolume)?;
+    dict.set_item("encrypted", anchor.encrypted)?;
+    dict.set_item("needs_password", anchor.needs_password)?;
+    dict.set_item("wrong_password", anchor.wrong_password)?;
     dict.set_item("anchor_roles", PyList::new(py, &anchor.anchor_roles)?)?;
     dict.set_item("internal_volume_number", anchor.internal_volume_number)?;
     dict.set_item("structure_offset", anchor.structure_offset)?;

@@ -15,6 +15,9 @@ from sunpack_native import (
 )
 
 from sunpack.contracts.filesystem import DirectorySnapshot
+from sunpack.passwords.internal.local_files import discover_directory_passwords_for_archive
+from sunpack.passwords.internal.store import PasswordStore
+from sunpack.passwords.relation_prober import RelationsPasswordProber
 from sunpack.relations.internal.models import CandidateGroup, FileRelation, SplitVolumeEntry
 from sunpack.support.path_keys import path_key
 
@@ -22,8 +25,81 @@ from sunpack.support.path_keys import path_key
 class RelationsGroupBuilder:
     """Thin Python contract over the native evidence-first Relations engine."""
 
-    def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
-        native_groups = _native_build_candidate_groups(snapshot.native_snapshot)
+    def __init__(self, config: dict | None = None):
+        self.config = config or {}
+        self.password_store = PasswordStore.from_sources(
+            cli_passwords=list(self.config.get("user_passwords") or []),
+            builtin_passwords=list(self.config.get("builtin_passwords") or []),
+        )
+        self.password_prober = RelationsPasswordProber(self.password_store)
+
+    def set_password_callback(self, callback) -> None:
+        """Register a listener for passwords discovered during relation scans."""
+        self.password_prober.set_password_callback(callback)
+
+    def refresh_password_sources(self) -> None:
+        """Synchronize the prober's store with live watch scheduler sources."""
+        self.password_store.replace_sources(
+            user_passwords=list(self.config.get("user_passwords") or []),
+            builtin_passwords=list(self.config.get("builtin_passwords") or []),
+        )
+
+    def build_candidate_groups(
+        self,
+        snapshot: DirectorySnapshot,
+        path_passwords: dict[str, str] | None = None,
+    ) -> List[CandidateGroup]:
+        groups = self.build_candidate_groups_without_discovery(snapshot, path_passwords)
+        if path_passwords is None:
+            discovered = self._discover_directory_passwords(groups)
+            if discovered:
+                path_passwords = discovered
+                groups = self.build_candidate_groups_without_discovery(snapshot, discovered)
+        return self._merge_structure_resolved_groups(groups, path_passwords=path_passwords)
+
+    def _discover_directory_passwords(
+        self,
+        groups: List[CandidateGroup],
+    ) -> dict[str, str] | None:
+        """Second-pass password discovery for header-encrypted RAR5 files.
+
+        The first native pass reports every encrypted file that could not be
+        structurally resolved (each one surfaces as an encrypted-unresolved
+        head or member).  Probing those files with the same-directory password
+        list lets the next native pass decrypt the main headers and follow the
+        exact unencrypted path: real multivolume state and volume numbers.
+        """
+        encrypted_paths: set[str] = set()
+        for group in groups:
+            if not getattr(group, "encrypted_unresolved", False):
+                continue
+            encrypted_paths.add(os.path.abspath(str(group.head_path or "")))
+            for member in group.all_paths:
+                encrypted_paths.add(os.path.abspath(str(member)))
+        encrypted_paths.discard("")
+        if not encrypted_paths:
+            return None
+
+        found: dict[str, str] = {}
+        for path in encrypted_paths:
+            directory_passwords = discover_directory_passwords_for_archive(path, self.config)
+            password = self.password_prober.resolve_file(
+                path,
+                directory_passwords=directory_passwords,
+            )
+            if password:
+                found[path] = password
+        return found or None
+
+    def build_candidate_groups_without_discovery(
+        self,
+        snapshot: DirectorySnapshot,
+        path_passwords: dict[str, str] | None = None,
+    ) -> List[CandidateGroup]:
+        native_groups = _native_build_candidate_groups(
+            snapshot.native_snapshot,
+            _native_password_pairs(path_passwords),
+        )
         groups: List[CandidateGroup] = []
         for raw in native_groups:
             if not isinstance(raw, dict):
@@ -32,11 +108,13 @@ class RelationsGroupBuilder:
             if group is None:
                 raise ValueError("native relations returned an invalid group")
             groups.append(group)
-        return self._merge_structure_resolved_groups(groups)
+        return groups
 
     def _merge_structure_resolved_groups(
         self,
         groups: List[CandidateGroup],
+        *,
+        path_passwords: dict[str, str] | None = None,
     ) -> List[CandidateGroup]:
         """Use bounded structure evidence only to build logical volume groups."""
         candidate_paths = list(dict.fromkeys(
@@ -73,6 +151,7 @@ class RelationsGroupBuilder:
                 current_paths,
                 candidate_paths,
                 format_hint=str(anchor["format"]),
+                path_passwords=path_passwords,
             )
             if resolved is None or len(resolved.all_paths) <= 1:
                 continue
@@ -105,8 +184,14 @@ class RelationsGroupBuilder:
         candidate_paths: list[str],
         *,
         format_hint: str = "",
+        path_passwords: dict[str, str] | None = None,
     ) -> CandidateGroup | None:
-        raw = _native_resolve_volume_once(current_paths, candidate_paths, format_hint)
+        raw = _native_resolve_volume_once(
+            current_paths,
+            candidate_paths,
+            format_hint,
+            _native_password_pairs(path_passwords),
+        )
         return self._candidate_group_from_native(raw) if isinstance(raw, dict) else None
 
     def resolve_volume_once_in_directory(
@@ -293,6 +378,20 @@ class RelationsGroupBuilder:
                 split_completeness_confidence=str(raw.get("split_completeness_confidence") or "hint"),
                 split_completeness_basis=[str(value) for value in (raw.get("split_completeness_basis") or [])],
                 head_metadata=dict(raw.get("head_metadata") or {}),
+                encrypted_unresolved=self._group_encrypted_unresolved(raw),
             )
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _group_encrypted_unresolved(raw: dict) -> bool:
+        metadata = raw.get("head_metadata")
+        if not isinstance(metadata, dict):
+            return False
+        return bool(metadata.get("needs_password") or metadata.get("wrong_password"))
+
+
+def _native_password_pairs(path_passwords: dict[str, str] | None) -> list[tuple[str, str]] | None:
+    if not path_passwords:
+        return None
+    return [(str(path), str(password)) for path, password in path_passwords.items() if str(password)]

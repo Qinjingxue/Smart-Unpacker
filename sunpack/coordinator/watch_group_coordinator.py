@@ -6,18 +6,41 @@ import os
 from collections import defaultdict
 
 from sunpack.coordinator.scan_session import DetectionScanSession
+from sunpack.passwords.internal.store import PasswordStore
+from sunpack.passwords.relation_prober import RelationsPasswordProber
 from sunpack.relations.scheduler import RelationsScheduler
 from sunpack.support.path_keys import path_key
 
 from sunpack.filesystem.watcher.group_models import WatchGroupSnapshot
 
 
+class WatchPasswordProber(RelationsPasswordProber):
+    """Backward-compatible alias used by watch tests."""
+
+    def resolve_for_group(self, group, *, directory_passwords=None) -> str | None:
+        return self.resolve_file(
+            str(getattr(group, "head_path", "") or ""),
+            directory_passwords=directory_passwords,
+        )
+
 class WatchGroupCoordinator:
     """Resolve stable file events to canonical split-archive groups."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, password_tester=None):
         self.config = config
-        self.relations = RelationsScheduler()
+        self.relations = RelationsScheduler(config)
+        self.password_store = (
+            password_tester.password_store
+            if password_tester is not None
+            else PasswordStore.from_sources(
+                cli_passwords=list(config.get("user_passwords") or []),
+                builtin_passwords=list(config.get("builtin_passwords") or []),
+            )
+        )
+
+    def set_password_callback(self, callback) -> None:
+        """Register a listener for passwords discovered by the relation prober."""
+        self.relations.set_password_callback(callback)
 
     def resolve_paths(self, paths: list[str]) -> dict[str, WatchGroupSnapshot | None]:
         by_directory: dict[str, list[str]] = defaultdict(list)
@@ -26,7 +49,8 @@ class WatchGroupCoordinator:
 
         resolved: dict[str, WatchGroupSnapshot | None] = {}
         for directory, directory_paths in by_directory.items():
-            groups = DetectionScanSession(self.relations, config=self.config).relation_groups_for_directory(directory)
+            session = DetectionScanSession(self.relations, config=self.config)
+            groups = session.relation_groups_for_directory(directory)
             snapshots = [self._snapshot(group, directory) for group in groups if group.kind == "split_archive"]
             for path in directory_paths:
                 selected = next(
@@ -35,6 +59,10 @@ class WatchGroupCoordinator:
                 )
                 resolved[path_key(path)] = selected
         return resolved
+
+    def refresh_password_sources(self) -> None:
+        """Synchronize the prober's store with the watch scheduler's live sources."""
+        self.relations.refresh_password_sources()
 
     def resolve_head(self, head_path: str) -> WatchGroupSnapshot | None:
         return self.resolve_paths([head_path]).get(path_key(head_path))
@@ -56,6 +84,7 @@ class WatchGroupCoordinator:
             "completeness_status": group.split_completeness_status,
             "completeness_confidence": group.split_completeness_confidence,
             "completeness_basis": list(group.split_completeness_basis or []),
+            "encrypted_unresolved": bool(getattr(group, "encrypted_unresolved", False)),
         }
         fingerprint = _fingerprint(payload)
         return WatchGroupSnapshot(
@@ -73,6 +102,7 @@ class WatchGroupCoordinator:
             completeness_status=str(group.split_completeness_status or "ambiguous"),
             completeness_confidence=str(group.split_completeness_confidence or "hint"),
             completeness_basis=tuple(str(value) for value in (group.split_completeness_basis or [])),
+            encrypted_unresolved=bool(getattr(group, "encrypted_unresolved", False)),
         )
 
 

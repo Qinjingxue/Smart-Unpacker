@@ -52,6 +52,7 @@ class CandidateGroup:
     split_completeness_confidence: str = "hint"
     split_completeness_basis: List[str] = None
     head_metadata: Dict[str, Any] | None = None
+    encrypted_unresolved: bool = False
 
     @property
     def kind(self) -> str:

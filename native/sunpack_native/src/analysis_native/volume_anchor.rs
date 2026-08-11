@@ -1,4 +1,5 @@
 use std::io::{Read, Seek, SeekFrom};
+use std::collections::HashMap;
 
 use crc32fast::hash as crc32;
 use memchr::memmem;
@@ -6,6 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::io::reader::ManagedReader;
+use crate::password::rar::rar5_decrypt_main_header;
 
 const SEVEN_ZIP: &[u8] = b"7z\xbc\xaf'\x1c";
 const RAR4: &[u8] = b"Rar!\x1a\x07\x00";
@@ -25,6 +27,9 @@ pub(crate) struct VolumeAnchor {
     pub(crate) confidence: String,
     pub(crate) standalone: bool,
     pub(crate) multivolume: bool,
+    pub(crate) encrypted: bool,
+    pub(crate) needs_password: bool,
+    pub(crate) wrong_password: bool,
     pub(crate) anchor_roles: Vec<&'static str>,
     pub(crate) internal_volume_number: Option<u32>,
     pub(crate) structure_offset: Option<u64>,
@@ -46,6 +51,9 @@ impl VolumeAnchor {
         out.set_item("confidence", self.confidence)?;
         out.set_item("standalone", self.standalone)?;
         out.set_item("multivolume", self.multivolume)?;
+        out.set_item("encrypted", self.encrypted)?;
+        out.set_item("needs_password", self.needs_password)?;
+        out.set_item("wrong_password", self.wrong_password)?;
         out.set_item("anchor_roles", PyList::new(py, self.anchor_roles)?)?;
         out.set_item("internal_volume_number", self.internal_volume_number)?;
         out.set_item("structure_offset", self.structure_offset)?;
@@ -64,14 +72,17 @@ impl VolumeAnchor {
 }
 
 #[pyfunction]
-#[pyo3(signature = (paths, prefix_limit=DEFAULT_PREFIX_LIMIT, tail_limit=DEFAULT_TAIL_LIMIT))]
+#[pyo3(signature = (paths, prefix_limit=DEFAULT_PREFIX_LIMIT, tail_limit=DEFAULT_TAIL_LIMIT, path_passwords=None))]
 pub(crate) fn probe_volume_anchors(
     py: Python<'_>,
     paths: Vec<String>,
     prefix_limit: usize,
     tail_limit: usize,
+    path_passwords: Option<Vec<(String, String)>>,
 ) -> PyResult<Vec<Py<PyDict>>> {
-    py.detach(|| probe_volume_anchor_paths(&paths, prefix_limit, tail_limit))
+    py.detach(|| {
+        probe_volume_anchor_paths(&paths, prefix_limit, tail_limit, path_passwords.as_deref())
+    })
         .into_iter()
         .map(|anchor| anchor.into_dict(py))
         .collect()
@@ -81,14 +92,35 @@ pub(crate) fn probe_volume_anchor_paths(
     paths: &[String],
     prefix_limit: usize,
     tail_limit: usize,
+    path_passwords: Option<&[(String, String)]>,
 ) -> Vec<VolumeAnchor> {
+    let password_map: HashMap<String, &str> = path_passwords
+        .map(|items| {
+            items
+                .iter()
+                .map(|(path, password)| (path.to_ascii_lowercase(), password.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
     paths
         .iter()
-        .map(|path| probe_path(path, prefix_limit, tail_limit))
+        .map(|path| {
+            probe_path(
+                path,
+                prefix_limit,
+                tail_limit,
+                password_map.get(&path.to_ascii_lowercase()).copied(),
+            )
+        })
         .collect()
 }
 
-fn probe_path(path: &str, prefix_limit: usize, tail_limit: usize) -> VolumeAnchor {
+fn probe_path(
+    path: &str,
+    prefix_limit: usize,
+    tail_limit: usize,
+    password: Option<&str>,
+) -> VolumeAnchor {
     let mut result = VolumeAnchor {
         path: path.to_string(),
         ..VolumeAnchor::default()
@@ -159,7 +191,7 @@ fn probe_path(path: &str, prefix_limit: usize, tail_limit: usize) -> VolumeAncho
     let allow_embedded = prefix.starts_with(b"MZ");
     if let Some(offset) = anchored_signature(&prefix, RAR5, allow_embedded)
         .or_else(|| anchored_signature(&prefix, RAR4, allow_embedded))
-        .filter(|offset| probe_rar(&prefix, *offset, &mut result))
+        .filter(|offset| probe_rar(&prefix, *offset, &mut result, password))
     {
         let _ = offset;
         return result;
@@ -177,7 +209,12 @@ fn probe_path(path: &str, prefix_limit: usize, tail_limit: usize) -> VolumeAncho
     result
 }
 
-fn probe_rar(prefix: &[u8], offset: usize, out: &mut VolumeAnchor) -> bool {
+fn probe_rar(
+    prefix: &[u8],
+    offset: usize,
+    out: &mut VolumeAnchor,
+    password: Option<&str>,
+) -> bool {
     if prefix
         .get(offset..)
         .is_some_and(|value| value.starts_with(RAR5))
@@ -188,14 +225,37 @@ fn probe_rar(prefix: &[u8], offset: usize, out: &mut VolumeAnchor) -> bool {
                 return false;
             }
             initialize_rar_anchor(out, offset);
-            // Header-encrypted RAR5 keeps the main-volume flags and number
-            // behind encryption. The CRC-protected type-4 header still gives
-            // strong format evidence; Relations may derive ordering only from
-            // an anchor-constrained filename hypothesis and Detection must
-            // validate the resulting logical input.
-            out.multivolume = true;
+            out.encrypted = true;
+            if let Some(password) = password {
+                // Header-encrypted RAR5 keeps the main-volume flags and number
+                // behind encryption.  Decrypt the main header with the
+                // probed password so the path behaves exactly like an
+                // unencrypted archive: real multivolume state, volume number
+                // and first/member/terminal roles.
+                if let Some((archive_flags, number)) =
+                    rar5_decrypt_main_header(&prefix[offset..], password)
+                {
+                    out.multivolume = archive_flags & 0x01 != 0;
+                    if out.multivolume {
+                        out.internal_volume_number =
+                            Some(number.unwrap_or(0).saturating_add(1));
+                        out.anchor_roles
+                            .push(if number.is_none() { "first" } else { "member" });
+                        out.evidence.push("rar5:volume_header");
+                    } else {
+                        out.standalone = true;
+                        out.anchor_roles.push("standalone");
+                        out.evidence.push("rar5:single_archive_header");
+                    }
+                    return true;
+                }
+                out.wrong_password = true;
+                out.evidence.push("rar5:wrong_password");
+            } else {
+                out.evidence.push("rar5:encryption_header");
+            }
+            out.needs_password = true;
             out.anchor_roles.push("encrypted_volume");
-            out.evidence.push("rar5:encryption_header");
             return true;
         };
         initialize_rar_anchor(out, offset);
@@ -272,7 +332,7 @@ fn initialize_rar_anchor(out: &mut VolumeAnchor, offset: usize) {
     out.anchor_roles.push("any_volume");
 }
 
-fn rar5_main_volume(data: &[u8], offset: usize) -> Option<(u64, Option<u32>)> {
+pub(crate) fn rar5_main_volume(data: &[u8], offset: usize) -> Option<(u64, Option<u32>)> {
     let stored_crc = u32_le(data, offset)?;
     let (header_size, after_size) = read_vint(data, offset + 4)?;
     let total = 4usize
@@ -539,5 +599,69 @@ mod tests {
 
         header[8] ^= 0x01;
         assert_eq!(rar4_main_flags(&header, 0), None);
+    }
+
+    const SINGLE_HP_HEX: &str = "526172211a07010074de7b1c21040000010f7b64253244702e2a32eb93579555a37d38b616cb97898c463d3682920551724ed0c1c974029cc2b8ef8491fc816311daa1b0410f6115608170466e4948a8c6d4f17e28b08c727b4acfc116d3d075ce011963dc0c72e50a803d9036619810e92352e809830c9463ab4a0abdaab61e008218673e9c51409f76b2064bf7982e56d8173f1e387329bd5aca3bac49063545fcbfc19547d2be214b4fe1dae172b250e168f2a258548930b1763fb500c7869d70f2539d86fd19214dcc3bca1363154b0a0f2b0bba7dcc224ec1893cbc31cfa95158ccf5e96d74921de6f268ea4429e2ddf63d49220005742fef059f868372345f071322a7e690d56d5ac17b563fa9e923076fa2c58aa8e88e9843df17b7e79a30ca936d8215c92f6832f86887c3c3160ecfddfcdf7712382f84f39eb8";
+    const PART1_HP_HEX: &str = "526172211a070100ba274f7921040000010fb5b78bc874c2401abc24a83cef823460c50737df44187dc3fa3a8316028f5a16a7ec9cd527eff412f0bd4f8e579a17b4f089c86869ed79e1eda2749f3ec19c16fa0a126c255e5a0ade47c823d3c82ddc00c1c6caebf6506ef16dd177984ee975d3669ff26194eee05db61c51b12d618f31b63f8edfe5828ad2c512093459f242c0b23a51614fe315c307cbdac485";
+    const PART2_HP_HEX: &str = "526172211a070100ba274f7921040000010fb5b78bc874c2401abc24a83cef823460c50737df44187dc3fa3a831619b05ee4bf8e2194083d002591665679b4863aed78506ef5d174ab922c0c6c14e872055e0c440d2288a78fca53664503b46b93be4dc1f58098453bfc79bc498cb0cff26cdfadb5a13581c4bc1ae85166bbf4b013ccbd11873b02c45cbc42b8d64ca2effb581d24eddb503087a1cfb8599789";
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn encrypted_single_rar_without_password_is_not_multivolume() {
+        let prefix = hex_bytes(SINGLE_HP_HEX);
+        let mut anchor = VolumeAnchor::default();
+        assert!(probe_rar(&prefix, 0, &mut anchor, None));
+        assert!(anchor.encrypted);
+        assert!(anchor.needs_password);
+        assert!(!anchor.wrong_password);
+        assert!(!anchor.multivolume, "encrypted headers must not force multivolume");
+        assert!(!anchor.standalone);
+        assert!(anchor.anchor_roles.contains(&"encrypted_volume"));
+    }
+
+    #[test]
+    fn encrypted_single_rar_with_correct_password_is_standalone() {
+        let prefix = hex_bytes(SINGLE_HP_HEX);
+        let mut anchor = VolumeAnchor::default();
+        assert!(probe_rar(&prefix, 0, &mut anchor, Some("secret")));
+        assert!(anchor.standalone);
+        assert!(!anchor.multivolume);
+        assert!(!anchor.needs_password);
+        assert!(anchor.anchor_roles.contains(&"standalone"));
+    }
+
+    #[test]
+    fn encrypted_single_rar_with_wrong_password_reports_wrong_password() {
+        let prefix = hex_bytes(SINGLE_HP_HEX);
+        let mut anchor = VolumeAnchor::default();
+        assert!(probe_rar(&prefix, 0, &mut anchor, Some("wrong")));
+        assert!(anchor.encrypted);
+        assert!(anchor.needs_password);
+        assert!(anchor.wrong_password);
+        assert!(!anchor.multivolume);
+        assert!(!anchor.standalone);
+    }
+
+    #[test]
+    fn encrypted_split_rar_uses_decrypted_volume_numbers() {
+        let first = hex_bytes(PART1_HP_HEX);
+        let second = hex_bytes(PART2_HP_HEX);
+        let mut first_anchor = VolumeAnchor::default();
+        assert!(probe_rar(&first, 0, &mut first_anchor, Some("secret")));
+        assert!(first_anchor.multivolume);
+        assert_eq!(first_anchor.internal_volume_number, Some(1));
+        assert!(first_anchor.anchor_roles.contains(&"first"));
+
+        let mut second_anchor = VolumeAnchor::default();
+        assert!(probe_rar(&second, 0, &mut second_anchor, Some("secret")));
+        assert!(second_anchor.multivolume);
+        assert_eq!(second_anchor.internal_volume_number, Some(2));
+        assert!(second_anchor.anchor_roles.contains(&"member"));
     }
 }

@@ -24,6 +24,7 @@ class WatchGroupSnapshot:
     completeness_status: str = "ambiguous"
     completeness_confidence: str = "hint"
     completeness_basis: tuple[str, ...] = ()
+    encrypted_unresolved: bool = False
 
     @property
     def has_head(self) -> bool:
