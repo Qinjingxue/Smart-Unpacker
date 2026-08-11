@@ -19,6 +19,25 @@ $env:PYTHONPATH='C:\Users\29402\Desktop\sunpack\.venv\Lib\site-packages;C:\Users
 .venv\Scripts\python.exe tests\performance_reader\password_fast_path.py
 ```
 
+To check whether wrong-password probe cost grows with archive size, run the
+size-scaling benchmark. It tests 1, 16, and 64 MiB payloads by default and
+reports both raw measurements and the largest/smallest latency ratio:
+
+```powershell
+.venv\Scripts\python.exe -m tests.performance_reader.password_size_scaling
+```
+
+Use `--payload-mib 1 8 32 128` to select a different size matrix.
+
+The staged 7z password-optimization benchmark measures isolated wrong/correct
+candidate cost, candidate-position latency, CPU time, and reuse across 100 and
+1000 independent archive sessions:
+
+```powershell
+.venv\Scripts\python.exe -m tests.performance_reader.seven_zip_password_optimization `
+  --label baseline
+```
+
 For a same-binary comparison against the legacy 7z `Archive::read`-per-password
 path, add `--disable-seven-zip-probe`. Run it in a separate process so the
 password worker pool and archive-session state start cleanly.

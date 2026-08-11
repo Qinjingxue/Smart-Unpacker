@@ -495,10 +495,12 @@ fn decrypt_seven_zip_aes256_sha256(
         return Err("encoded_header_payload_crc_bad:aes_block_size".to_string());
     }
     let mut output = data.to_vec();
-    let decrypted = Aes256CbcDec::new(&key.into(), &iv.into())
+    let decrypted_len = Aes256CbcDec::new(&key.into(), &iv.into())
         .decrypt_padded::<NoPadding>(&mut output)
-        .map_err(|_| "encoded_header_decode_password_rejected".to_string())?;
-    Ok(decrypted.to_vec())
+        .map_err(|_| "encoded_header_decode_password_rejected".to_string())?
+        .len();
+    output.truncate(decrypted_len);
+    Ok(output)
 }
 
 fn seven_zip_aes_key_iv(
@@ -540,22 +542,113 @@ fn seven_zip_aes_key_iv(
         let cycles = 1u32
             .checked_shl(u32::from(num_cycles_power))
             .ok_or_else(|| "encoded_header_decoder_unsupported_method".to_string())?;
-        let mut sha = sha2_11::Sha256::default();
-        let mut counter = [0u8; 8];
-        for _ in 0..cycles {
-            sha2_11::Digest::update(&mut sha, salt);
-            sha2_11::Digest::update(&mut sha, password);
-            sha2_11::Digest::update(&mut sha, counter);
-            for byte in &mut counter {
-                *byte = byte.wrapping_add(1);
-                if *byte != 0 {
-                    break;
-                }
-            }
-        }
-        sha2_11::Digest::finalize(sha).into()
+        cached_seven_zip_aes_key(cycles, salt, password)
     };
     Ok((key, iv))
+}
+
+const SEVEN_ZIP_KDF_CACHE_CAPACITY: usize = 256;
+
+#[derive(PartialEq, Eq)]
+struct SevenZipKdfCacheParameters {
+    cycles: u32,
+    salt: Vec<u8>,
+    password: Vec<u8>,
+}
+
+struct SevenZipKdfCacheEntry {
+    parameters: SevenZipKdfCacheParameters,
+    key: [u8; 32],
+}
+
+impl SevenZipKdfCacheEntry {
+    fn wipe(&mut self) {
+        self.parameters.password.fill(0);
+        self.parameters.salt.fill(0);
+        self.key.fill(0);
+    }
+}
+
+impl Drop for SevenZipKdfCacheEntry {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+fn seven_zip_kdf_cache(
+) -> &'static std::sync::Mutex<std::collections::VecDeque<SevenZipKdfCacheEntry>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<SevenZipKdfCacheEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn cached_seven_zip_aes_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 32] {
+    if std::env::var_os("SUNPACK_DISABLE_7Z_KDF_CACHE").is_some() {
+        return derive_seven_zip_aes_key(cycles, salt, password);
+    }
+    let matches = |entry: &SevenZipKdfCacheEntry| {
+        entry.parameters.cycles == cycles
+            && entry.parameters.salt.as_slice() == salt
+            && entry.parameters.password.as_slice() == password
+    };
+    {
+        let mut cache = seven_zip_kdf_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = cache.iter().position(matches) {
+            let entry = cache.remove(index).expect("located 7z KDF cache entry");
+            let key = entry.key;
+            cache.push_front(entry);
+            return key;
+        }
+    }
+
+    let key = derive_seven_zip_aes_key(cycles, salt, password);
+    let mut cache = seven_zip_kdf_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(index) = cache.iter().position(matches) {
+        let entry = cache.remove(index).expect("located 7z KDF cache entry");
+        let cached_key = entry.key;
+        cache.push_front(entry);
+        return cached_key;
+    }
+    if cache.len() >= SEVEN_ZIP_KDF_CACHE_CAPACITY {
+        if let Some(mut evicted) = cache.pop_back() {
+            evicted.wipe();
+        }
+    }
+    let parameters = SevenZipKdfCacheParameters {
+        cycles,
+        salt: salt.to_vec(),
+        password: password.to_vec(),
+    };
+    cache.push_front(SevenZipKdfCacheEntry { parameters, key });
+    key
+}
+
+fn derive_seven_zip_aes_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 32] {
+    const KDF_RECORDS_PER_UPDATE: usize = 64;
+    let mut sha = sha2_11::Sha256::default();
+    let record_len = salt.len() + password.len() + 8;
+    let mut records = vec![0u8; record_len * KDF_RECORDS_PER_UPDATE];
+    let mut counter = 0u64;
+    while counter < u64::from(cycles) {
+        let remaining = u64::from(cycles) - counter;
+        let record_count = usize::try_from(remaining.min(KDF_RECORDS_PER_UPDATE as u64))
+            .expect("7z KDF record count is bounded");
+        for record_index in 0..record_count {
+            let record = &mut records[record_index * record_len..(record_index + 1) * record_len];
+            record[..salt.len()].copy_from_slice(salt);
+            record[salt.len()..salt.len() + password.len()].copy_from_slice(password);
+            record[record_len - 8..]
+                .copy_from_slice(&(counter + record_index as u64).to_le_bytes());
+        }
+        sha2_11::Digest::update(&mut sha, &records[..record_count * record_len]);
+        counter += record_count as u64;
+    }
+    sha2_11::Digest::finalize(sha).into()
 }
 
 fn seven_zip_encoded_folder_from_unpack_info(
@@ -813,6 +906,28 @@ mod encoded_folder_graph_tests {
                 reference_aes_key(&with_salt_and_iv, password)
             );
         }
+    }
+
+    #[test]
+    fn seven_zip_kdf_cache_is_bounded_and_preserves_keys() {
+        seven_zip_kdf_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        for index in 0..SEVEN_ZIP_KDF_CACHE_CAPACITY + 17 {
+            let password = format!("cache-password-{index}").into_bytes();
+            assert_eq!(
+                cached_seven_zip_aes_key(4, b"salt", &password),
+                derive_seven_zip_aes_key(4, b"salt", &password)
+            );
+        }
+        assert_eq!(
+            seven_zip_kdf_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            SEVEN_ZIP_KDF_CACHE_CAPACITY
+        );
     }
 
     #[test]
