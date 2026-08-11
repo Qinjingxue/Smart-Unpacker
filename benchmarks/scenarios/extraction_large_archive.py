@@ -23,7 +23,8 @@ from sunpack.analysis.fuzzy_pipeline.registry import get_fuzzy_analysis_module_r
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.output_inventory import OutputInventory
-from tests.performance_split_archives.split_archive_pressure import pressure_config
+from tests.helpers.performance_config import archive_pressure_config
+from benchmarks.harness import render_report, report_from_payload
 
 
 TimingMap = dict[str, list[float]]
@@ -406,7 +407,7 @@ def main() -> int:
 
     passwords = [f"sunpack-wrong-{index:04d}" for index in range(max(0, args.generated_wrong_passwords))]
     passwords.extend(args.password)
-    config = pressure_config(passwords=passwords, scheduler_profile="single")
+    config = archive_pressure_config(passwords=passwords, scheduler_profile="single")
     config.setdefault("cli", {}).update({"quiet": True, "verbose": False})
     config["recursive_extract"] = {"mode": "fixed", "max_rounds": max(1, args.recursive_rounds)}
     output_base = Path(args.output).resolve()
@@ -467,11 +468,11 @@ def main() -> int:
         "outputs_cleaned": not args.keep_output,
         "output_base": str(output_base),
     }
-    rendered = json.dumps(report, ensure_ascii=False, sort_keys=True, default=str)
+    rendered = render_report(report_from_payload("extraction.large-archive-profile", report))
     print("PROFILE_JSON=" + rendered)
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        args.json_output.write_text(rendered, encoding="utf-8")
     return 0 if all(summary.success_count > 0 for summary in summaries) else 1
 
 

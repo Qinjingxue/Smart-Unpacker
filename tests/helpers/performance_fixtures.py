@@ -1,18 +1,17 @@
-import time
+"""Reusable synthetic corpora for behavioural tests and opt-in benchmarks."""
+
+from __future__ import annotations
+
 import zipfile
 from pathlib import Path
 
-from sunpack.coordinator.scanner import ScanOrchestrator
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_minimal_7z, make_zip
 
 
 def pressure_scan_config() -> dict:
     return with_detection_pipeline({
-        "thresholds": {
-            "archive_score_threshold": 5,
-            "maybe_archive_threshold": 3,
-        },
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, processors=[
         {"name": "embedded_archive", "enabled": True},
         {"name": "pe_overlay_structure", "enabled": True},
@@ -20,11 +19,7 @@ def pressure_scan_config() -> dict:
         {"name": "zip_eocd_structure", "enabled": True},
     ], precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
-        {
-            "name": "blacklist",
-            "enabled": True,
-            "blocked_extensions": [".jar", ".docx", ".apk", ".xlsx"],
-        },
+        {"name": "blacklist", "enabled": True, "blocked_extensions": [".jar", ".docx", ".apk", ".xlsx"]},
         {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9},
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
@@ -32,7 +27,7 @@ def pressure_scan_config() -> dict:
     ])
 
 
-def write_large_resource(path: Path, label: str, size: int = 128 * 1024):
+def write_large_resource(path: Path, label: str, size: int = 128 * 1024) -> None:
     chunk = (f"PRESSURE::{label}::".encode("ascii") * 4096)[:8192]
     with path.open("wb") as handle:
         remaining = size
@@ -42,7 +37,7 @@ def write_large_resource(path: Path, label: str, size: int = 128 * 1024):
             remaining -= len(piece)
 
 
-def create_container(path: Path, kind: str):
+def create_container(path: Path, kind: str) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         if kind == "jar":
             archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
@@ -60,37 +55,21 @@ def create_container(path: Path, kind: str):
             raise ValueError(kind)
 
 
-def build_pressure_corpus(root: Path):
+def build_pressure_corpus(root: Path) -> list[str]:
     normal_exts = [".jpg", ".png", ".mp4", ".dll", ".pak", ".bin", ".dat", ".log"]
     for index in range(32):
         write_large_resource(root / f"bulk_asset_{index:03d}{normal_exts[index % len(normal_exts)]}", f"normal-{index}")
-
     expected = []
     for index in range(3):
         archive = root / f"real_archive_{index:02d}.zip"
         archive.write_bytes(make_zip({f"marker_{index}.txt": f"real::{index}"}))
         expected.append(archive.name)
-
     for index in range(2):
         disguised = root / f"masked_archive_{index:02d}.jpg"
         disguised.write_bytes(b"\xff\xd8synthetic-image\xff\xd9" + make_minimal_7z())
         expected.append(disguised.name)
-
     for index, kind in enumerate(["jar", "docx", "apk", "xlsx"]):
         create_container(root / f"container_{index:02d}.{kind}", kind)
-
     write_large_resource(root / "ordinary_tool.exe", "ordinary-tool", size=32 * 1024)
     write_large_resource(root / "ordinary_tool.part1.rar", "ordinary-part", size=32 * 1024)
     return sorted(expected)
-
-
-def test_pressure_scan_finds_expected_archives_in_mixed_corpus(tmp_path):
-    expected = build_pressure_corpus(tmp_path)
-
-    start = time.perf_counter()
-    results = ScanOrchestrator(pressure_scan_config()).scan(str(tmp_path))
-    elapsed = time.perf_counter() - start
-    actual = sorted(Path(result.main_path).name for result in results)
-
-    assert actual == expected
-    assert elapsed < 2.0

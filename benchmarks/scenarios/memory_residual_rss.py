@@ -12,6 +12,8 @@ from pathlib import Path
 
 import psutil
 
+from benchmarks.harness import render_report, report_from_payload
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -97,7 +99,7 @@ def main() -> int:
         from sunpack_native import release_reader_handles_under
         release_reader_handles_under(str(root))
         rows.append(sample("after-reader-handle-release"))
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        print(render_report(report_from_payload("memory.residual-rss", rows)))
     finally:
         persistent_runtime.close_persistent_runtime()
         shutil.rmtree(root, ignore_errors=True)

@@ -5,12 +5,11 @@ import json
 import os
 import statistics
 import subprocess
-import tempfile
-import time
 from pathlib import Path
 
 from sunpack_native import NativeArchiveSession, reader_cache_stats
 
+from benchmarks.harness import BenchmarkWorkspace, measure, metrics_delta, render_report, report_from_payload
 from tests.helpers.tool_config import get_test_tools
 
 
@@ -25,6 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--payload-mib", type=int, default=1)
     parser.add_argument("--wrong-passwords", type=int, default=100)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
+    parser.add_argument("--results-root", type=Path)
+    parser.add_argument("--keep-workdir", action="store_true")
     parser.add_argument(
         "--disable-seven-zip-probe",
         action="store_true",
@@ -42,18 +43,6 @@ def run(command: list[str], cwd: Path) -> None:
         )
 
 
-def metrics_delta(before: dict, after: dict) -> dict[str, int]:
-    keys = (
-        "logical_bytes",
-        "physical_bytes",
-        "physical_reads",
-        "cache_hits",
-        "cache_misses",
-        "handle_hits",
-    )
-    return {key: int(after[key]) - int(before[key]) for key in keys}
-
-
 def benchmark(
     path: Path,
     method_name: str,
@@ -63,16 +52,16 @@ def benchmark(
 ) -> dict:
     session = NativeArchiveSession(str(path))
     method = getattr(session, method_name)
-    durations_ms: list[float] = []
     before = dict(reader_cache_stats())
-    last_outcome = None
-    for _ in range(rounds):
-        started = time.perf_counter_ns()
+    def invoke() -> dict:
         outcome = dict(method(passwords))
-        durations_ms.append((time.perf_counter_ns() - started) / 1_000_000)
         assert outcome["status"] == "match", outcome
         assert int(outcome["matched_index"]) == expected_index, outcome
-        last_outcome = outcome
+        return outcome
+
+    measured = measure(invoke, runs=rounds)
+    durations_ms = [row.wall_ms for row in measured]
+    last_outcome = measured[-1].value
     after = dict(reader_cache_stats())
     warm = durations_ms[1:] or durations_ms
     median_ms = statistics.median(warm)
@@ -107,8 +96,12 @@ def main() -> None:
     passwords = [f"sunpack-wrong-{index:04d}" for index in range(args.wrong_passwords)]
     passwords.append(args.password)
     expected_index = len(passwords) - 1
-    with tempfile.TemporaryDirectory(prefix="sunpack-password-benchmark-") as temporary:
-        work = Path(temporary)
+    with BenchmarkWorkspace(
+        "reader.password-fast-path",
+        results_root=args.results_root,
+        keep_workdir=args.keep_workdir,
+    ) as workspace:
+        work = workspace.corpus
         payload = work / "payload.bin"
         unit = bytes(range(256))
         payload.write_bytes(unit * (args.payload_mib * 1024 * 1024 // len(unit)))
@@ -157,7 +150,9 @@ def main() -> None:
                 rar_path, "rar_fast_verify_passwords", passwords, expected_index, args.rounds
             ),
         }
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        rendered = render_report(report_from_payload("reader.password-fast-path", results))
+        workspace.write_result_text("report.json", rendered)
+        print(rendered)
 
 
 if __name__ == "__main__":

@@ -9,12 +9,13 @@ import sys
 import time
 from pathlib import Path
 
-import psutil
-
-
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import psutil
+
+from benchmarks.harness import render_report, report_from_payload
 
 
 def compact_rows(count: int) -> list[list[object]]:
@@ -113,7 +114,7 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
-    print(json.dumps(json.loads(completed.stdout), ensure_ascii=False, indent=2))
+    print(render_report(report_from_payload("memory.worker-manifest", json.loads(completed.stdout))))
     return 0
 
 

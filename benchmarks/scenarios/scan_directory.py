@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.filesystem.directory_scanner import DirectoryScanner
+from benchmarks.harness import render_report, report_from_payload
 from sunpack_native import profile_directory_scan
 
 
@@ -270,7 +271,7 @@ def main() -> None:
         result["groups"][mode] = {
             scenario: summarize(samples) for scenario, samples in grouped.items()
         }
-    serialized = json.dumps(result, ensure_ascii=False, indent=2)
+    serialized = render_report(report_from_payload("scan.directory", result))
     if args.output is not None:
         args.output.resolve().write_text(serialized + "\n", encoding="utf-8")
     print(serialized)

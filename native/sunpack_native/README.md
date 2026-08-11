@@ -50,7 +50,7 @@ the selected scan root, and rejected directories are never descended into.
 same native snapshot plus nanosecond counters for directory enumeration,
 metadata reads, path matching, native record construction, traversal overhead,
 and snapshot construction. The reproducible benchmark driver is
-`tests/performance/directory_scan_profile.py`; its `fresh-process` mode resets
+`python -m benchmarks scan directory`; its `fresh-process` mode resets
 Python/PyO3 process state but does not flush the operating-system file cache.
 
 `list_regular_files_in_directory(directory)` lists regular files directly under

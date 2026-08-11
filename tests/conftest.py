@@ -42,6 +42,12 @@ def pipeline_resource_scheduler():
 
 def pytest_addoption(parser):
     parser.addoption(
+        "--run-performance",
+        action="store_true",
+        default=False,
+        help="Run opt-in performance and memory-stability assertions.",
+    )
+    parser.addoption(
         "--run-slow-real-archives",
         action="store_true",
         default=False,
@@ -66,6 +72,13 @@ def pytest_addoption(parser):
         type=int,
         default=300,
         help="Payload size in MiB for each generated large archive.",
+    )
+    parser.addoption(
+        "--watch-memory-archive-count",
+        action="store",
+        type=int,
+        default=100,
+        help="Number of archives processed by the opt-in watch memory stability test.",
     )
     parser.addoption(
         "--repair-performance-repetitions",
@@ -100,6 +113,10 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
+        "performance: opt-in timing or resource stability assertion; run with --run-performance",
+    )
+    config.addinivalue_line(
+        "markers",
         "slow_real_archive: full real archive matrix cases that are slower than the default integration smoke set",
     )
     config.addinivalue_line(
@@ -109,6 +126,9 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
+    skip_performance = None
+    if not config.getoption("--run-performance"):
+        skip_performance = pytest.mark.skip(reason="use --run-performance to run performance assertions")
     skip_slow = None
     if not config.getoption("--run-slow-real-archives"):
         skip_slow = pytest.mark.skip(reason="use --run-slow-real-archives to run the full real-archive matrix")
@@ -118,6 +138,8 @@ def pytest_collection_modifyitems(config, items):
             reason="use --run-large-archive-performance to run multi-GB performance tests"
         )
     for item in items:
+        if skip_performance and "performance" in item.keywords and "large_archive_performance" not in item.keywords:
+            item.add_marker(skip_performance)
         if skip_slow and "slow_real_archive" in item.keywords:
             item.add_marker(skip_slow)
         if skip_large and "large_archive_performance" in item.keywords:

@@ -81,3 +81,22 @@ def test_compression_detection_projects_public_analysis_observation(tmp_path):
     assert raw["validation_complete"] is True
     assert raw["confidence"] == "strong"
     assert raw["archive.trailing_data"] == 0
+
+
+def test_public_zstd_probe_preserves_useful_fields_across_bounded_threshold(tmp_path):
+    threshold = 4 * 1024 * 1024
+    for file_size, bounded in ((threshold, False), (threshold + 1, True)):
+        path = tmp_path / f"threshold-{file_size}.zst"
+        path.write_bytes(zstandard.ZstdCompressor().compress(b"threshold payload"))
+        with path.open("r+b") as handle:
+            handle.seek(file_size - 1)
+            handle.write(b"\x00")
+
+        raw = ArchiveAnalyzer().probe_compression_stream(str(path)).to_raw_dict()
+
+        assert (raw.get("validation_scope") == "bounded_structure") is bounded
+        if bounded:
+            assert raw["frame.sequence"] == "unavailable"
+            assert raw["validation_complete"] is False
+        else:
+            assert isinstance(raw["frame.sequence"], int)

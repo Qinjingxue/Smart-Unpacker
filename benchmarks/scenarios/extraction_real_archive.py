@@ -19,6 +19,8 @@ from pathlib import Path
 
 import psutil
 
+from benchmarks.harness import render_report, report_from_payload
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -221,7 +223,7 @@ def main() -> int:
             }
         },
     }
-    rendered = json.dumps(report, ensure_ascii=False, indent=2)
+    rendered = render_report(report_from_payload("extraction.real-archive", report))
     print(rendered)
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)

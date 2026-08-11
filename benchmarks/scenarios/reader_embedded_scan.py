@@ -11,6 +11,8 @@ from pathlib import Path
 
 from sunpack_native import NativeArchiveSession, reader_cache_stats
 
+from benchmarks.harness import measure, metrics_delta, render_report, report_from_payload
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SAMPLE = REPO_ROOT / "testfiles" / "R243V1.mp4"
@@ -24,18 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--skip-cli", action="store_true")
     return parser.parse_args()
-
-
-def metrics_delta(before: dict, after: dict) -> dict[str, int]:
-    keys = (
-        "logical_bytes",
-        "physical_bytes",
-        "physical_reads",
-        "cache_hits",
-        "cache_misses",
-        "handle_hits",
-    )
-    return {key: int(after[key]) - int(before[key]) for key in keys}
 
 
 def benchmark_cli(path: Path) -> dict:
@@ -69,27 +59,22 @@ def benchmark_cli(path: Path) -> dict:
 def benchmark_native(path: Path, rounds: int) -> dict:
     session = NativeArchiveSession(str(path))
     before = dict(reader_cache_stats())
-    rows = []
-    last_result = None
-    for index in range(rounds):
-        wall_started = time.perf_counter_ns()
-        cpu_started = time.process_time_ns()
+    def invoke() -> dict:
         result = dict(session.scan_embedded_archives())
-        wall_ms = (time.perf_counter_ns() - wall_started) / 1_000_000
-        cpu_ms = (time.process_time_ns() - cpu_started) / 1_000_000
         assert result["complete"] is True
         assert int(result["read_bytes"]) == path.stat().st_size
-        rows.append(
-            {
-                "round": index + 1,
-                "wall_ms": round(wall_ms, 3),
-                "cpu_ms": round(cpu_ms, 3),
-                "hits": len(result["hits"]),
-                "candidates": len(result["candidates"]),
-                "read_bytes": int(result["read_bytes"]),
-            }
-        )
-        last_result = result
+        return result
+
+    measured = measure(invoke, runs=rounds)
+    rows = [{
+        "round": row.iteration + 1,
+        "wall_ms": round(row.wall_ms, 3),
+        "cpu_ms": round(row.cpu_ms, 3),
+        "hits": len(row.value["hits"]),
+        "candidates": len(row.value["candidates"]),
+        "read_bytes": int(row.value["read_bytes"]),
+    } for row in measured]
+    last_result = measured[-1].value
     after = dict(reader_cache_stats())
     wall_values = [row["wall_ms"] for row in rows]
     size = path.stat().st_size
@@ -117,7 +102,7 @@ def main() -> None:
         "cli_scan": None if args.skip_cli else benchmark_cli(path),
         "native_embedded_scan": benchmark_native(path, args.rounds),
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(render_report(report_from_payload("reader.embedded-scan", result)))
 
 
 if __name__ == "__main__":

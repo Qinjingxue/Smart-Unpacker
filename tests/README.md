@@ -11,9 +11,10 @@
 - `functional/`：跨模块行为测试，尽量避免真实外部解压。
 - `integration/`：pipeline、解压和真实执行路径测试。
 - `cli/`：CLI parser、命令契约和命令行为测试。
-- `performance/`：轻量压力和并发行为测试。
 - `training/`：训练产物与正式模型运行时之间的评估和一致性测试。
-- `performance_split_archives/`：分卷归档压力脚本，偏手动或专项验证，不属于默认 pytest 主路径。
+
+性能测量、profile 和压力脚本统一放在仓库根目录的 `benchmarks/`，不参与
+pytest 收集。pytest 中只保留行为断言；资源或时序稳定性断言使用 opt-in marker。
 
 ## 数据驱动用例
 
@@ -35,6 +36,12 @@
 ```powershell
 python -m pip install -e ".[test]"
 python -m pytest
+```
+
+列出性能场景：
+
+```powershell
+python -m benchmarks --list
 ```
 
 只运行数据驱动用例：

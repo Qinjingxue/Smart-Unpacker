@@ -5,14 +5,14 @@ import json
 import os
 import shutil
 import statistics
-import tempfile
 import time
 from pathlib import Path
 
 from sunpack_native import NativeArchiveSession
 
+from benchmarks.harness import BenchmarkWorkspace, measure, render_report, report_from_payload
 from tests.helpers.tool_config import get_test_tools
-from tests.performance_reader.password_fast_path import DEFAULT_PASSWORD, run
+from benchmarks.scenarios.reader_password_fast_path import DEFAULT_PASSWORD, run
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,19 +25,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--archives", type=int, nargs="+", default=[100, 1000])
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--label", default="unlabeled")
+    parser.add_argument("--results-root", type=Path)
+    parser.add_argument("--keep-workdir", action="store_true")
     return parser.parse_args()
 
 
 def timed_calls(session: NativeArchiveSession, passwords: list[str], rounds: int) -> dict:
-    wall_ms: list[float] = []
-    cpu_ms: list[float] = []
-    last = None
-    for _ in range(rounds):
-        wall_started = time.perf_counter_ns()
-        cpu_started = time.process_time_ns()
-        last = dict(session.seven_zip_fast_verify_passwords(passwords))
-        cpu_ms.append((time.process_time_ns() - cpu_started) / 1_000_000)
-        wall_ms.append((time.perf_counter_ns() - wall_started) / 1_000_000)
+    measured = measure(lambda: dict(session.seven_zip_fast_verify_passwords(passwords)), runs=rounds)
+    wall_ms = [row.wall_ms for row in measured]
+    cpu_ms = [row.cpu_ms for row in measured]
+    last = measured[-1].value
     warm_wall = wall_ms[2:] or wall_ms
     warm_cpu = cpu_ms[2:] or cpu_ms
     return {
@@ -101,8 +98,12 @@ def main() -> None:
     if not seven_zip or not seven_zip.is_file():
         raise SystemExit("7z.exe is unavailable; configure tests/test_tools.json")
 
-    with tempfile.TemporaryDirectory(prefix="sunpack-7z-optimization-") as temporary:
-        work = Path(temporary)
+    with BenchmarkWorkspace(
+        "reader.seven-zip-password",
+        results_root=args.results_root,
+        keep_workdir=args.keep_workdir,
+    ) as workspace:
+        work = workspace.corpus
         payload = work / "payload.bin"
         payload.write_bytes(bytes(range(256)) * 4096)
         archive = work / "encrypted.7z"
@@ -150,9 +151,9 @@ def main() -> None:
             "all_wrong": timed_calls(session, wrong, args.rounds),
         }
 
-        print(
-            json.dumps(
-                {
+        rendered = render_report(report_from_payload(
+            "reader.seven-zip-password",
+            {
                     "label": args.label,
                     "configuration": {
                         "rounds": args.rounds,
@@ -168,10 +169,9 @@ def main() -> None:
                     "positions": positions,
                     "cross_archive": cross,
                 },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        ))
+        workspace.write_result_text("report.json", rendered)
+        print(rendered)
 
 
 if __name__ == "__main__":

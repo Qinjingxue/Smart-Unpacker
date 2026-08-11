@@ -15,12 +15,14 @@ from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 
 
-ARCHIVE_COUNT = 100
 SAMPLE_EVERY = 10
 
 
 @pytest.mark.skipif(os.name != "nt", reason="bundled persistent worker probe is Windows-specific")
-def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
+@pytest.mark.performance
+def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path, request):
+    archive_count = max(SAMPLE_EVERY, int(request.config.getoption("--watch-memory-archive-count")))
+    archive_count -= archive_count % SAMPLE_EVERY
     worker_path = Path(get_sevenzip_bridge_worker_path())
     dll_path = Path(get_7z_dll_path())
     if not worker_path.exists() or not dll_path.exists():
@@ -83,7 +85,7 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
         )
         sample(engine, watcher, 0)
         with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink):
-            for start in range(0, ARCHIVE_COUNT, SAMPLE_EVERY):
+            for start in range(0, archive_count, SAMPLE_EVERY):
                 for index in range(start, start + SAMPLE_EVERY):
                     archive = watch_root / f"archive-{index:04d}.zip"
                     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as handle:
@@ -108,7 +110,7 @@ def test_watch_service_memory_remains_bounded_across_many_archives(tmp_path):
         assert parent_growth < 16 * 1024 * 1024
         assert worker_growth < 4 * 1024 * 1024
         assert max(item["child_count"] for item in warm) == min(item["child_count"] for item in warm)
-        assert warm[-1]["snapshots"] == ARCHIVE_COUNT
+        assert warm[-1]["snapshots"] == archive_count
         assert warm[-1]["known_output_roots"] <= 2
         assert all(item["active_requests"] == 0 for item in warm)
         assert all(item["feedback_samples"] <= engine.resource_scheduler.feedback.feedback_window_size for item in warm)

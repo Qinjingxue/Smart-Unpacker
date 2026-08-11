@@ -18,12 +18,14 @@ from pathlib import Path
 
 import psutil
 
+from benchmarks.harness import render_report, report_from_payload
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sunpack.coordinator.scanner import ScanOrchestrator
-from tests.performance.test_pressure import build_pressure_corpus, pressure_scan_config
+from tests.helpers.performance_fixtures import build_pressure_corpus, pressure_scan_config
 
 
 @contextmanager
@@ -137,7 +139,7 @@ def main():
         profile_path = Path(args.profile_out) if args.profile_out and index == 0 else None
         rows.append(run_once(profile_path, args.tracemalloc))
     payload = {"runs": rows}
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    rendered = render_report(report_from_payload("scan.synthetic-pressure", payload))
     print(rendered)
     if args.json_out:
         output = Path(args.json_out)

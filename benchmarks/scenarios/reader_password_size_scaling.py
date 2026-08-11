@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 from pathlib import Path
 
 from tests.helpers.tool_config import get_test_tools
-from tests.performance_reader.password_fast_path import (
+from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
+from benchmarks.scenarios.reader_password_fast_path import (
     DEFAULT_PASSWORD,
     benchmark,
     run,
@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--wrong-passwords", type=int, default=100)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
+    parser.add_argument("--results-root", type=Path)
+    parser.add_argument("--keep-workdir", action="store_true")
     return parser.parse_args()
 
 
@@ -119,8 +121,12 @@ def main() -> None:
         "rar5_header": [],
     }
 
-    with tempfile.TemporaryDirectory(prefix="sunpack-password-size-benchmark-") as temporary:
-        work = Path(temporary)
+    with BenchmarkWorkspace(
+        "reader.password-size-scaling",
+        results_root=args.results_root,
+        keep_workdir=args.keep_workdir,
+    ) as workspace:
+        work = workspace.corpus
         for payload_mib in sizes:
             archives = create_archives(
                 work, payload_mib, args.password, seven_zip, rar
@@ -147,7 +153,9 @@ def main() -> None:
                 for name, rows in format_rows.items()
             },
         }
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        rendered = render_report(report_from_payload("reader.password-size-scaling", results))
+        workspace.write_result_text("report.json", rendered)
+        print(rendered)
 
 
 if __name__ == "__main__":

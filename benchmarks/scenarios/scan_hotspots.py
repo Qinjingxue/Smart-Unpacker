@@ -1,9 +1,9 @@
 r"""Profile SunPack scan hot spots on large, messy directories.
 
 Examples:
-    .\.venv\Scripts\python.exe tests\performance\scan_hotspot_probe.py C:\Users\29402\Desktop --mode filesystem --max-depth 1
-    .\.venv\Scripts\python.exe tests\performance\scan_hotspot_probe.py C:\Users\29402\Desktop --mode candidates --rss-stop-mib 1200
-    .\.venv\Scripts\python.exe tests\performance\scan_hotspot_probe.py C:\Users\29402\Desktop --mode full --json-out build\scan-hotspots.json --profile-out build\scan-hotspots.prof
+    python -m benchmarks scan hotspots C:\Users\29402\Desktop --mode filesystem --max-depth 1
+    python -m benchmarks scan hotspots C:\Users\29402\Desktop --mode candidates --rss-stop-mib 1200
+    python -m benchmarks scan hotspots C:\Users\29402\Desktop --mode full --json-out build\scan-hotspots.json --profile-out build\scan-hotspots.prof
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import psutil
+from benchmarks.harness import render_report, report_from_payload
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -472,12 +473,13 @@ def main() -> int:
         "tracemalloc": trace_summary,
     }
 
+    rendered = render_report(report_from_payload("scan.hotspots", summary))
     if args.json_out:
         json_path = Path(args.json_out)
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        json_path.write_text(rendered, encoding="utf-8")
 
-    print(json.dumps({key: value for key, value in summary.items() if key not in {"hotspots", "tracemalloc"}}, ensure_ascii=False, indent=2))
+    print(rendered)
     print("\n== Instrumented hot spots ==")
     for row in summary["hotspots"]:
         print(

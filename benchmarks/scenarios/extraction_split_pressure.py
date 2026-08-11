@@ -3,7 +3,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -14,11 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from sunpack.config.schema import normalize_config
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.coordinator.scheduling.executor import TaskExecutor
-from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.performance_config import archive_pressure_config
+from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, normalize_archive_format
 from tests.helpers.tool_config import get_optional_rar, require_7z
 
@@ -245,35 +244,6 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
         "extractor_close_ms": recorder.ms("extractor_close"),
         "timings": recorder.snapshot(),
     }
-
-
-def pressure_config(passwords: list[str] | None = None, scheduler_profile: str = "single") -> dict:
-    return normalize_config(with_detection_pipeline({
-        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-        "recursive_extract": "2",
-        "post_extract": {
-            "archive_cleanup_mode": "k",
-            "flatten_single_directory": False,
-        },
-        "user_passwords": passwords or [],
-        "builtin_passwords": [],
-        "max_retries": 1,
-        "performance": {"scheduler_profile": scheduler_profile},
-    }, precheck=[
-        {"name": "size_range", "enabled": True, "gte": 0},
-        {"name": "embedded_payload_identity", "enabled": True},
-        {"name": "zip_structure_accept", "enabled": True},
-        {"name": "seven_zip_structure_accept", "enabled": True},
-        {"name": "rar_structure_accept", "enabled": True},
-        {"name": "tar_structure_accept", "enabled": True},
-        {"name": "compression_stream_accept", "enabled": True},
-    ], scoring=[
-        {"name": "seven_zip_structure_identity", "enabled": True},
-        {"name": "zip_structure_identity", "enabled": True},
-        {"name": "rar_structure_identity", "enabled": True},
-        {"name": "tar_structure_identity", "enabled": True},
-        {"name": "compression_stream_identity", "enabled": True},
-    ]))
 
 
 def timed(factory: Callable[[], ArchiveCase]) -> tuple[ArchiveCase, float]:
@@ -541,12 +511,12 @@ def run_case(pressure_case: PressureCase) -> dict:
 
     clean_outputs(pressure_case.case)
 
-    scan_config = pressure_config(passwords=pressure_case.passwords)
+    scan_config = archive_pressure_config(passwords=pressure_case.passwords)
     started = time.perf_counter()
     scan_results = ScanOrchestrator(scan_config).scan(str(pressure_case.case.archive_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineEngine(pressure_config(passwords=pressure_case.passwords)).start()
+    runner = PipelineEngine(archive_pressure_config(passwords=pressure_case.passwords)).start()
     pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
     try:
@@ -628,12 +598,12 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     for pressure_case in pressure_cases:
         move_case_files_to_batch(pressure_case, batch_dir)
 
-    scan_config = pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")
+    scan_config = archive_pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")
     started = time.perf_counter()
     scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineEngine(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).start()
+    runner = PipelineEngine(archive_pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).start()
     pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
     try:
@@ -770,6 +740,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and pressure-test broad real archive edge cases.")
     parser.add_argument("--strict", action="store_true", help="Return non-zero when expected and observed results differ.")
     parser.add_argument("--no-json", action="store_true", help="Only print the table summary.")
+    parser.add_argument("--results-root", type=Path, help="Durable benchmark result root.")
+    parser.add_argument("--keep-workdir", action="store_true", help="Keep generated archives and extraction outputs.")
     parser.add_argument(
         "--formats",
         type=parse_formats,
@@ -785,8 +757,12 @@ def main() -> int:
     args = parser.parse_args()
 
     require_7z()
-    with tempfile.TemporaryDirectory(prefix="sunpack_archive_pressure_") as temp:
-        root = Path(temp)
+    with BenchmarkWorkspace(
+        "extraction.split-pressure",
+        results_root=args.results_root,
+        keep_workdir=args.keep_workdir,
+    ) as workspace:
+        root = workspace.corpus
         cases = build_cases(root, args.formats, args.profile)
         if args.profile == "acceptance-batch":
             skipped_cases = [pressure_case for pressure_case in cases if pressure_case.case is None]
@@ -797,9 +773,11 @@ def main() -> int:
         else:
             rows = [run_case(pressure_case) for pressure_case in cases]
         print_table(rows)
+        rendered = render_report(report_from_payload("extraction.split-pressure", rows))
+        workspace.write_result_text("report.json", rendered)
         if not args.no_json:
             print("\nJSON:")
-            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            print(rendered)
 
     failures = [
         row for row in rows

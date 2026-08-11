@@ -15,15 +15,18 @@ import shutil
 import statistics
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import zstandard
 
+from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
 
-ROOT = Path(__file__).resolve().parents[2]
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
@@ -396,6 +399,8 @@ def main() -> int:
     parser.add_argument("--sample", action="append", default=[], metavar="EXT=PATH")
     parser.add_argument("--compare-root", type=Path)
     parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--results-root", type=Path, help="Durable benchmark result root.")
+    parser.add_argument("--keep-workdir", action="store_true", help="Keep generated archives and extraction outputs.")
     parser.add_argument("--detection-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-archive", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -411,10 +416,14 @@ def main() -> int:
         parser.error(f"comparison root does not contain sunpack package: {compare_root}")
 
     extra = dict(_parse_archive_args(args.sample))
-    with tempfile.TemporaryDirectory(prefix="sunpack-format-bench-") as temp:
-        work = Path(temp)
+    with BenchmarkWorkspace(
+        "extraction.format-matrix",
+        results_root=args.results_root,
+        keep_workdir=args.keep_workdir,
+    ) as workspace:
+        work = workspace.work
         corpus, skipped = create_corpus(
-            work / "corpus",
+            workspace.corpus,
             extra,
             max(1, args.small_files),
             max(1, args.large_files),
@@ -441,8 +450,10 @@ def main() -> int:
             "results": rows,
             "summary": _summary(rows),
             "skipped": skipped,
+            "artifacts": {"result_dir": str(workspace.result_dir)},
         }
-        rendered = json.dumps(report, ensure_ascii=False, indent=2)
+        rendered = render_report(report_from_payload("extraction.format-matrix", report))
+        workspace.write_result_text("report.json", rendered)
         if args.json_out:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
             args.json_out.write_text(rendered, encoding="utf-8")
