@@ -1,0 +1,87 @@
+test: tests/real/plan1_real_archives/test_plan1_sfx_matrix.py::test_plan1_sfx_split_archives_extract_and_detect_format[7z]
+time: 2026-08-12 01:43:40
+duration_seconds: 0.047
+
+=== longrepr ===
+tmp_path = WindowsPath('C:/Users/29402/AppData/Local/Temp/pytest-of-29402/pytest-1875/test_plan1_sfx_split_archives_0')
+archive_format = '7z'
+plan1_error = {'case_id': 'sfx_split_7z', 'archive_format': '7z', 'sfx': True, 'split': True, ...}
+
+    @pytest.mark.parametrize("archive_format", SFX_FORMATS)
+    def test_plan1_sfx_split_archives_extract_and_detect_format(tmp_path, archive_format, plan1_error):
+        if archive_format == "rar" and not RAR_AVAILABLE:
+            pytest.skip("RAR generator is not configured")
+        case_id = f"sfx_split_{archive_format}"
+        plan1_error["case_id"] = case_id
+        plan1_error["archive_format"] = archive_format
+        plan1_error["sfx"] = True
+        plan1_error["split"] = True
+        case = FACTORY.create(
+            tmp_path,
+            case_id,
+            archive_format,
+            sfx=True,
+            split=True,
+            payload_size=420 * 1024,
+        )
+    
+>       assert_plan1_success(
+            case,
+            f".{archive_format}",
+            expected_container="pe",
+            error_info=plan1_error,
+        )
+
+tests\real\plan1_real_archives\test_plan1_sfx_matrix.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+case = ArchiveCase(case_id='sfx_split_7z', archive_dir=WindowsPath('C:/Users/29402/AppData/Local/Temp/pytest-of-29402/pytest-..., password=None, split=True, sfx=True, carrier=None, disguise_ext=None, corruption=None, split_issue=None, metadata={})
+expected_ext = '.7z', expected_container = 'pe', expected_member_count = None
+error_info = {'case_id': 'sfx_split_7z', 'archive_format': '7z', 'sfx': True, 'split': True, ...}
+passwords = None
+
+    def assert_plan1_success(
+        case: ArchiveCase,
+        expected_ext: str,
+        *,
+        expected_container: str | None = None,
+        expected_member_count: int | None = None,
+        error_info: dict | None = None,
+        passwords: list[str] | None = None,
+    ) -> None:
+        hits = detect_archive_hits(case.entry_path)
+        actual_ext = hits[0].fact_bag.get("file.detected_ext") if hits else None
+        if error_info is not None:
+            error_info["expected_detected_ext"] = expected_ext
+            error_info["actual_detected_ext"] = actual_ext
+            error_info["detection_hit_count"] = len(hits)
+            error_info["detection_hits"] = [
+                {
+                    "detected_ext": hit.fact_bag.get("file.detected_ext"),
+                    "container_type": hit.fact_bag.get("file.container_type"),
+                    "member_paths": len(hit.fact_bag.get("candidate.member_paths") or []),
+                    "probe_offset": hit.fact_bag.get("file.probe_offset"),
+                }
+                for hit in hits
+            ]
+>       assert len(hits) == 1, (
+            f"expected exactly one detection hit for {case.entry_path.name}, got {len(hits)}"
+        )
+E       AssertionError: expected exactly one detection hit for sfx_split_7z.exe, got 0
+
+tests\real\plan1_real_archives\plan1_support.py:125: AssertionError
+
+=== captured stdout ===
+
+
+=== plan context ===
+{
+  "case_id": "sfx_split_7z",
+  "archive_format": "7z",
+  "sfx": true,
+  "split": true,
+  "expected_detected_ext": ".7z",
+  "actual_detected_ext": null,
+  "detection_hit_count": 0,
+  "detection_hits": []
+}

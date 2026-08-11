@@ -3,104 +3,19 @@ from __future__ import annotations
 import shutil
 import unicodedata
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import pytest
 
 from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.extraction.scheduler import ExtractionScheduler
+from tests.helpers.detection_probe import detect_archive_hits
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, corrupt_file
-from tests.integration.test_extension_independent_detection import _detected
-from tests.integration.test_real_archive_edge_cases import assert_success, marker_was_extracted, run_pipeline
+from tests.integration.test_real_archive_edge_cases import assert_success, run_pipeline
 
 
 FACTORY = ArchiveFixtureFactory()
 PASSWORD = "sunpack-acceptance-123"
-
-
-@dataclass(frozen=True)
-class SplitNamingCase:
-    case_id: str
-    archive_format: str
-    name_for_part: Callable[[str, int, int], str]
-
-
-SPLIT_NAMING_CASES = [
-    SplitNamingCase("7z-numbered", "7z", lambda _base, index, _count: f"payload.7z.{index:03d}"),
-    SplitNamingCase(
-        "7z-numbered-cjk",
-        "7z",
-        lambda _base, index, _count: f"中文 分卷【素材】.7z.{index:03d}",
-    ),
-    SplitNamingCase(
-        "7z-numbered-long-name",
-        "7z",
-        lambda _base, index, _count: f"a very long archive name with spaces and brackets [release].7z.{index:03d}",
-    ),
-    SplitNamingCase("7z-plain-numbered", "7z", lambda _base, index, _count: f"payload.{index:03d}"),
-    SplitNamingCase(
-        "7z-part-marker-numeric-camouflage",
-        "7z",
-        lambda _base, index, _count: f"payload.part{index}.{(123, 456, 789)[index - 1] if index <= 3 else index * 111}",
-    ),
-    SplitNamingCase(
-        "7z-part-marker-changing-camouflage",
-        "7z",
-        lambda _base, index, _count: f"payload.part-{index:04d}.{('photo', 'document', 'binary')[index - 1] if index <= 3 else 'noise'}",
-    ),
-    SplitNamingCase(
-        "7z-format-before-part-marker",
-        "7z",
-        lambda _base, index, _count: f"payload.7z.part{index:04d}.jpg",
-    ),
-    SplitNamingCase(
-        "7z-format-after-part-marker",
-        "7z",
-        lambda _base, index, _count: f"payload.part{index:04d}.7z.png",
-    ),
-    SplitNamingCase(
-        "7z-variable-width-numbered",
-        "7z",
-        lambda _base, index, _count: f"payload.7z.{index}",
-    ),
-    SplitNamingCase(
-        "7z-plain-numbered-cjk",
-        "7z",
-        lambda _base, index, _count: f"かな 素材.{index:03d}",
-    ),
-    SplitNamingCase("zip-numbered", "zip", lambda _base, index, _count: f"payload.zip.{index:03d}"),
-    SplitNamingCase(
-        "zip-part-marker-camouflage",
-        "zip",
-        lambda _base, index, _count: f"payload.part{index}.zip.hidden-{index}",
-    ),
-    SplitNamingCase(
-        "zip-numbered-cjk",
-        "zip",
-        lambda _base, index, _count: f"中文 ZIP 分卷.zip.{index:03d}",
-    ),
-    SplitNamingCase("zip-zero-numbered", "zip", lambda _base, index, _count: f"payload.zip.{index - 1:04d}"),
-]
-
-
-@pytest.mark.parametrize("naming", SPLIT_NAMING_CASES, ids=lambda item: item.case_id)
-def test_acceptance_real_split_volume_naming(tmp_path: Path, naming: SplitNamingCase):
-    case = FACTORY.create(
-        tmp_path,
-        naming.case_id,
-        naming.archive_format,
-        split=True,
-        payload_size=420 * 1024,
-    )
-    _rename_split_parts(case, naming)
-
-    summary = run_pipeline(case.archive_dir)
-
-    assert summary.success_count == 1
-    assert summary.failed_tasks == []
-    assert marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
 @pytest.mark.parametrize(
@@ -223,7 +138,6 @@ def test_acceptance_real_damage_patterns(
 @pytest.mark.parametrize(
     ("case_id", "password"),
     [
-        ("7z-sfx-plain", None),
         ("7z-sfx-encrypted", PASSWORD),
     ],
 )
@@ -240,23 +154,7 @@ def test_acceptance_real_executables_are_not_archive_candidates(tmp_path: Path, 
     executable = tmp_path / tool_name
     shutil.copyfile(source, executable)
 
-    assert _detected(executable) == []
-
-
-def _rename_split_parts(case: ArchiveCase, naming: SplitNamingCase) -> None:
-    original = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
-    assert len(original) >= 3
-    temporary = []
-    for index, path in enumerate(original, start=1):
-        staged = path.with_name(f".__sunpack_stage_{index:04d}")
-        path.rename(staged)
-        temporary.append(staged)
-    renamed = []
-    for index, path in enumerate(temporary, start=1):
-        target = case.archive_dir / naming.name_for_part("payload", index, len(temporary))
-        path.rename(target)
-        renamed.append(target)
-    case.entry_path = renamed[0]
+    assert detect_archive_hits(executable) == []
 
 
 def _write_zip_members(path: Path, members: dict[str, str]) -> None:

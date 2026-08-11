@@ -6,6 +6,7 @@ import pytest
 from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.contracts.failures import FailureKind
 from sunpack.config.schema import normalize_config
+from tests.helpers.marker_utils import marker_was_extracted
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar, get_optional_rar_sfx, require_7z, require_zstd
@@ -88,24 +89,6 @@ def run_pipeline(target: Path, passwords: list[str] | None = None, *, allow_part
 
 def run_pipeline_detection_disabled(target: Path, passwords: list[str] | None = None):
     return execute_pipeline(detection_disabled_config(passwords=passwords), str(target))
-
-
-def marker_was_extracted(root: Path, marker_name: str, marker_text: str) -> bool:
-    for path in root.rglob(marker_name):
-        try:
-            if path.read_text(encoding="utf-8") == marker_text:
-                return True
-        except OSError:
-            continue
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            if path.read_text(encoding="utf-8") == marker_text:
-                return True
-        except (OSError, UnicodeDecodeError):
-            continue
-    return False
 
 
 def assert_success(case: ArchiveCase, passwords: list[str] | None = None):
@@ -248,16 +231,6 @@ def carrier_archive_case_params(default_fast: set[tuple[str, str]]):
 
 
 @pytest.mark.parametrize("archive_format", plain_archive_format_params({"7z", "zip", "tar", "gzip", "bzip2", "xz"}))
-def test_real_archive_edge_plain_single_archives_extract(tmp_path, archive_format):
-    require_7z()
-    if archive_format in {"tar.zst", "zstd"}:
-        require_zstd()
-    case = FACTORY.create(tmp_path, f"plain_single_{archive_format}", archive_format)
-
-    assert_success(case)
-
-
-@pytest.mark.parametrize("archive_format", plain_archive_format_params({"7z", "zip", "tar", "gzip", "bzip2", "xz"}))
 def test_real_archive_edge_plain_single_archives_extract_when_detection_disabled(tmp_path, archive_format):
     require_7z()
     if archive_format in {"tar.zst", "zstd"}:
@@ -267,26 +240,10 @@ def test_real_archive_edge_plain_single_archives_extract_when_detection_disabled
     assert_success_with_detection_disabled(case)
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z"}))
-def test_real_archive_edge_plain_split_archives_extract(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"plain_split_{archive_format}", archive_format, split=True)
-
-    assert_success(case)
-
-
 @pytest.mark.parametrize("archive_format", archive_format_params({"7z", "zip"}))
 def test_real_archive_edge_plain_split_archives_extract_when_detection_disabled(tmp_path, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"plain_split_detection_off_{archive_format}", archive_format, split=True)
-
-    assert_success_with_detection_disabled(case)
-
-
-@pytest.mark.parametrize("archive_format", sfx_format_params({"7z"}))
-def test_real_archive_edge_sfx_split_archives_extract_when_detection_disabled(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"plain_sfx_split_detection_off_{archive_format}", archive_format, split=True, sfx=True)
 
     assert_success_with_detection_disabled(case)
 
@@ -397,14 +354,6 @@ def test_real_archive_edge_partial_split_corruption_reports_possible_missing_vol
 
 
 @pytest.mark.parametrize("archive_format", sfx_format_params(set()))
-def test_real_archive_edge_sfx_archives_extract(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"plain_sfx_{archive_format}", archive_format, sfx=True)
-
-    assert_success(case)
-
-
-@pytest.mark.parametrize("archive_format", sfx_format_params(set()))
 def test_real_archive_edge_password_sfx_archives_require_matching_password(tmp_path, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"pwd_sfx_{archive_format}", archive_format, password=PASSWORD_789, sfx=True)
@@ -438,17 +387,3 @@ def test_real_archive_edge_prefixed_password_carrier_archives_require_matching_p
     assert_success(case, passwords=[PASSWORD])
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z"}))
-def test_real_archive_edge_disguised_single_archives_extract(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"disguised_single_{archive_format}", archive_format, disguise_ext=".mix")
-
-    assert_success(case)
-
-
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z"}))
-def test_real_archive_edge_numeric_extension_single_archives_extract(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"numeric_extension_single_{archive_format}", archive_format, disguise_ext=".456")
-
-    assert_success(case)
