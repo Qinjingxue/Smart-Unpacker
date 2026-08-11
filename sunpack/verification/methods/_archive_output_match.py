@@ -34,7 +34,11 @@ def coverage_from_archive_and_output(
     include_observations: bool = True,
     output_index: OutputFileIndex | None = None,
 ) -> ArchiveOutputCoverage:
-    expected = [_archive_item(item) for item in archive_files if isinstance(item, dict)]
+    expected = [
+        _archive_item(item)
+        for item in archive_files
+        if isinstance(item, dict) and not bool(item.get("shadowed"))
+    ]
     expected = [item for item in expected if item["path"]]
     output_by_path = output_index.by_path if output_index is not None else _index_output_files(output_files)
     issues_by_path = issues_by_path or {}
@@ -216,12 +220,13 @@ def coverage_details(coverage: ArchiveOutputCoverage) -> dict[str, Any]:
 
 
 def _archive_item(item: dict[str, Any]) -> dict[str, Any]:
-    raw_path = str(item.get("path") or item.get("name") or "")
-    cleaned = clean_relative_archive_path(raw_path)
+    projected_path = str(item.get("output_path") or item.get("path") or item.get("name") or "")
+    raw_path = str(item.get("raw_path") or item.get("archive_path") or projected_path)
+    cleaned = clean_relative_archive_path(projected_path)
     return {
         "path": cleaned,
         "raw_path": raw_path,
-        "unsafe": _unsafe_archive_path(raw_path, cleaned),
+        "unsafe": _unsafe_archive_path(raw_path, clean_relative_archive_path(raw_path)),
         "size": _optional_int(item.get("size", item.get("unpacked_size"))),
         "has_crc": bool(item.get("has_crc", item.get("crc32") is not None)),
         "crc32": _optional_crc(item.get("crc32")),

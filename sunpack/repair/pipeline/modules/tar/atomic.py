@@ -182,18 +182,28 @@ class _TarSingleMetadataMemberQuarantine(PythonAtomicRepair):
 
     def mutations(self, data: bytes, config: dict) -> Iterable[AtomicMutation]:
         max_entries = max(1, int(config.get("max_entries", 20000) or 20000))
-        for entry in _tar_entries(data, max_entries):
+        entries = list(_tar_entries(data, max_entries))
+        for index, entry in enumerate(entries):
             if entry.typeflag not in self.typeflags or not self.entry_is_invalid(entry):
                 continue
+            # Per-file PAX and GNU longname/longlink records are inseparable
+            # from the following member.  Removing only the metadata changes
+            # that member's path or size semantics.  A global PAX record may
+            # affect every later member and has no safe local quarantine.
+            if entry.typeflag == ord("g"):
+                continue
+            target = entries[index + 1] if entry.typeflag in {ord("x"), ord("L"), ord("K")} and index + 1 < len(entries) else None
+            quarantine_end = target.end if target is not None else entry.end
             yield AtomicMutation(
                 name=f"{self.spec.name}_{entry.offset}",
-                data=data[: entry.offset] + data[entry.end :],
+                data=data[: entry.offset] + data[quarantine_end :],
                 action=f"quarantine_tar_metadata_member@{entry.offset}",
                 confidence=self.confidence,
                 partial=True,
                 details={
                     "member_offset": entry.offset,
                     "member_end": entry.end,
+                    "dependent_member_end": quarantine_end if target is not None else None,
                     "member_size": entry.size,
                     "member_type": chr(entry.typeflag),
                     "header_checksum_valid": _header_checksum_valid(entry.header),
@@ -208,7 +218,7 @@ class TarPaxHeaderQuarantine(_TarSingleMetadataMemberQuarantine):
         formats=("tar",),
         categories=("content_recovery", "quarantine"),
         stage="deep",
-        safe=True,
+        safe=False,
         partial=True,
         lossy=True,
         atomic=True,
@@ -235,7 +245,7 @@ class TarGnuLongNameQuarantine(_TarSingleMetadataMemberQuarantine):
         formats=("tar",),
         categories=("content_recovery", "quarantine"),
         stage="deep",
-        safe=True,
+        safe=False,
         partial=True,
         lossy=True,
         atomic=True,
@@ -262,7 +272,7 @@ class TarSparseEntryQuarantine(_TarSingleMetadataMemberQuarantine):
         formats=("tar",),
         categories=("content_recovery", "quarantine"),
         stage="deep",
-        safe=True,
+        safe=False,
         partial=True,
         lossy=True,
         atomic=True,

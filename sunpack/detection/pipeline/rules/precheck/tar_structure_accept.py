@@ -23,10 +23,11 @@ class TarStructureAcceptRule(RuleBase):
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
         structure = facts.get("tar.header_structure") or {}
-        if not structure.get("plausible") or not structure.get("ustar_magic") or not structure.get("entry_walk_ok"):
+        if not structure.get("plausible") or not structure.get("entry_walk_ok"):
             return RuleEffect.pass_()
 
         facts.set("file.detected_ext", ".tar")
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
-        return RuleEffect.accept("TAR structure accept: ustar header checksum")
+        family = "ustar" if structure.get("ustar_magic") else "v7/GNU"
+        return RuleEffect.accept(f"TAR structure accept: {family} header checksum")

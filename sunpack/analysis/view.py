@@ -831,6 +831,8 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
         "fuzzy_payload_in_range": False,
         "entries_checked": 0,
         "entry_walk_ok": False,
+        "walk_complete": False,
+        "walk_budget_exhausted": False,
         "end_zero_blocks": False,
         "segment_end": None,
         "boundary_confidence": "none",
@@ -856,6 +858,7 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
                     "plausible": True,
                     "entries_checked": entries,
                     "entry_walk_ok": True,
+                    "walk_complete": True,
                     "end_zero_blocks": True,
                     "segment_end": cursor,
                     "boundary_confidence": "high",
@@ -866,19 +869,19 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
 
         result["magic_matched"] = True
         zero_blocks = 0
-        stored_checksum = _tar_octal_optional(block[148:156])
-        member_size = _tar_octal_optional(block[124:136])
+        stored_checksum = _tar_number_optional(block[148:156])
+        member_size = _tar_number_optional(block[124:136])
         computed_checksum = _tar_checksum(block)
         ustar_magic = block[257:263] in {b"ustar\x00", b"ustar "}
         if entries == 0:
             numeric_fields_valid = (
                 stored_checksum is not None
                 and member_size is not None
-                and all(_tar_octal_optional(block[start:end]) is not None for start, end in (
+                and all(_tar_number_optional(block[start:end]) is not None for start, end in (
                     (100, 108), (108, 116), (116, 124), (136, 148)
                 ))
             )
-            typeflag_valid = block[156] in b"\x0001234567xgLKS"
+            typeflag_valid = block[156] == 0 or 0x20 <= block[156] < 0x7f
             payload_in_range = bool(
                 member_size is not None
                 and cursor + 512 + member_size + _tar_padding(member_size) <= int(view.size)
@@ -915,15 +918,29 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
                 result.update({
                     "plausible": True,
                     "entry_walk_ok": True,
-                    "segment_end": cursor,
-                    "boundary_confidence": "medium",
+                    "segment_end": None,
+                    "boundary_confidence": "none",
                     "evidence": ["tar:header_checksum", "tar:block_walk_prefix"],
                 })
             return result
 
-        next_cursor = cursor + 512 + member_size + _tar_padding(member_size)
+        sparse_extension_span = 0
+        if block[156] == ord("S"):
+            sparse_extension_span, sparse_error = _tar_sparse_extension_span(view, block, cursor)
+            if sparse_error:
+                result.update({
+                    "entries_checked": entries,
+                    "error": sparse_error,
+                    "damage_flags": ["sparse_header_bad"],
+                    "plausible": entries > 0,
+                    "entry_walk_ok": entries > 0,
+                    "segment_end": None,
+                    "boundary_confidence": "none",
+                })
+                return result
+        next_cursor = cursor + 512 + sparse_extension_span + member_size + _tar_padding(member_size)
         if next_cursor > int(view.size):
-            payload_start = cursor + 512
+            payload_start = cursor + 512 + sparse_extension_span
             requested = member_size + _tar_padding(member_size)
             read_error = {
                 "code": "unexpected_eof",
@@ -952,8 +969,8 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
                 result.update({
                     "plausible": True,
                     "entry_walk_ok": True,
-                    "segment_end": cursor,
-                    "boundary_confidence": "medium",
+                    "segment_end": None,
+                    "boundary_confidence": "none",
                 })
             return result
         entries += 1
@@ -963,7 +980,31 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
             "tar:ustar_magic" if ustar_magic else "tar:v7_header",
         ]
 
-    if entries > 0:
+    if entries > 0 and entries >= max_entries and cursor + 512 <= int(view.size):
+        result.update({
+            "plausible": True,
+            "entries_checked": entries,
+            "entry_walk_ok": True,
+            "walk_budget_exhausted": True,
+            "segment_end": None,
+            "boundary_confidence": "none",
+            "error": "tar_walk_budget_exhausted",
+            "damage_flags": [],
+            "evidence": ["tar:header_checksum", "tar:block_walk_sample"],
+        })
+    elif entries > 0 and cursor == int(view.size):
+        result.update({
+            "plausible": True,
+            "entries_checked": entries,
+            "entry_walk_ok": True,
+            "walk_complete": True,
+            "segment_end": cursor,
+            "boundary_confidence": "medium",
+            "error": "tar_end_zero_blocks_missing_at_eof",
+            "damage_flags": ["missing_end_block"],
+            "evidence": ["tar:header_checksum", "tar:block_walk", "tar:eof_boundary"],
+        })
+    elif entries > 0:
         read_error = {
             "code": "unexpected_eof",
             "operation": "read_record",
@@ -983,8 +1024,8 @@ def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
             "plausible": True,
             "entries_checked": entries,
             "entry_walk_ok": True,
-            "segment_end": cursor,
-            "boundary_confidence": "medium",
+            "segment_end": None,
+            "boundary_confidence": "none",
             "error": "tar_end_zero_blocks_not_found",
             "read_error": read_error,
             "error_field": "tar.archive.end_zero_blocks",
@@ -1015,12 +1056,22 @@ def _probe_compression_stream_view(view, fmt: str) -> dict:
     }
 
 
-def _tar_octal_optional(data: bytes) -> int | None:
+def _tar_number_optional(data: bytes) -> int | None:
+    if not data:
+        return None
+    if data[0] & 0x80:
+        value = data[0] & 0x7f
+        for byte in data[1:]:
+            value = value * 256 + byte
+        return value
     text = data.split(b"\x00", 1)[0].strip() or b"0"
     try:
         return int(text, 8)
     except ValueError:
         return None
+
+
+_tar_octal_optional = _tar_number_optional
 
 
 def _tar_checksum(header: bytes) -> int:
@@ -1029,6 +1080,40 @@ def _tar_checksum(header: bytes) -> int:
 
 def _tar_padding(size: int) -> int:
     return (-size) % 512
+
+
+def _tar_sparse_extension_span(view, header: bytes, header_offset: int) -> tuple[int, str]:
+    previous_end = 0
+
+    def validate_map(block: bytes, count: int) -> bool:
+        nonlocal previous_end
+        for index in range(count):
+            base = index * 24
+            offset = _tar_number_optional(block[base:base + 12])
+            length = _tar_number_optional(block[base + 12:base + 24])
+            if offset is None or length is None:
+                return False
+            if offset == 0 and length == 0:
+                continue
+            end = offset + length
+            if end < offset or offset < previous_end:
+                return False
+            previous_end = end
+        return True
+
+    if not validate_map(header[386:482], 4):
+        return 0, "invalid_oldgnu_sparse_map"
+    span = 0
+    extended = header[482] not in (0, ord("0"))
+    while extended:
+        if span >= 512 * 65536:
+            return 0, "oldgnu_sparse_extension_limit"
+        block = view.read_at(header_offset + 512 + span, 512)
+        if len(block) != 512 or not validate_map(block[:504], 21):
+            return 0, "invalid_oldgnu_sparse_extension"
+        span += 512
+        extended = block[504] not in (0, ord("0"))
+    return span, ""
 
 
 def _entropy(data: bytes) -> float:

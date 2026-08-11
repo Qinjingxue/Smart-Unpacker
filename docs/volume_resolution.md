@@ -32,7 +32,7 @@ Input Planning again. The resolver must add at least one path and produce a firs
 
 The native probe returns a `VolumeAnchor` for each candidate. Strong evidence includes a
 validated 7z Start Header CRC, ZIP local header or exact-at-end EOCD, and RAR main-volume
-header information. A leading gzip, bzip2, xz, zstd, Unix-compress or TAR structure marks the
+header information. A leading gzip, bzip2, xz, zstd or TAR structure marks the
 file as a standalone stream and excludes it from another archive's volume search.
 
 Initial Relations grouping accepts only strict conventional names. On the one retry:

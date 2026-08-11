@@ -491,6 +491,8 @@ impl AnalysisBinaryView {
         result.set_item("fuzzy_payload_in_range", false)?;
         result.set_item("entries_checked", 0usize)?;
         result.set_item("entry_walk_ok", false)?;
+        result.set_item("walk_complete", false)?;
+        result.set_item("walk_budget_exhausted", false)?;
         result.set_item("end_zero_blocks", false)?;
         result.set_item("segment_end", py.None())?;
         result.set_item("boundary_confidence", "none")?;
@@ -544,6 +546,7 @@ impl AnalysisBinaryView {
                     result.set_item("plausible", checked > 0)?;
                     result.set_item("entries_checked", checked)?;
                     result.set_item("entry_walk_ok", checked > 0)?;
+                    result.set_item("walk_complete", true)?;
                     result.set_item("end_zero_blocks", true)?;
                     result.set_item("segment_end", cursor)?;
                     result.set_item("boundary_confidence", "high")?;
@@ -578,22 +581,7 @@ impl AnalysisBinaryView {
                     && parse_octal(&header[108..116]).is_some()
                     && parse_octal(&header[116..124]).is_some()
                     && parse_octal(&header[136..148]).is_some();
-                let typeflag_valid = matches!(
-                    header[156],
-                    0 | b'0'
-                        | b'1'
-                        | b'2'
-                        | b'3'
-                        | b'4'
-                        | b'5'
-                        | b'6'
-                        | b'7'
-                        | b'x'
-                        | b'g'
-                        | b'L'
-                        | b'K'
-                        | b'S'
-                );
+                let typeflag_valid = header[156] == 0 || (0x20..0x7f).contains(&header[156]);
                 let payload_in_range = member_size.is_some_and(|member_size| {
                     cursor
                         .saturating_add(TAR_BLOCK_SIZE as u64)
@@ -629,8 +617,8 @@ impl AnalysisBinaryView {
                 if checked > 0 {
                     result.set_item("plausible", true)?;
                     result.set_item("entry_walk_ok", true)?;
-                    result.set_item("segment_end", cursor)?;
-                    result.set_item("boundary_confidence", "medium")?;
+                    result.set_item("segment_end", py.None())?;
+                    result.set_item("boundary_confidence", "none")?;
                     result.set_item(
                         "evidence",
                         PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?,
@@ -638,7 +626,62 @@ impl AnalysisBinaryView {
                 }
                 return Ok(result);
             }
-            let payload_start = cursor.saturating_add(TAR_BLOCK_SIZE as u64);
+            let mut sparse_extension_span = 0u64;
+            if header[156] == b'S' {
+                let mut previous_end = 0u64;
+                let mut extended = header[482] != 0 && header[482] != b'0';
+                if !tar_sparse_map_valid(&header, 386, 4, &mut previous_end) {
+                    result.set_item("error", "invalid_oldgnu_sparse_map")?;
+                    result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                    result.set_item("plausible", checked > 0)?;
+                    result.set_item("entry_walk_ok", checked > 0)?;
+                    return Ok(result);
+                }
+                while extended {
+                    if sparse_extension_span >= (TAR_BLOCK_SIZE as u64) * 65536 {
+                        result.set_item("error", "oldgnu_sparse_extension_limit")?;
+                        result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                        result.set_item("plausible", checked > 0)?;
+                        result.set_item("entry_walk_ok", checked > 0)?;
+                        return Ok(result);
+                    }
+                    let extension_offset = cursor
+                        .saturating_add(TAR_BLOCK_SIZE as u64)
+                        .saturating_add(sparse_extension_span);
+                    let extension = match self.read_field_at_bytes(
+                        extension_offset,
+                        TAR_BLOCK_SIZE,
+                        "tar.gnu_sparse.extension",
+                        FieldLocation::Body,
+                    ) {
+                        Ok(data) => data,
+                        Err(fault) => {
+                            set_view_read_fault(&result, &fault, "invalid_oldgnu_sparse_extension")?;
+                            result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                            return Ok(result);
+                        }
+                    };
+                    if !tar_sparse_map_valid(&extension, 0, 21, &mut previous_end) {
+                        result.set_item("error", "invalid_oldgnu_sparse_extension")?;
+                        result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                        result.set_item("plausible", checked > 0)?;
+                        result.set_item("entry_walk_ok", checked > 0)?;
+                        return Ok(result);
+                    }
+                    sparse_extension_span += TAR_BLOCK_SIZE as u64;
+                    extended = extension[504] != 0 && extension[504] != b'0';
+                }
+                if parse_octal(&header[483..495]).is_some_and(|real_size| previous_end > real_size) {
+                    result.set_item("error", "oldgnu_sparse_extent_out_of_range")?;
+                    result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                    result.set_item("plausible", checked > 0)?;
+                    result.set_item("entry_walk_ok", checked > 0)?;
+                    return Ok(result);
+                }
+            }
+            let payload_start = cursor
+                .saturating_add(TAR_BLOCK_SIZE as u64)
+                .saturating_add(sparse_extension_span);
             let next_cursor = payload_start
                 .saturating_add(member_size)
                 .saturating_add(tar_padding(member_size));
@@ -657,8 +700,8 @@ impl AnalysisBinaryView {
                 if checked > 0 {
                     result.set_item("plausible", true)?;
                     result.set_item("entry_walk_ok", true)?;
-                    result.set_item("segment_end", cursor)?;
-                    result.set_item("boundary_confidence", "medium")?;
+                    result.set_item("segment_end", py.None())?;
+                    result.set_item("boundary_confidence", "none")?;
                 }
                 return Ok(result);
             }
@@ -679,12 +722,38 @@ impl AnalysisBinaryView {
                 )?,
             )?;
         }
-        if checked > 0 {
+        if checked > 0 && checked >= max_entries && cursor.saturating_add(TAR_BLOCK_SIZE as u64) <= size {
             result.set_item("plausible", true)?;
             result.set_item("entries_checked", checked)?;
             result.set_item("entry_walk_ok", true)?;
+            result.set_item("walk_budget_exhausted", true)?;
+            result.set_item("segment_end", py.None())?;
+            result.set_item("boundary_confidence", "none")?;
+            result.set_item("error", "tar_walk_budget_exhausted")?;
+            result.set_item("damage_flags", PyList::empty(py))?;
+            result.set_item(
+                "evidence",
+                PyList::new(py, ["tar:header_checksum", "tar:block_walk_sample"])?
+            )?;
+        } else if checked > 0 && cursor == size {
+            result.set_item("plausible", true)?;
+            result.set_item("entries_checked", checked)?;
+            result.set_item("entry_walk_ok", true)?;
+            result.set_item("walk_complete", true)?;
             result.set_item("segment_end", cursor)?;
             result.set_item("boundary_confidence", "medium")?;
+            result.set_item("error", "tar_end_zero_blocks_missing_at_eof")?;
+            result.set_item("damage_flags", PyList::new(py, ["missing_end_block"])?)?;
+            result.set_item(
+                "evidence",
+                PyList::new(py, ["tar:header_checksum", "tar:block_walk", "tar:eof_boundary"])?
+            )?;
+        } else if checked > 0 {
+            result.set_item("plausible", true)?;
+            result.set_item("entries_checked", checked)?;
+            result.set_item("entry_walk_ok", true)?;
+            result.set_item("segment_end", py.None())?;
+            result.set_item("boundary_confidence", "none")?;
             let fault = ReadFault::short_read(
                 "read_record",
                 cursor,

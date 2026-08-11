@@ -1464,9 +1464,46 @@ private:
     }
 
     void ensure_directory(const std::filesystem::path& directory) {
+        ensure_no_reparse_ancestors(directory);
         const auto key = normalized_output_path_key(directory);
         if (created_directories_.insert(key).second) {
             std::filesystem::create_directories(directory);
+        }
+    }
+
+    void ensure_no_reparse_ancestors(const std::filesystem::path& directory) const {
+        const auto relative = directory.lexically_relative(output_root_);
+        if (relative.empty()) {
+            return;
+        }
+        for (const auto& part : relative) {
+            if (part == L"..") {
+                throw std::filesystem::filesystem_error(
+                    "output path escapes extraction root",
+                    directory,
+                    std::make_error_code(std::errc::permission_denied));
+            }
+        }
+        auto current = output_root_;
+        for (const auto& part : relative) {
+            current /= part;
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(current, error);
+            if (!error && std::filesystem::is_symlink(status)) {
+                throw std::filesystem::filesystem_error(
+                    "output path traverses a symbolic link",
+                    current,
+                    std::make_error_code(std::errc::permission_denied));
+            }
+#ifdef _WIN32
+            const DWORD attributes = GetFileAttributesW(current.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                throw std::filesystem::filesystem_error(
+                    "output path traverses a reparse point",
+                    current,
+                    std::make_error_code(std::errc::permission_denied));
+            }
+#endif
         }
     }
 

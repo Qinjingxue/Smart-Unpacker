@@ -32,9 +32,9 @@ if not PYTHON.exists():
 SEVEN_ZIP = ROOT / "tools" / "7z.exe"
 RAR = ROOT / "tools" / "Rar.exe"
 ZSTD = ROOT / "tools" / "zstd.exe"
-SUPPORTED = ("zip", "7z", "rar", "gz", "bz2", "xz", "zst", "Z", "tar", "tgz", "tbz2", "txz", "tzst")
+SUPPORTED = ("zip", "7z", "rar", "gz", "bz2", "xz", "zst", "tar", "tgz", "tbz2", "txz", "tzst")
 GENERATED_FORMATS = (
-    "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "Z", "tgz", "tbz2", "txz", "tzst",
+    "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst",
 )
 MIN_SCANNABLE_ARCHIVE_BYTES = 1024 * 1024
 
@@ -103,15 +103,6 @@ def _create_zstd_archive(target: Path, source: Path) -> bool:
     return result.returncode == 0 and target.exists()
 
 
-def _create_unix_compress_archive(target: Path, source: Path) -> bool:
-    result = subprocess.run(
-        [str(PYTHON), str(ROOT / "benchmarks" / "tools" / "create_unix_compress.py"), str(source), str(target)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return result.returncode == 0 and target.exists()
-
-
 def _content_signature(root: Path) -> list[dict[str, Any]]:
     rows = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
@@ -162,7 +153,7 @@ def _isolate_corpus_inputs(root: Path, corpus: dict[str, dict[str, Any]]) -> Non
 def _timed_seven_zip_extract(archive: Path, output: Path, archive_format: str) -> tuple[float, int]:
     started = time.perf_counter()
     stage = output / "_compressed_stream"
-    composite = archive_format in {"gz", "bz2", "xz", "zst", "Z", "tgz", "tbz2", "txz", "tzst"}
+    composite = archive_format in {"gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst"}
     first_output = stage if composite else output
     first_output.mkdir(parents=True, exist_ok=True)
     command = [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{first_output}", str(archive)]
@@ -270,16 +261,6 @@ def create_corpus(
             corpus[f"{workload}:tzst"] = {"workload": workload, "format": "tzst", "path": tzst_target}
         else:
             skipped[f"{workload}:zst"] = "zstandard runtime cannot create this format"
-
-        unix_compress_target = root / f"{workload}.tar.Z"
-        if tar_source is not None and _create_unix_compress_archive(unix_compress_target, tar_source):
-            corpus[f"{workload}:Z"] = {
-                "workload": workload,
-                "format": "Z",
-                "path": unix_compress_target,
-            }
-        else:
-            skipped[f"{workload}:Z"] = "benchmark Unix-compress fixture builder could not create this format"
 
     for name, source in extra.items():
         key = f"external:{name}"

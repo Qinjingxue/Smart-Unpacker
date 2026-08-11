@@ -12,16 +12,48 @@ class TarAnalysisModule:
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
         max_entries = int(config.get("max_entries_to_walk", 64) or 64)
-        candidates = [0]
-        candidates.extend(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
-        evidences = []
-        for start in sorted(set(candidates)):
+        hit_starts = sorted(set(
+            max(0, int(hit.get("offset") or 0) - 257)
+            for hit in prepass.get("hits", [])
+            if hit.get("name") == "tar_ustar"
+        ))
+        evidences: list[ArchiveFormatEvidence] = []
+
+        # A valid archive at offset zero owns its member headers.  Treating
+        # every member's ustar marker as another embedded archive was the root
+        # cause of suffix-only extraction for archives larger than the walk
+        # sample budget.
+        primary = self._candidate(view, prepass, 0, max_entries)
+        if primary is not None and primary.status == "extractable":
+            return combine_format_candidates("tar", [primary], preserve_multiple=False)
+
+        covered_until = 0
+        if primary is not None:
+            evidences.append(primary)
+        for start in hit_starts:
+            if start <= 0 or start < covered_until:
+                continue
+            candidate = self._candidate(view, prepass, start, max_entries)
+            if candidate is None:
+                continue
+            evidences.append(candidate)
+            segment = candidate.segments[0] if candidate.segments else None
+            if segment is not None and segment.end_offset is not None:
+                covered_until = max(covered_until, int(segment.end_offset))
+            elif candidate.status == "extractable":
+                # Without a proven end boundary, later ustar hits may simply be
+                # members of this archive and cannot be emitted independently.
+                break
+        return combine_format_candidates("tar", evidences, preserve_multiple=prepass.get("source") == "embedded_scan")
+
+    @staticmethod
+    def _candidate(view, prepass: dict, start: int, max_entries: int) -> ArchiveFormatEvidence | None:
             result = probe_tar_view(
                 view,
                 TarProbeOptions(start_offset=start, max_entries_to_walk=max_entries),
             ).to_raw_dict()
             if result and result.get("plausible"):
-                confidence = 0.94 if result.get("end_zero_blocks") else 0.86
+                confidence = 0.94 if result.get("end_zero_blocks") else (0.90 if result.get("walk_complete") else 0.86)
                 details = dict(result)
                 evidence = list(result.get("evidence") or [])
                 damage_flags = read_fault_damage_flags(result)
@@ -35,22 +67,21 @@ class TarAnalysisModule:
                     file_size=int(view.size),
                     format_hint="tar",
                 )
-                evidences.append(ArchiveFormatEvidence(
+                return ArchiveFormatEvidence(
                     format="tar",
                     confidence=confidence,
                     status="extractable",
                     segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
                     details=details,
-                ))
-                continue
+                )
             if result and result.get("magic_matched"):
                 details = dict(result)
                 damage_flags = read_fault_damage_flags(result) or ["tar_metadata_bad"]
-                evidences.append(ArchiveFormatEvidence(
+                return ArchiveFormatEvidence(
                     format="tar", confidence=0.72, status="damaged",
                     segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.72,
                                              damage_flags=damage_flags, evidence=list(result.get("evidence") or ["tar:header"]))],
                     details={**details, "route_evidence_flags": damage_flags},
-                ))
-        return combine_format_candidates("tar", evidences, preserve_multiple=prepass.get("source") == "embedded_scan")
+                )
+            return None
 register_analysis_module(TarAnalysisModule())

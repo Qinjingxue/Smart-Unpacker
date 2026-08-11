@@ -65,7 +65,7 @@ def test_rar_declared_payload_beyond_eof_is_a_tail_or_volume_fault(tmp_path):
     assert result["read_error"]["possible_missing_volume"] is True
 
 
-def test_tar_missing_end_blocks_reports_tail_field(tmp_path):
+def test_tar_missing_end_blocks_at_physical_eof_is_noncanonical_boundary(tmp_path):
     header = bytearray(512)
     header[0:8] = b"file.txt"
     header[100:108] = b"0000644\0"
@@ -83,6 +83,10 @@ def test_tar_missing_end_blocks_reports_tail_field(tmp_path):
 
     result = dict(AnalysisBinaryView(str(archive)).probe_tar(0, 16))
 
-    assert result["error"] == "tar_end_zero_blocks_not_found"
-    assert result["read_error"]["field"] == "tar.archive.end_zero_blocks"
-    assert result["read_error"]["possible_missing_volume"] is True
+    assert result["error"] == "tar_end_zero_blocks_missing_at_eof"
+    assert result["walk_complete"] is True
+    assert result["segment_end"] == 512
+    assert result["boundary_confidence"] == "medium"
+    assert result.get("read_error") is None
+    assert result.get("possible_missing_volume") is not True
+    assert "missing_end_block" in result["damage_flags"]

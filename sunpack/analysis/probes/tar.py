@@ -33,7 +33,7 @@ def probe_tar_view(view, options: TarProbeOptions | None = None) -> FormatObserv
 
     error = str(raw.get("error") or "")
     damage_flags = list(raw.get("damage_flags") or [])
-    if error and error != "tar_end_zero_blocks_not_found":
+    if error and error not in {"tar_end_zero_blocks_not_found", "tar_walk_budget_exhausted"}:
         damage_flags.append(error)
     damage_flags = sorted(set(str(item) for item in damage_flags if item))
     boundary_confidence = str(raw.get("boundary_confidence") or "unknown")

@@ -40,7 +40,10 @@ class ArchiveTestCrcMethod:
         if archive_status_result is not None:
             return archive_status_result
 
-        archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
+        archive_files = [
+            item for item in archive_manifest.files
+            if isinstance(item, dict) and item.get("path") and not bool(item.get("shadowed"))
+        ]
         inventory = output_inventory_for_evidence(evidence)
         output_files = inventory.materialize_files()
         if not archive_files:

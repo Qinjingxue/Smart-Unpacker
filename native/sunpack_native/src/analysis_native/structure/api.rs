@@ -625,11 +625,13 @@ pub(crate) fn inspect_rar_structure(
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, max_entries_to_walk=8))]
+#[pyo3(signature = (path, max_entries_to_walk=8, start_offset=0, end_offset=None))]
 pub(crate) fn inspect_tar_header_structure(
     py: Python<'_>,
     path: &str,
     max_entries_to_walk: usize,
+    start_offset: u64,
+    end_offset: Option<u64>,
 ) -> PyResult<Py<PyDict>> {
     let Ok(reader) = ManagedReader::open(path) else {
         let out = tar_empty(py, "os_error")?;
@@ -638,7 +640,8 @@ pub(crate) fn inspect_tar_header_structure(
     };
     let mut file = reader.cursor();
     let file_size = reader.len();
-    if file_size < TAR_BLOCK_SIZE as u64 {
+    let archive_end = end_offset.unwrap_or(file_size).min(file_size);
+    if start_offset.saturating_add(TAR_BLOCK_SIZE as u64) > archive_end {
         let out = tar_empty(py, "file_too_small")?;
         finish_fields(&out, TAR_FIELDS)?;
         return Ok(out.unbind());
@@ -646,8 +649,8 @@ pub(crate) fn inspect_tar_header_structure(
     let mut header = vec![0; TAR_BLOCK_SIZE];
     if let Err(fault) = seek_field(
         &mut file,
-        0,
-        file_size,
+        start_offset,
+        archive_end,
         "tar.member.header",
         FieldLocation::Head,
     )
@@ -655,7 +658,7 @@ pub(crate) fn inspect_tar_header_structure(
         read_exact_field(
             &mut file,
             &mut header,
-            file_size,
+            archive_end,
             "tar.member.header",
             FieldLocation::Head,
         )
@@ -667,6 +670,8 @@ pub(crate) fn inspect_tar_header_structure(
     }
     let result = tar_empty(py, "")?;
     result.set_item("file_size", file_size)?;
+    result.set_item("archive_start", start_offset)?;
+    result.set_item("archive_end", archive_end)?;
     if header.iter().all(|b| *b == 0) {
         result.set_item("error", "leading_zero_block")?;
         result.set_item("zero_block", true)?;
@@ -684,24 +689,9 @@ pub(crate) fn inspect_tar_header_structure(
         && parse_octal(&header[116..124]).is_some()
         && parse_octal(&header[136..148]).is_some();
     let typeflag = header[156];
-    let typeflag_valid = matches!(
-        typeflag,
-        0 | b'0'
-            | b'1'
-            | b'2'
-            | b'3'
-            | b'4'
-            | b'5'
-            | b'6'
-            | b'7'
-            | b'x'
-            | b'g'
-            | b'L'
-            | b'K'
-            | b'S'
-    );
+    let typeflag_valid = typeflag == 0 || (0x20..0x7f).contains(&typeflag);
     let payload_in_range = member_size
-        .is_some_and(|size| TAR_BLOCK_SIZE as u64 + size + padding_for_size(size) <= file_size);
+        .is_some_and(|size| start_offset + TAR_BLOCK_SIZE as u64 + size + padding_for_size(size) <= archive_end);
     result.set_item("stored_checksum", stored_checksum.unwrap_or(0))?;
     result.set_item("computed_checksum", computed)?;
     result.set_item("member_size", member_size.unwrap_or(0))?;
@@ -737,7 +727,7 @@ pub(crate) fn inspect_tar_header_structure(
             "tar"
         },
     )?;
-    let walk = match walk_tar(&mut file, file_size, max_entries_to_walk) {
+    let walk = match walk_tar(&mut file, start_offset, archive_end, max_entries_to_walk) {
         Ok(walk) => walk,
         Err(fault) => {
             set_read_fault(&result, &fault, "member_header_read_failed")?;
@@ -753,7 +743,7 @@ pub(crate) fn inspect_tar_header_structure(
         result.set_item("error", walk.3)?;
         result.set_item("plausible", false)?;
     }
-    enrich_tar_semantics(&result, &mut file, file_size, max_entries_to_walk)?;
+    enrich_tar_semantics(&result, &mut file, start_offset, archive_end, max_entries_to_walk)?;
     Ok(result.unbind())
 }
 

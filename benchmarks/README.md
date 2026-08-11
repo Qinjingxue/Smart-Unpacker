@@ -35,9 +35,8 @@ archives are never copied to the durable result directory implicitly, so large c
 accumulate. A scenario may explicitly preserve a small diagnostic artifact with the workspace API.
 
 `extraction format-matrix` builds ZIP, 7z, split 7z, RAR, split RAR, TAR, gzip,
-bzip2, xz, zstd, Unix compress and the conventional compressed-TAR aliases. It uses
-the bundled binaries under `tools/`; the test-only Unix-compress fixture builder lives
-under `benchmarks/tools/`. Each archive is placed in an isolated scanner input directory,
+bzip2, xz, zstd and the conventional compressed-TAR aliases. It uses the bundled
+binaries under `tools/`. Each archive is placed in an isolated scanner input directory,
 then both SunPack's complete detection/extraction flow and raw 7-Zip are timed. Only cases
 whose extracted payload hashes pass on both sides contribute to the comparison ratio.
 The matrix starts extractor commands strictly one at a time and adds a short cooldown

@@ -28,6 +28,18 @@ fn repair_tar_trailing_junk(data: &[u8]) -> Result<TarRepair, String> {
     if end == data.len() {
         return Err("no trailing bytes after TAR zero blocks".to_string());
     }
+    let mut candidate = end;
+    while candidate + 512 <= data.len() && is_zero_block(&data[candidate..candidate + 512]) {
+        candidate += 512;
+    }
+    if candidate + 512 <= data.len() {
+        let header = &data[candidate..candidate + 512];
+        if plausible_tar_header(header)
+            && parse_tar_number(&header[148..156]).is_some_and(|stored| stored == tar_checksum(header))
+        {
+            return Err("trailing bytes contain a concatenated TAR archive and must not be trimmed".to_string());
+        }
+    }
     Ok(TarRepair {
         patches: Vec::new(),
         truncate_at: Some(end as u64),
@@ -64,24 +76,42 @@ fn repair_tar_trailing_zero_blocks(data: &[u8]) -> Result<TarRepair, String> {
 }
 
 fn walk_tar_payload_end(data: &[u8]) -> Option<usize> {
+    walk_tar_payload_end_limited(data, usize::MAX).ok()
+}
+
+fn walk_tar_payload_end_limited(data: &[u8], max_entries: usize) -> Result<usize, String> {
     let mut offset = 0usize;
+    let mut entries = 0usize;
     while offset + 512 <= data.len() {
         let header = &data[offset..offset + 512];
         if is_zero_block(header) {
-            return Some(offset);
+            return Ok(offset);
+        }
+        if entries >= max_entries {
+            return Err("TAR boundary walk reached repair.deep.max_entries".to_string());
         }
         if !plausible_tar_header(header) {
-            return None;
+            return Err("TAR header is not plausible".to_string());
         }
-        let stored_checksum = parse_tar_number(&header[148..156])?;
+        let stored_checksum = parse_tar_number(&header[148..156])
+            .ok_or_else(|| "TAR checksum field is invalid".to_string())?;
         if stored_checksum != tar_checksum(header) {
-            return None;
+            return Err("TAR checksum mismatch".to_string());
         }
-        let size = parse_tar_number(&header[124..136])?;
-        let payload_span = padded_tar_payload_span(size)?;
-        offset = offset.checked_add(512)?.checked_add(payload_span)?;
+        let size = parse_tar_number(&header[124..136])
+            .ok_or_else(|| "TAR size field is invalid".to_string())?;
+        let payload_span = padded_tar_payload_span(size)
+            .ok_or_else(|| "TAR payload span overflow".to_string())?;
+        offset = offset.checked_add(512)
+            .and_then(|value| value.checked_add(payload_span))
+            .ok_or_else(|| "TAR member offset overflow".to_string())?;
+        entries += 1;
     }
-    (offset == data.len()).then_some(offset)
+    if offset == data.len() {
+        Ok(offset)
+    } else {
+        Err("TAR ends with a partial header block".to_string())
+    }
 }
 
 fn canonical_tar_end(data: &[u8], payload_end: usize) -> usize {

@@ -16,7 +16,6 @@ pub(crate) fn tar_boundary_repair(
     max_output_size_mb: f64,
     max_entries: usize,
 ) -> PyResult<Py<PyDict>> {
-    let _ = max_entries;
     let options = StreamRepairOptions {
         max_input_bytes: mb_to_bytes(max_input_size_mb),
         max_output_bytes: mb_to_bytes(max_output_size_mb),
@@ -26,6 +25,9 @@ pub(crate) fn tar_boundary_repair(
         Ok(data) => data,
         Err(message) => return tar_repair_status(py, "skipped", "", &message, &[], None, &[], 0.0),
     };
+    if let Err(message) = walk_tar_payload_end_limited(&data, max_entries.max(1)) {
+        return tar_repair_status(py, "skipped", "", &message, &[], None, &[], 0.0);
+    }
     let repair = match repair_name {
         "tar_trailing_junk_trim" => repair_tar_trailing_junk(&data),
         "tar_trailing_zero_block_repair" => repair_tar_trailing_zero_blocks(&data),

@@ -16,16 +16,29 @@ fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
 }
 
 fn parse_octal(field: &[u8]) -> Option<u64> {
-    let text = field
-        .iter()
-        .copied()
-        .take_while(|b| *b != 0)
-        .collect::<Vec<_>>();
-    let trimmed = std::str::from_utf8(&text).ok()?.trim();
-    if trimmed.is_empty() {
-        return Some(0);
+    if field.is_empty() {
+        return None;
     }
-    u64::from_str_radix(trimmed, 8).ok()
+    if field[0] & 0x80 != 0 {
+        let mut value = (field[0] & 0x7f) as u64;
+        for byte in &field[1..] {
+            value = value.checked_mul(256)?.checked_add(*byte as u64)?;
+        }
+        return Some(value);
+    }
+    let mut value = 0u64;
+    let mut seen_digit = false;
+    for byte in field {
+        match *byte {
+            b'0'..=b'7' => {
+                seen_digit = true;
+                value = value.checked_mul(8)?.checked_add((*byte - b'0') as u64)?;
+            }
+            b'\0' | b' ' => {}
+            _ => return None,
+        }
+    }
+    Some(if seen_digit { value } else { 0 })
 }
 
 fn tar_checksum(header: &[u8]) -> u64 {
