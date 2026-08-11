@@ -169,8 +169,50 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
         return Ok(result.unbind());
     }
-    let is_multi_disk = disk_number != 0 || central_directory_disk != 0;
-    if is_multi_disk || disk_entries != total_entries {
+
+    // APPNOTE 4.3.14/4.3.15: ZIP64 archives place the Zip64 end of central
+    // directory record (56 bytes, size field 44) and its locator (20 bytes)
+    // between the central directory and the plain EOCD.  When present, the
+    // 8-byte fields in the Zip64 record are authoritative and the central
+    // directory ends where the Zip64 record starts, not at the EOCD.
+    let mut effective_disk_number = u64::from(disk_number);
+    let mut effective_central_directory_disk = u64::from(central_directory_disk);
+    let mut effective_disk_entries = u64::from(disk_entries);
+    let mut effective_total_entries = u64::from(total_entries);
+    let mut effective_central_directory_size = central_directory_size;
+    let mut effective_central_directory_offset = central_directory_offset;
+    let mut directory_end = eocd_offset;
+    let mut zip64_eocd_present = false;
+    let mut zip64_eocd_offset = 0u64;
+    let mut zip64_declared_total_disks = 1u32;
+    let tail_offset = file_size - read_size;
+    if eocd_offset >= (ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE) as u64 {
+        let tail_index = eocd_offset.saturating_sub(tail_offset) as usize;
+        let block_len = ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE;
+        if tail_index >= block_len && tail_index + ZIP_EOCD_MIN_SIZE <= tail.len() {
+            let block = &tail[tail_index - block_len..tail_index];
+            if &block[..4] == ZIP64_EOCD_SIGNATURE
+                && u64_le(block, 4) == ZIP64_EOCD_RECORD_SIZE as u64 - 12
+                && &block[ZIP64_EOCD_RECORD_SIZE..ZIP64_EOCD_RECORD_SIZE + 4]
+                    == ZIP64_EOCD_LOCATOR_SIGNATURE
+            {
+                zip64_eocd_present = true;
+                zip64_eocd_offset = eocd_offset - block_len as u64;
+                zip64_declared_total_disks = u32_le(block, ZIP64_EOCD_RECORD_SIZE + 16);
+                effective_disk_number = u64::from(u32_le(block, 16));
+                effective_central_directory_disk = u64::from(u32_le(block, 20));
+                effective_disk_entries = u64_le(block, 24);
+                effective_total_entries = u64_le(block, 32);
+                effective_central_directory_size = u64_le(block, 40);
+                effective_central_directory_offset = u64_le(block, 48);
+                directory_end = eocd_offset - block_len as u64;
+            }
+        }
+    }
+
+    let is_multi_disk =
+        effective_disk_number != 0 || effective_central_directory_disk != 0;
+    if is_multi_disk || effective_disk_entries != effective_total_entries {
         result.set_item(
             "error",
             if is_multi_disk {
@@ -180,63 +222,111 @@ pub(crate) fn inspect_zip_eocd_structure(
             },
         )?;
         result.set_item("eocd_offset", eocd_offset)?;
-        result.set_item("central_directory_offset", central_directory_offset)?;
-        result.set_item("central_directory_size", central_directory_size)?;
-        result.set_item("total_entries", total_entries)?;
+        result.set_item(
+            "central_directory_offset",
+            effective_central_directory_offset,
+        )?;
+        result.set_item("central_directory_size", effective_central_directory_size)?;
+        result.set_item("total_entries", effective_total_entries)?;
         result.set_item("comment_length", comment_length)?;
         result.set_item(
             "declared_central_directory_offset",
-            central_directory_offset,
+            effective_central_directory_offset,
         )?;
-        result.set_item("declared_central_directory_size", central_directory_size)?;
-        result.set_item("declared_total_entries", total_entries)?;
+        result.set_item("declared_central_directory_size", effective_central_directory_size)?;
+        result.set_item("declared_total_entries", effective_total_entries)?;
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
         result.set_item("is_multi_disk", is_multi_disk)?;
-        result.set_item("disk_number", disk_number)?;
-        result.set_item("central_directory_disk", central_directory_disk)?;
-        result.set_item("disk_entries", disk_entries)?;
-        result.set_item("declared_total_disks", u32::from(disk_number) + 1)?;
+        result.set_item("disk_number", effective_disk_number)?;
+        result.set_item("central_directory_disk", effective_central_directory_disk)?;
+        result.set_item("disk_entries", effective_disk_entries)?;
+        result.set_item(
+            "declared_total_disks",
+            if zip64_eocd_present {
+                zip64_declared_total_disks
+            } else {
+                u32::from(disk_number) + 1
+            },
+        )?;
+        result.set_item("zip64_eocd_present", zip64_eocd_present)?;
+        result.set_item("zip64_eocd_offset", zip64_eocd_offset)?;
         return Ok(result.unbind());
     }
-    let physical_central_offset = eocd_offset.saturating_sub(central_directory_size);
-    let archive_offset = physical_central_offset.saturating_sub(central_directory_offset);
+
+    let naive_physical_central_offset = directory_end.saturating_sub(effective_central_directory_size);
+    let declared_physical_central_offset = effective_central_directory_offset;
+    // Prefer the physically verified declared offset when the naive
+    // back-computation misses the signature (same fallback as
+    // formats/zip/directory/inspect.rs).  Otherwise keep the naive position
+    // so SFX prefixes keep working via archive_offset.
+    let physical_central_offset =
+        if naive_physical_central_offset != declared_physical_central_offset {
+            let naive_ok = has_central_directory_signature(
+                &mut file,
+                naive_physical_central_offset,
+                file_size,
+            );
+            let declared_ok = has_central_directory_signature(
+                &mut file,
+                declared_physical_central_offset,
+                file_size,
+            );
+            if !naive_ok && declared_ok {
+                declared_physical_central_offset
+            } else {
+                naive_physical_central_offset
+            }
+        } else {
+            naive_physical_central_offset
+        };
+    let archive_offset = physical_central_offset.saturating_sub(effective_central_directory_offset);
     result = dict(py)?;
     result.set_item("plausible", false)?;
     result.set_item("error", "")?;
     result.set_item("magic_matched", true)?;
     result.set_item("eocd_offset", eocd_offset)?;
     result.set_item("central_directory_offset", physical_central_offset)?;
-    result.set_item("central_directory_size", central_directory_size)?;
+    result.set_item("central_directory_size", effective_central_directory_size)?;
     result.set_item(
         "declared_central_directory_offset",
-        central_directory_offset,
+        effective_central_directory_offset,
     )?;
-    result.set_item("declared_central_directory_size", central_directory_size)?;
-    result.set_item("declared_total_entries", total_entries)?;
+    result.set_item("declared_central_directory_size", effective_central_directory_size)?;
+    result.set_item("declared_total_entries", effective_total_entries)?;
     result.set_item("physical_central_directory_offset", physical_central_offset)?;
     result.set_item("inferred_central_directory_offset", physical_central_offset)?;
     result.set_item(
         "inferred_central_directory_size",
-        eocd_offset.saturating_sub(physical_central_offset),
+        directory_end.saturating_sub(physical_central_offset),
     )?;
     result.set_item(
         "central_directory_offset_delta",
-        physical_central_offset as i64 - central_directory_offset as i64,
+        physical_central_offset as i64 - effective_central_directory_offset as i64,
     )?;
     result.set_item(
         "central_directory_size_delta",
-        eocd_offset.saturating_sub(physical_central_offset) as i64 - central_directory_size as i64,
+        directory_end.saturating_sub(physical_central_offset) as i64
+            - effective_central_directory_size as i64,
     )?;
     result.set_item("entry_count_delta", 0i64)?;
     result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
     result.set_item("archive_offset", archive_offset)?;
-    result.set_item("total_entries", total_entries)?;
+    result.set_item("total_entries", effective_total_entries)?;
     result.set_item("is_multi_disk", false)?;
-    result.set_item("disk_number", disk_number)?;
-    result.set_item("central_directory_disk", central_directory_disk)?;
-    result.set_item("disk_entries", disk_entries)?;
-    result.set_item("declared_total_disks", 1u32)?;
+    result.set_item("disk_number", effective_disk_number)?;
+    result.set_item("central_directory_disk", effective_central_directory_disk)?;
+    result.set_item("disk_entries", effective_disk_entries)?;
+    result.set_item(
+        "declared_total_disks",
+        if zip64_eocd_present {
+            zip64_declared_total_disks
+        } else {
+            1u32
+        },
+    )?;
     result.set_item("comment_length", comment_length)?;
+    result.set_item("zip64_eocd_present", zip64_eocd_present)?;
+    result.set_item("zip64_eocd_offset", zip64_eocd_offset)?;
     result.set_item("central_directory_present", false)?;
     result.set_item("central_directory_entries_checked", 0)?;
     result.set_item("central_directory_walk_ok", false)?;
@@ -244,17 +334,20 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("local_header_links_ok", false)?;
     result.set_item("local_header_links_ok_count", 0)?;
     result.set_item("local_header_links_error_count", 0)?;
-    if physical_central_offset + central_directory_size != eocd_offset {
+    if physical_central_offset
+        .checked_add(effective_central_directory_size)
+        .is_none_or(|end| end != directory_end)
+    {
         result.set_item("error", "central_directory_size_mismatch")?;
         return Ok(result.unbind());
     }
-    if total_entries == 0 && central_directory_size == 0 {
+    if effective_total_entries == 0 && effective_central_directory_size == 0 {
         result.set_item("plausible", true)?;
         result.set_item("central_directory_walk_ok", true)?;
         result.set_item("local_header_links_ok", true)?;
         return Ok(result.unbind());
     }
-    if central_directory_size < 4 {
+    if effective_central_directory_size < 4 {
         result.set_item("error", "central_directory_too_small")?;
         return Ok(result.unbind());
     }
@@ -293,8 +386,8 @@ pub(crate) fn inspect_zip_eocd_structure(
         file_size,
         archive_offset,
         physical_central_offset,
-        central_directory_size,
-        total_entries as usize,
+        effective_central_directory_size,
+        effective_total_entries as usize,
         max_cd_entries_to_walk,
     ) {
         Ok(walk) => walk,
@@ -306,7 +399,10 @@ pub(crate) fn inspect_zip_eocd_structure(
     };
     result.set_item("central_directory_entries_checked", walk.0)?;
     result.set_item("central_directory_walk_ok", walk.1)?;
-    result.set_item("entry_count_delta", walk.0 as i64 - total_entries as i64)?;
+    result.set_item(
+        "entry_count_delta",
+        walk.0 as i64 - effective_total_entries as i64,
+    )?;
     result.set_item("local_header_links_checked", walk.2)?;
     result.set_item("local_header_links_ok", walk.3)?;
     result.set_item("local_header_links_ok_count", walk.2)?;

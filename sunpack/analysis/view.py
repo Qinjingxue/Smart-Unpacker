@@ -396,7 +396,12 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         cd_size == 0xFFFFFFFF,
         cd_offset == 0xFFFFFFFF,
     ))
-    zip64 = _read_zip64_tail(view, eocd_offset) if zip64_required else None
+    # Read the ZIP64 tail whenever it is present, not only when the plain
+    # EOCD fields carry the 0xFFFF/0xFFFFFFFF markers.  Some writers store
+    # real values in the plain EOCD even though ZIP64 records exist; the
+    # 8-byte fields in the ZIP64 record remain authoritative and the central
+    # directory ends at the ZIP64 record, not at the EOCD (APPNOTE 4.3.14).
+    zip64 = _read_zip64_tail(view, eocd_offset)
     if zip64_required and zip64 is None:
         result["error"] = "zip64_tail_missing_or_invalid"
         return result

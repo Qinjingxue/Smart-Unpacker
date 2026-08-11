@@ -80,3 +80,4 @@ repair_training/latest_runs.json
 # Codebase memory generated metadata
 .codebase-memory/
 .codewhale/
+tests/测试改造.txt

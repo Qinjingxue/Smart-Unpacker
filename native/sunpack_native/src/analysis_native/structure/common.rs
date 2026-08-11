@@ -27,6 +27,32 @@ fn read_at(path: &str, offset: u64, max_len: usize) -> std::io::Result<(u64, Vec
     Ok((file_size, reader.read_exact_at(offset, len)?))
 }
 
+fn has_central_directory_signature(
+    file: &mut SourceCursor,
+    offset: u64,
+    file_size: u64,
+) -> bool {
+    let mut sig = [0u8; 4];
+    seek_field(
+        file,
+        offset,
+        file_size,
+        "zip.central_directory.signature",
+        FieldLocation::Tail,
+    )
+    .and_then(|_| {
+        read_exact_field(
+            file,
+            &mut sig,
+            file_size,
+            "zip.central_directory.signature",
+            FieldLocation::Tail,
+        )
+    })
+    .is_ok()
+        && sig.as_slice() == ZIP_CENTRAL_DIRECTORY_SIGNATURE
+}
+
 fn find_eocd(tail: &[u8], file_size: u64, read_size: u64) -> Option<(u64, &[u8])> {
     let mut search_end = tail.len();
     loop {

@@ -14,32 +14,23 @@ pub(crate) fn inspect_zip_directory_consistency(
         result.set_item("error", "eocd_not_found")?;
         return Ok(result.unbind());
     };
-    let naive_physical_cd_offset = eocd.offset.saturating_sub(eocd.cd_size as usize);
-    let declared_physical_cd_offset = eocd.cd_offset as usize;
-    let physical_cd_offset = if !zip_has_signature_at(&data, naive_physical_cd_offset, CD_SIG)
-        && zip_has_signature_at(&data, declared_physical_cd_offset, CD_SIG)
-    {
-        declared_physical_cd_offset
-    } else {
-        naive_physical_cd_offset
-    };
-    let archive_offset = physical_cd_offset.saturating_sub(eocd.cd_offset as usize);
-    let cd_end = physical_cd_offset
-        .saturating_add(eocd.cd_size as usize)
-        .min(data.len());
+    let resolved = resolve_central_directory(&data, &eocd);
+    let physical_cd_offset = resolved.physical_offset;
+    let cd_end = resolved.end;
+    let archive_offset = resolved.archive_offset;
     result.set_item("eocd_offset", eocd.offset)?;
-    result.set_item("declared_central_directory_offset", eocd.cd_offset as usize)?;
-    result.set_item("declared_central_directory_size", eocd.cd_size as usize)?;
-    result.set_item("declared_total_entries", eocd.total_entries as usize)?;
+    result.set_item("declared_central_directory_offset", resolved.declared_offset)?;
+    result.set_item("declared_central_directory_size", resolved.declared_size)?;
+    result.set_item("declared_total_entries", resolved.total_entries)?;
     result.set_item("physical_central_directory_offset", physical_cd_offset)?;
     result.set_item("archive_offset", archive_offset)?;
     result.set_item(
         "central_directory_offset_delta",
-        physical_cd_offset as i64 - eocd.cd_offset as i64,
+        physical_cd_offset as i64 - resolved.declared_offset as i64,
     )?;
     result.set_item(
         "central_directory_size_delta",
-        cd_end.saturating_sub(physical_cd_offset) as i64 - eocd.cd_size as i64,
+        cd_end.saturating_sub(physical_cd_offset) as i64 - resolved.declared_size as i64,
     )?;
     if physical_cd_offset + 4 > data.len() || data.get(physical_cd_offset..physical_cd_offset + 4) != Some(CD_SIG) {
         result.set_item("error", "bad_central_directory_signature")?;
@@ -53,7 +44,10 @@ pub(crate) fn inspect_zip_directory_consistency(
     result.set_item("cd_entries_checked", checked_entries.len())?;
     result.set_item("cd_entries_parseable", all_entries.len())?;
     result.set_item("cd_entries_truncated_by_limit", all_entries.len() > checked_entries.len())?;
-    result.set_item("entry_count_delta", all_entries.len() as i64 - eocd.total_entries as i64)?;
+    result.set_item(
+        "entry_count_delta",
+        all_entries.len() as i64 - resolved.total_entries as i64,
+    )?;
     if all_entries.is_empty() {
         result.set_item("error", "no_central_directory_entries_parseable")?;
         return Ok(result.unbind());
@@ -582,25 +576,22 @@ pub(crate) fn inspect_zip_structure_graph(
         zip_graph_explanation(py, &explanations, "tail_truncation", false, "tail.trailing_bytes", 0, "tail bytes exist after EOCD")?;
     }
 
-    let naive_physical_cd_offset = eocd.offset.saturating_sub(eocd.cd_size as usize);
-    let declared_physical_cd_offset = eocd.cd_offset as usize;
-    let physical_cd_offset = if !zip_has_signature_at(&data, naive_physical_cd_offset, CD_SIG)
-        && zip_has_signature_at(&data, declared_physical_cd_offset, CD_SIG)
-    {
-        declared_physical_cd_offset
-    } else {
-        naive_physical_cd_offset
-    };
-    let archive_offset = physical_cd_offset.saturating_sub(eocd.cd_offset as usize);
-    let cd_end = physical_cd_offset
-        .saturating_add(eocd.cd_size as usize)
-        .min(file_size);
+    let resolved = resolve_central_directory(&data, &eocd);
+    let physical_cd_offset = resolved.physical_offset;
+    let cd_end = resolved.end;
+    let archive_offset = resolved.archive_offset;
     let cd_id = "central_directory:0";
-    summary.set_item("declared_central_directory_offset", eocd.cd_offset as usize)?;
-    summary.set_item("declared_central_directory_size", eocd.cd_size as usize)?;
+    summary.set_item("declared_central_directory_offset", resolved.declared_offset)?;
+    summary.set_item("declared_central_directory_size", resolved.declared_size)?;
     summary.set_item("physical_central_directory_offset", physical_cd_offset)?;
-    summary.set_item("central_directory_offset_delta", physical_cd_offset as i64 - eocd.cd_offset as i64)?;
-    summary.set_item("central_directory_size_delta", cd_end.saturating_sub(physical_cd_offset) as i64 - eocd.cd_size as i64)?;
+    summary.set_item(
+        "central_directory_offset_delta",
+        physical_cd_offset as i64 - resolved.declared_offset as i64,
+    )?;
+    summary.set_item(
+        "central_directory_size_delta",
+        cd_end.saturating_sub(physical_cd_offset) as i64 - resolved.declared_size as i64,
+    )?;
     zip_graph_node(py, &nodes, cd_id, "central_directory", physical_cd_offset, cd_end, "candidate")?;
     zip_graph_edge(py, &edges, eocd_id, cd_id, "points_to", "central_directory", physical_cd_offset + 4 <= file_size && data.get(physical_cd_offset..physical_cd_offset + 4) == Some(CD_SIG), 1.0)?;
     if physical_cd_offset + 4 > file_size || data.get(physical_cd_offset..physical_cd_offset + 4) != Some(CD_SIG) {
@@ -614,7 +605,7 @@ pub(crate) fn inspect_zip_structure_graph(
             "eocd.cd_offset",
             "central_directory_signature",
             "missing",
-            physical_cd_offset as i64 - eocd.cd_offset as i64,
+            physical_cd_offset as i64 - resolved.declared_offset as i64,
             "high",
         )?;
     }
@@ -624,7 +615,7 @@ pub(crate) fn inspect_zip_structure_graph(
             py,
             &explanations,
             "sfx_prefix_adjustment",
-            physical_cd_offset == archive_offset.saturating_add(eocd.cd_offset as usize),
+            physical_cd_offset == archive_offset.saturating_add(resolved.declared_offset),
             "eocd.cd_offset",
             archive_offset as i64,
             "archive offset explains central directory pointer",
@@ -636,9 +627,12 @@ pub(crate) fn inspect_zip_structure_graph(
     result.set_item("truncated", all_entries.len() > checked_entries.len())?;
     summary.set_item("cd_entry_count", all_entries.len())?;
     summary.set_item("cd_entries_checked", checked_entries.len())?;
-    summary.set_item("entry_count_delta", all_entries.len() as i64 - eocd.total_entries as i64)?;
+    summary.set_item(
+        "entry_count_delta",
+        all_entries.len() as i64 - resolved.total_entries as i64,
+    )?;
     let mut eocd_entry_count_mismatch = 0usize;
-    if all_entries.len() as u16 != eocd.total_entries {
+    if all_entries.len() as u64 != resolved.total_entries {
         eocd_entry_count_mismatch = 1;
         zip_graph_violation(
             py,
@@ -647,14 +641,14 @@ pub(crate) fn inspect_zip_structure_graph(
             eocd_id,
             cd_id,
             "eocd.entry_count",
-            &eocd.total_entries.to_string(),
+            &resolved.total_entries.to_string(),
             &all_entries.len().to_string(),
-            all_entries.len() as i64 - eocd.total_entries as i64,
+            all_entries.len() as i64 - resolved.total_entries as i64,
             "medium",
         )?;
-        let declared_entries = eocd.total_entries.to_string();
+        let declared_entries = resolved.total_entries.to_string();
         let parsed_entries = all_entries.len().to_string();
-        let disk_entries = eocd.disk_entries.to_string();
+        let disk_entries = resolved.disk_entries.to_string();
         zip_graph_relation_violation(
             py,
             &relation_violations,
@@ -665,7 +659,7 @@ pub(crate) fn inspect_zip_structure_graph(
             "central_directory.entry_count",
             "counts_entries",
             0,
-            eocd.total_entries as u64,
+            resolved.total_entries,
             all_entries.len() as u64,
             "eocd.entry_count",
             0.95,
@@ -687,11 +681,11 @@ pub(crate) fn inspect_zip_structure_graph(
     let prefix_len = first_local_offset;
     summary.set_item("first_local_header_offset", first_local_offset)?;
     summary.set_item("sfx_prefix_len", prefix_len)?;
-    let declared_cd_offset = prefix_len.saturating_add(eocd.cd_offset as usize);
+    let declared_cd_offset = prefix_len.saturating_add(resolved.declared_offset);
     let declared_cd_walk = if declared_cd_offset + 4 <= file_size
         && data.get(declared_cd_offset..declared_cd_offset + 4) == Some(CD_SIG)
     {
-        Some(walk_central_directory_range(&data, declared_cd_offset, Some(eocd.offset)))
+        Some(walk_central_directory_range(&data, declared_cd_offset, Some(resolved.end)))
     } else {
         None
     };
@@ -702,10 +696,10 @@ pub(crate) fn inspect_zip_structure_graph(
     summary.set_item("parsed_central_directory_size", parsed_central_directory_size.unwrap_or(0))?;
     let mut eocd_cd_size_mismatch = 0usize;
     if let Some(parsed_size) = parsed_central_directory_size {
-        if parsed_size != eocd.cd_size as usize {
+        if parsed_size != resolved.declared_size {
             eocd_cd_size_mismatch = 1;
             let parsed_size_string = parsed_size.to_string();
-            let declared_size_string = eocd.cd_size.to_string();
+            let declared_size_string = resolved.declared_size.to_string();
             zip_graph_relation_violation(
                 py,
                 &relation_violations,
@@ -716,7 +710,7 @@ pub(crate) fn inspect_zip_structure_graph(
                 "central_directory.span",
                 "owns_span",
                 0,
-                eocd.cd_size as u64,
+                resolved.declared_size as u64,
                 parsed_size as u64,
                 "eocd.cd_size",
                 0.95,
@@ -1406,7 +1400,7 @@ pub(crate) fn inspect_zip_structure_graph(
             )?;
         }
     }
-    let cd_offset_delta = physical_cd_offset as i64 - eocd.cd_offset as i64;
+    let cd_offset_delta = physical_cd_offset as i64 - resolved.declared_offset as i64;
     if local_offset_violations >= 2
         || (local_offset_violations >= 1 && archive_offset != 0 && eocd_cd_size_mismatch == 0)
         || (cd_offset_delta < 0 && eocd_cd_size_mismatch == 0)

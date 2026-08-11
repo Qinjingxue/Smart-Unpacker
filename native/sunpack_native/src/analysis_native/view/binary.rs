@@ -107,15 +107,77 @@ impl AnalysisBinaryView {
         let central_directory_offset = u32_le(&eocd, 16) as u64;
         let comment_length = u16_le(&eocd, 20) as u64;
         let segment_end = eocd_offset + 22 + comment_length;
+
+        // APPNOTE 4.3.14/4.3.15: a ZIP64 archive places the Zip64 end of
+        // central directory record (56 bytes: 4-byte signature + 52 fixed
+        // bytes, size field 44) and its locator (20 bytes) between the
+        // central directory and the plain EOCD.  When present, the 8-byte
+        // fields in the Zip64 record are authoritative and the central
+        // directory ends where the Zip64 record starts, not at the EOCD.
+        let mut effective_disk_number = u64::from(disk_number);
+        let mut effective_central_directory_disk = u64::from(central_directory_disk);
+        let mut effective_disk_entries = u64::from(disk_entries);
+        let mut effective_total_entries = u64::from(total_entries);
+        let mut effective_central_directory_size = central_directory_size;
+        let mut effective_central_directory_offset = central_directory_offset;
+        let mut directory_end = eocd_offset;
+        let mut zip64_present = false;
+        let mut zip64_locator_present = false;
+        let mut zip64_eocd_offset = 0u64;
+        let mut zip64_declared_total_disks = 1u32;
+        if eocd_offset >= (ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE) as u64 {
+            let block_offset =
+                eocd_offset - (ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE) as u64;
+            if let Ok(block) = self.read_field_at_bytes(
+                block_offset,
+                ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE,
+                "zip.zip64_eocd_tail",
+                FieldLocation::Tail,
+            ) {
+                if block.len() == ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE
+                    && &block[..4] == ZIP64_EOCD
+                    && u64_le(&block, 4) == ZIP64_EOCD_RECORD_SIZE as u64 - 12
+                    && &block[ZIP64_EOCD_RECORD_SIZE..ZIP64_EOCD_RECORD_SIZE + 4] == ZIP64_LOCATOR
+                {
+                    zip64_present = true;
+                    zip64_locator_present = true;
+                    zip64_eocd_offset = block_offset;
+                    zip64_declared_total_disks = u32_le(&block, ZIP64_EOCD_RECORD_SIZE + 16);
+                    effective_disk_number = u64::from(u32_le(&block, 16));
+                    effective_central_directory_disk = u64::from(u32_le(&block, 20));
+                    effective_disk_entries = u64_le(&block, 24);
+                    effective_total_entries = u64_le(&block, 32);
+                    effective_central_directory_size = u64_le(&block, 40);
+                    effective_central_directory_offset = u64_le(&block, 48);
+                    directory_end = block_offset;
+                }
+            }
+        }
         result.set_item("segment_end", segment_end)?;
-        result.set_item("central_directory_size", central_directory_size)?;
-        result.set_item("total_entries", total_entries)?;
-        let is_multi_disk = disk_number != 0 || central_directory_disk != 0;
+        result.set_item("central_directory_size", effective_central_directory_size)?;
+        result.set_item("total_entries", effective_total_entries)?;
+        result.set_item("zip64", zip64_present)?;
+        result.set_item("zip64_locator_present", zip64_locator_present)?;
+        result.set_item("zip64_eocd_present", zip64_present)?;
+        result.set_item("zip64_eocd_offset", zip64_eocd_offset)?;
+        result.set_item(
+            "zip64_locator_offset",
+            if zip64_present { eocd_offset - 20 } else { 0u64 },
+        )?;
+        let is_multi_disk =
+            effective_disk_number != 0 || effective_central_directory_disk != 0;
         result.set_item("is_multi_disk", is_multi_disk)?;
-        result.set_item("disk_number", disk_number)?;
-        result.set_item("central_directory_disk", central_directory_disk)?;
-        result.set_item("disk_entries", disk_entries)?;
-        result.set_item("declared_total_disks", u32::from(disk_number) + 1)?;
+        result.set_item("disk_number", effective_disk_number)?;
+        result.set_item("central_directory_disk", effective_central_directory_disk)?;
+        result.set_item("disk_entries", effective_disk_entries)?;
+        result.set_item(
+            "declared_total_disks",
+            if zip64_present {
+                zip64_declared_total_disks
+            } else {
+                u32::from(disk_number) + 1
+            },
+        )?;
         if is_multi_disk {
             result.set_item("error", "zip_multi_disk")?;
             let evidence = PyList::empty(py);
@@ -123,27 +185,60 @@ impl AnalysisBinaryView {
             result.set_item("evidence", evidence)?;
             return Ok(result.unbind());
         }
-        if disk_entries != total_entries {
+        if effective_disk_entries != effective_total_entries {
             result.set_item("error", "entry_count_mismatch")?;
             return Ok(result.unbind());
         }
-        if eocd_offset < central_directory_size {
+        if directory_end < effective_central_directory_size {
             result.set_item("error", "central_directory_size_out_of_range")?;
             return Ok(result.unbind());
         }
-        let physical_central_offset = eocd_offset - central_directory_size;
-        if physical_central_offset < central_directory_offset {
+        let naive_physical_central_offset = directory_end - effective_central_directory_size;
+        let declared_physical_central_offset = effective_central_directory_offset;
+        // Prefer the physically verified declared offset when the naive
+        // back-computation misses the signature (same fallback as
+        // formats/zip/directory/inspect.rs).  Otherwise keep the naive
+        // position so SFX prefixes keep working via archive_offset.
+        let physical_central_offset = if naive_physical_central_offset != declared_physical_central_offset {
+            let naive_ok = self
+                .read_field_at_bytes(
+                    naive_physical_central_offset,
+                    4,
+                    "zip.central_directory.signature",
+                    FieldLocation::Tail,
+                )
+                .is_ok_and(|sig| sig.as_slice() == ZIP_CENTRAL);
+            let declared_ok = self
+                .read_field_at_bytes(
+                    declared_physical_central_offset,
+                    4,
+                    "zip.central_directory.signature",
+                    FieldLocation::Tail,
+                )
+                .is_ok_and(|sig| sig.as_slice() == ZIP_CENTRAL);
+            if !naive_ok && declared_ok {
+                declared_physical_central_offset
+            } else {
+                naive_physical_central_offset
+            }
+        } else {
+            naive_physical_central_offset
+        };
+        if physical_central_offset < effective_central_directory_offset {
             result.set_item("error", "archive_offset_underflow")?;
             return Ok(result.unbind());
         }
-        let archive_offset = physical_central_offset - central_directory_offset;
+        let archive_offset = physical_central_offset - effective_central_directory_offset;
         result.set_item("archive_offset", archive_offset)?;
         result.set_item("central_directory_offset", physical_central_offset)?;
-        if physical_central_offset + central_directory_size != eocd_offset {
+        if physical_central_offset
+            .checked_add(effective_central_directory_size)
+            .is_none_or(|end| end != directory_end)
+        {
             result.set_item("error", "central_directory_size_mismatch")?;
             return Ok(result.unbind());
         }
-        if total_entries == 0 && central_directory_size == 0 {
+        if effective_total_entries == 0 && effective_central_directory_size == 0 {
             result.set_item("plausible", true)?;
             result.set_item("central_directory_walk_ok", true)?;
             result.set_item("local_header_links_ok", true)?;
@@ -171,8 +266,8 @@ impl AnalysisBinaryView {
             .walk_zip_central_directory(
                 archive_offset,
                 physical_central_offset,
-                central_directory_size,
-                total_entries as usize,
+                effective_central_directory_size,
+                effective_total_entries as usize,
                 max_cd_entries_to_walk,
             )?;
         result.set_item("central_directory_entries_checked", entries_checked)?;
@@ -186,7 +281,7 @@ impl AnalysisBinaryView {
                 self.zip_content_integrity_warning(
                     archive_offset,
                     physical_central_offset,
-                    total_entries as usize,
+                    effective_total_entries as usize,
                     max_cd_entries_to_walk,
                 )?,
             )?;
