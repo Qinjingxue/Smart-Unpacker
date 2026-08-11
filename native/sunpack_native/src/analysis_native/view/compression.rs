@@ -1,22 +1,21 @@
-fn decompress_sample(
+fn decompress_sample<R: Read>(
     format: &str,
-    data: &[u8],
+    reader: R,
     max_output: usize,
 ) -> Result<Vec<u8>, &'static str> {
-    let cursor = Cursor::new(data);
     let mut output = Vec::new();
     let result = match format {
-        "gzip" => GzDecoder::new(cursor)
+        "gzip" => GzDecoder::new(reader)
             .take(max_output as u64)
             .read_to_end(&mut output),
-        "bzip2" => BzDecoder::new(cursor)
+        "bzip2" => BzDecoder::new(reader)
             .take(max_output as u64)
             .read_to_end(&mut output),
-        "xz" => XzDecoder::new(cursor)
+        "xz" => XzDecoder::new(reader)
             .take(max_output as u64)
             .read_to_end(&mut output),
         "zstd" => {
-            let decoder = ZstdDecoder::new(cursor).map_err(|_| "zstd_decoder_init_failed")?;
+            let decoder = ZstdDecoder::new(reader).map_err(|_| "zstd_decoder_init_failed")?;
             decoder.take(max_output as u64).read_to_end(&mut output)
         }
         _ => return Err("unsupported_compression_format"),

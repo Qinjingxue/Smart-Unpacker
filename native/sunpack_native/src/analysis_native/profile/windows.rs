@@ -158,9 +158,14 @@ fn window_profile(
         record_run(&mut ff, current_byte, current_start, current_len, offset);
     }
     let ngram_chunk = &data[..ngram_len];
-    for (name, magic) in MAGIC_PATTERNS {
-        for relative in find_all(ngram_chunk, magic) {
-            ngram.magic_hits.push((*name, offset + relative as u64));
+    let mut hits_by_pattern = vec![Vec::new(); MAGIC_PATTERNS.len()];
+    for matched in magic_matcher().find_overlapping_iter(ngram_chunk) {
+        hits_by_pattern[matched.pattern().as_usize()].push(matched.start());
+    }
+    // Preserve the public ordering of the previous pattern-by-pattern scan.
+    for (pattern_index, (name, _)) in MAGIC_PATTERNS.iter().enumerate() {
+        for relative in &hits_by_pattern[pattern_index] {
+            ngram.magic_hits.push((*name, offset + *relative as u64));
         }
     }
     ngram.sampled_bytes += ngram_len;
@@ -256,4 +261,29 @@ fn entropy(counts: &[usize; 256], size: usize) -> f64 {
         total -= probability * probability.log2();
     }
     total
+}
+
+#[cfg(test)]
+mod fuzzy_magic_tests {
+    use super::*;
+
+    #[test]
+    fn aho_magic_hits_preserve_pattern_major_legacy_order() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"PK\x03\x04noiseRar!\x1a\x07\x01\x00");
+        data.extend_from_slice(b"PK\x03\x04PK\x05\x06ustar");
+        let mut profile = NgramProfile::new();
+
+        window_profile(100, &data, &mut profile, data.len());
+
+        let mut expected = Vec::new();
+        for (name, magic) in MAGIC_PATTERNS {
+            for (relative, window) in data.windows(magic.len()).enumerate() {
+                if window == *magic {
+                    expected.push((*name, 100 + relative as u64));
+                }
+            }
+        }
+        assert_eq!(profile.magic_hits, expected);
+    }
 }

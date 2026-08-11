@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
+from benchmarks.harness import AdaptivePressureGate, BenchmarkWorkspace, render_report, report_from_payload
 
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():
@@ -37,6 +37,7 @@ GENERATED_FORMATS = (
     "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst",
 )
 MIN_SCANNABLE_ARCHIVE_BYTES = 1024 * 1024
+DEFAULT_CACHE_ROOT = ROOT / "build" / "benchmark-cache" / "extraction-format-matrix"
 
 
 def timed(command: list[str], cwd: Path) -> tuple[float, int, str]:
@@ -275,6 +276,73 @@ def create_corpus(
     return corpus, skipped
 
 
+def _cache_key(small_files: int, large_files: int, large_file_mib: int) -> str:
+    tool_fingerprints = []
+    for tool in (SEVEN_ZIP, RAR, ZSTD):
+        stat = tool.stat()
+        tool_fingerprints.append((tool.name, stat.st_size, stat.st_mtime_ns))
+    payload = {
+        "schema": 1,
+        "small_files": small_files,
+        "large_files": large_files,
+        "large_file_mib": large_file_mib,
+        "tools": tool_fingerprints,
+        "formats": GENERATED_FORMATS,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+
+
+def _cached_corpus(
+    destination: Path,
+    *,
+    cache_root: Path,
+    small_files: int,
+    large_files: int,
+    large_file_mib: int,
+    rebuild: bool,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, Any]]:
+    key = _cache_key(small_files, large_files, large_file_mib)
+    entry = cache_root.resolve() / key
+    manifest_path = entry / "cache-manifest.json"
+    hit = manifest_path.is_file() and not rebuild
+    if not hit:
+        staging = cache_root.resolve() / f".{key}-{os.getpid()}"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=False)
+        corpus, skipped = create_corpus(staging / "corpus", {}, small_files, large_files, large_file_mib)
+        manifest = {
+            "schema_version": 1,
+            "key": key,
+            "cases": {
+                name: {**item, "path": str(Path(item["path"]).relative_to(staging))}
+                for name, item in corpus.items()
+            },
+            "skipped": skipped,
+        }
+        (staging / "cache-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        cache_root.mkdir(parents=True, exist_ok=True)
+        if entry.exists():
+            shutil.rmtree(entry)
+        shutil.move(str(staging), str(entry))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    shutil.copytree(entry / "corpus", destination, dirs_exist_ok=True)
+    corpus = {
+        name: {**item, "path": destination / Path(item["path"]).relative_to("corpus")}
+        for name, item in manifest["cases"].items()
+    }
+    return corpus, dict(manifest["skipped"]), {"enabled": True, "hit": hit, "key": key, "path": str(entry)}
+
+
+def _add_external_corpus(root: Path, corpus: dict[str, dict[str, Any]], extra: dict[str, Path]) -> None:
+    for name, source in extra.items():
+        key = f"external:{name}"
+        case_root = root / "inputs" / key.replace(":", "-")
+        case_root.mkdir(parents=True, exist_ok=True)
+        destination = case_root / source.name
+        shutil.copy2(source, destination)
+        corpus[key] = {"workload": "external", "format": name, "path": destination, "expected_payload": None}
+
+
 def _median(values: list[float | None]) -> float | None:
     successful = [value for value in values if value is not None]
     return statistics.median(successful) if successful else None
@@ -362,6 +430,10 @@ def benchmark(
     warmups: int,
     compare_root: Path | None,
     case_cooldown_seconds: float,
+    pressure_gate: AdaptivePressureGate,
+    collect_phase_profile: bool,
+    phase_profile_runs: int,
+    phase_profile_warmups: int,
 ) -> list[dict[str, Any]]:
     current_detection = _detection_for_root(ROOT, archives, runs, warmups)
     comparison_detection: dict[str, dict[str, Any]] = {}
@@ -385,10 +457,12 @@ def benchmark(
         raw_file_counts: list[int] = []
         full_file_counts: list[int] = []
         full_errors: list[str] = []
+        pressure_waits: list[dict[str, Any]] = []
         expected_payload = item.get("expected_payload")
         for run in range(-warmups, runs):
             labels = ("raw", "sunpack") if run % 2 == 0 else ("sunpack", "raw")
             for label in labels:
+                pressure_waits.append({"label": label, "run": run, **pressure_gate.wait().to_dict()})
                 output = work / f"out-{name.replace(':', '-')}-{label}-{run}"
                 shutil.rmtree(output, ignore_errors=True)
                 output.mkdir()
@@ -417,6 +491,29 @@ def benchmark(
                 if case_cooldown_seconds:
                     time.sleep(case_cooldown_seconds)
 
+        phase_profile: dict[str, Any] | None = None
+        if collect_phase_profile:
+            pressure_waits.append({"label": "phase_profile", "run": 0, **pressure_gate.wait().to_dict()})
+            profile_output = work / f"out-{name.replace(':', '-')}-phase-profile"
+            shutil.rmtree(profile_output, ignore_errors=True)
+            command = [
+                str(PYTHON), "-m", "benchmarks.scenarios.extraction_large_archive",
+                str(archive), str(profile_output), "--warmup", str(phase_profile_warmups),
+                "--repeat", str(phase_profile_runs),
+                "--recursive-rounds", "1", "--keep-output",
+            ]
+            profiled = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, encoding="utf-8", errors="replace")
+            marker = "PROFILE_JSON="
+            marker_at = profiled.stdout.find(marker)
+            if profiled.returncode == 0 and marker_at >= 0:
+                phase_profile = json.loads(profiled.stdout[marker_at + len(marker):])["summary"]
+            else:
+                phase_profile = {
+                    "error": f"profile worker exited {profiled.returncode}",
+                    "stderr": profiled.stderr[-2000:],
+                }
+            shutil.rmtree(profile_output, ignore_errors=True)
+
         raw_m = _median(raw)
         full_m = _median(full)
         current = current_detection[name]
@@ -443,6 +540,8 @@ def benchmark(
             "seven_zip_file_counts": raw_file_counts,
             "sunpack_file_counts": full_file_counts,
             "sunpack_stderr": full_errors,
+            "pressure_waits": pressure_waits,
+            "phase_profile": phase_profile,
             "end_to_end_includes_detection": True,
             "detection": {
                 "current": current,
@@ -519,6 +618,27 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _phase_aggregates(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_format: dict[str, dict[str, list[float]]] = {}
+    for row in rows:
+        profile = row.get("phase_profile") or {}
+        medians = profile.get("timing_medians_seconds") or {}
+        format_rows = by_format.setdefault(row["format"], {})
+        for label, value in medians.items():
+            format_rows.setdefault(label, []).append(float(value))
+    rendered: dict[str, Any] = {}
+    for archive_format, phases in sorted(by_format.items()):
+        phase_medians = {label: statistics.median(values) for label, values in phases.items()}
+        rendered[archive_format] = {
+            "phase_medians_seconds": phase_medians,
+            "top_phases": [
+                {"phase": label, "median_seconds": value}
+                for label, value in sorted(phase_medians.items(), key=lambda item: item[1], reverse=True)[:15]
+            ],
+        }
+    return rendered
+
+
 def _git_revision(root: Path) -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -545,14 +665,25 @@ def main() -> int:
     parser.add_argument("--large-files", type=int, default=2)
     parser.add_argument("--large-file-mib", type=int, default=32)
     parser.add_argument("--sample", action="append", default=[], metavar="EXT=PATH")
+    parser.add_argument("--format", action="append", choices=GENERATED_FORMATS, dest="formats")
     parser.add_argument("--compare-root", type=Path)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--results-root", type=Path, help="Durable benchmark result root.")
     parser.add_argument("--keep-workdir", action="store_true", help="Keep generated archives and extraction outputs.")
     parser.add_argument(
-        "--case-cooldown-seconds", type=float, default=0.25,
-        help="Pause between serial extractor invocations to reduce sustained system pressure.",
+        "--case-cooldown-seconds", type=float, default=0.0,
+        help="Optional fixed pause after the adaptive pressure gate.",
     )
+    parser.add_argument("--max-cpu-percent", type=float, default=85.0)
+    parser.add_argument("--min-available-memory-percent", type=float, default=15.0)
+    parser.add_argument("--pressure-sample-seconds", type=float, default=0.1)
+    parser.add_argument("--pressure-max-wait-seconds", type=float, default=30.0)
+    parser.add_argument("--no-phase-profile", action="store_true")
+    parser.add_argument("--phase-profile-runs", type=int, default=1)
+    parser.add_argument("--phase-profile-warmups", type=int, default=0)
+    parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
+    parser.add_argument("--no-corpus-cache", action="store_true")
+    parser.add_argument("--rebuild-corpus-cache", action="store_true")
     parser.add_argument("--detection-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-archive", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -576,13 +707,26 @@ def main() -> int:
         keep_workdir=args.keep_workdir,
     ) as workspace:
         work = workspace.work
-        corpus, skipped = create_corpus(
-            workspace.corpus,
-            extra,
-            max(1, args.small_files),
-            max(1, args.large_files),
-            max(1, args.large_file_mib),
-        )
+        if args.no_corpus_cache:
+            corpus, skipped = create_corpus(
+                workspace.corpus, extra, max(1, args.small_files), max(1, args.large_files), max(1, args.large_file_mib),
+            )
+            cache_info = {"enabled": False, "hit": False}
+        else:
+            corpus, skipped, cache_info = _cached_corpus(
+                workspace.corpus,
+                cache_root=args.cache_root,
+                small_files=max(1, args.small_files),
+                large_files=max(1, args.large_files),
+                large_file_mib=max(1, args.large_file_mib),
+                rebuild=args.rebuild_corpus_cache,
+            )
+            _add_external_corpus(workspace.corpus, corpus, extra)
+            for name in extra:
+                skipped.pop(name, None)
+        if args.formats:
+            selected_formats = set(args.formats)
+            corpus = {name: item for name, item in corpus.items() if item["format"] in selected_formats}
         undersized = {
             name: Path(item["path"]).stat().st_size
             for name, item in corpus.items()
@@ -592,6 +736,12 @@ def main() -> int:
         if undersized:
             details = ", ".join(f"{name}={size}B" for name, size in sorted(undersized.items()))
             raise RuntimeError(f"generated scanner inputs are below the 1 MiB floor: {details}")
+        pressure_gate = AdaptivePressureGate(
+            max_cpu_percent=args.max_cpu_percent,
+            min_available_memory_percent=args.min_available_memory_percent,
+            sample_seconds=args.pressure_sample_seconds,
+            max_wait_seconds=args.pressure_max_wait_seconds,
+        )
         rows = benchmark(
             corpus,
             work,
@@ -599,6 +749,10 @@ def main() -> int:
             max(0, args.warmups),
             compare_root,
             max(0.0, args.case_cooldown_seconds),
+            pressure_gate,
+            not args.no_phase_profile,
+            max(1, args.phase_profile_runs),
+            max(0, args.phase_profile_warmups),
         )
         report = {
             "schema_version": 2,
@@ -619,6 +773,9 @@ def main() -> int:
             },
             "results": rows,
             "summary": _summary(rows),
+            "phase_aggregates": _phase_aggregates(rows),
+            "pressure_gate": pressure_gate.summary(),
+            "corpus_cache": cache_info,
             "skipped": skipped,
             "artifacts": {"result_dir": str(workspace.result_dir)},
         }

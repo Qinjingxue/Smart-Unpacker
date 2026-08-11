@@ -22,6 +22,15 @@ const MAGIC_PATTERNS: &[(&str, &[u8])] = &[
     ("tar_ustar", TAR_USTAR),
 ];
 
+static MAGIC_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+
+fn magic_matcher() -> &'static AhoCorasick {
+    MAGIC_MATCHER.get_or_init(|| {
+        AhoCorasick::new(MAGIC_PATTERNS.iter().map(|(_, magic)| *magic))
+            .expect("fuzzy profile signatures are valid")
+    })
+}
+
 pub(crate) struct BinaryProfileConfig {
     pub(crate) window_bytes: usize,
     pub(crate) max_windows: usize,

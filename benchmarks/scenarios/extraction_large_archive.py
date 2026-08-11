@@ -16,12 +16,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sunpack.coordinator.engine import PipelineEngine
 import sunpack.analysis.engine as analysis_engine_module
+import sunpack.analysis.fuzzy_pipeline.modules.binary_profile as binary_profile_module
+import sunpack.analysis.structure_pipeline.modules.compression_streams as compression_streams_module
 import sunpack.analysis.structure_pipeline.modules.rar as rar_analysis_module
 import sunpack.coordinator.scan_session as scan_session_module
 from sunpack.analysis.config import enabled_fuzzy_module_configs
 from sunpack.analysis.fuzzy_pipeline.registry import get_fuzzy_analysis_module_registry
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.filesystem.directory_scanner import DirectoryScanner
+from sunpack.analysis.view import SharedBinaryView
 from sunpack.support.output_inventory import OutputInventory
 from tests.helpers.performance_config import archive_pressure_config
 from benchmarks.harness import render_report, report_from_payload
@@ -114,6 +117,18 @@ class RequestRuntimeProfiler:
             "probe_rar_view",
             "planning_rar_native_probe",
         )
+        self._install_global_dynamic_callable(
+            compression_streams_module,
+            "probe_compression_stream_view",
+            lambda _view, options: f"planning_stream_probe_{getattr(options, 'format', 'unknown')}",
+        )
+        self._install_global_dynamic_method(
+            SharedBinaryView,
+            "probe_compressed_tar",
+            lambda _view, **kwargs: f"planning_compressed_tar_probe_{kwargs.get('format', 'unknown')}",
+        )
+        self._install_global_method(SharedBinaryView, "fuzzy_binary_profile", "planning_fuzzy_native_profile")
+        self._install_global_callable(binary_profile_module, "_complete_profile", "planning_fuzzy_complete_profile")
 
     def restore(self) -> None:
         if self._factory_restore is not None:
@@ -159,6 +174,29 @@ class RequestRuntimeProfiler:
 
         def measured(*args: Any, **kwargs: Any):
             return self._measure_active(label, original, *args, **kwargs)
+
+        setattr(owner, name, measured)
+
+    def _install_global_dynamic_callable(self, owner: Any, name: str, label: Callable[..., str]) -> None:
+        key = (id(owner), name)
+        if key in self._global_installed:
+            return
+        self._global_installed.add(key)
+        original = getattr(owner, name)
+        self._global_restores.append((owner, name, original))
+
+        def measured(*args: Any, **kwargs: Any):
+            return self._measure_active(label(*args, **kwargs), original, *args, **kwargs)
+
+        setattr(owner, name, measured)
+
+    def _install_global_dynamic_method(self, owner: type, name: str, label: Callable[..., str]) -> None:
+        descriptor = owner.__dict__[name]
+        original = getattr(owner, name)
+        self._global_restores.append((owner, name, descriptor))
+
+        def measured(instance: Any, *args: Any, **kwargs: Any):
+            return self._measure_active(label(instance, *args, **kwargs), original, instance, *args, **kwargs)
 
         setattr(owner, name, measured)
 
@@ -283,6 +321,11 @@ class RequestRuntimeProfiler:
         _wrap(sevenzip, "run_extract", timings, "sevenzip_worker")
         _wrap(sevenzip, "_run_persistent_worker", timings, "worker_persistent_roundtrip")
         _wrap(sevenzip, "_read_persistent_worker_result", timings, "worker_read_protocol")
+        _wrap(sevenzip, "_json_line", timings, "worker_protocol_json_decode")
+        _wrap(sevenzip, "_drain_stdout", timings, "worker_protocol_drain_stdout")
+        _wrap(sevenzip, "_drain_stderr", timings, "worker_protocol_drain_stderr")
+        _wrap(sevenzip, "_record_persistent_progress", timings, "worker_protocol_progress_sample")
+        _wrap(sevenzip, "_emit_progress", timings, "worker_protocol_emit_progress")
         _wrap(batch.verifier, "verify", timings, "verify_total", phase_timer=phase)
 
 
@@ -344,6 +387,13 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
         "planning_worker_count",
         "planning_plan_group",
     ))
+    worker_protocol_children = sum(total(label) for label in (
+        "worker_protocol_json_decode",
+        "worker_protocol_drain_stdout",
+        "worker_protocol_drain_stderr",
+        "worker_protocol_progress_sample",
+        "worker_protocol_emit_progress",
+    ))
     return {
         "batch_overhead_excluding_extract": round(total("batch_execute") - total("extract_total"), 6),
         "batch_parent_python_residual": round(total("batch_execute") - batch_direct_children, 6),
@@ -360,6 +410,7 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
             total("planning_analyzer_analyze") - total("planning_engine_analyze_path"),
             6,
         ),
+        "worker_wait_residual": round(total("worker_read_protocol") - worker_protocol_children, 6),
     }
 
 

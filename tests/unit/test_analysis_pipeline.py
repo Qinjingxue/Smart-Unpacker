@@ -4,6 +4,7 @@ import zipfile
 import bz2
 import gzip
 import lzma
+import random
 import zstandard
 from binascii import crc32
 from io import BytesIO
@@ -484,6 +485,27 @@ def test_analysis_scheduler_detects_compressed_tar_variants(tmp_path):
         assert evidence.status == "extractable"
         assert evidence.confidence >= 0.93
         assert evidence.details["inner_tar_verified"] is True
+
+
+def test_bzip2_compressed_tar_stream_probe_preserves_input_budget_failure(tmp_path):
+    payload = random.Random(20260811).randbytes(1024 * 1024)
+    buffer = BytesIO()
+    info = tarfile.TarInfo("payload.bin")
+    info.size = len(payload)
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        archive.addfile(info, BytesIO(payload))
+    compressed = bz2.compress(buffer.getvalue())
+    path = tmp_path / "payload.tar.bz2"
+    path.write_bytes(compressed)
+    view = SharedBinaryView(str(path))
+
+    incomplete = view.probe_compressed_tar(format="bzip2", max_probe_bytes=len(compressed) // 4)
+    complete = view.probe_compressed_tar(format="bzip2", max_probe_bytes=len(compressed))
+
+    assert incomplete["tar_plausible"] is False
+    assert incomplete["tar_probe_error"] == "decompression_probe_failed"
+    assert complete["tar_plausible"] is True
+    assert complete["inner_tar_verified"] is True
 
 
 def test_tar_zst_requires_real_zstd_inner_tar(tmp_path):

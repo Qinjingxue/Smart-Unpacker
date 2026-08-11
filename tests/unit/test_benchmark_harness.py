@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from benchmarks.cli import main
-from benchmarks.harness import BenchmarkReport, BenchmarkWorkspace, ProcessSampler, measure, render_report
+from benchmarks.harness import AdaptivePressureGate, BenchmarkReport, BenchmarkWorkspace, ProcessSampler, measure, render_report
+from benchmarks.scenarios.extraction_format_matrix import _cached_corpus, _phase_aggregates
 
 
 def test_measure_validates_dimensions_and_returns_common_clock_fields():
@@ -90,3 +91,56 @@ def test_benchmark_workspace_can_explicitly_keep_workdir(tmp_path):
     manifest = json.loads((result_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["temporary_workdir"] == str(temporary_root)
     assert manifest["temporary_workdir_retained"] is True
+
+
+def test_adaptive_pressure_gate_waits_until_host_is_healthy(monkeypatch):
+    cpu = iter([95.0, 20.0])
+    memory = type("Memory", (), {"available": 80, "total": 100})()
+    monkeypatch.setattr("benchmarks.harness.pressure.psutil.cpu_percent", lambda interval: next(cpu))
+    monkeypatch.setattr("benchmarks.harness.pressure.psutil.virtual_memory", lambda: memory)
+
+    gate = AdaptivePressureGate(max_cpu_percent=80, sample_seconds=0.01, max_wait_seconds=1)
+    result = gate.wait()
+
+    assert result.samples == 2
+    assert result.reason == "ready"
+    assert gate.summary()["launches"] == 1
+
+
+def test_phase_aggregates_report_slowest_phases_by_format():
+    rows = [{
+        "format": "zip",
+        "phase_profile": {"timing_medians_seconds": {"extract_total": 2.0, "output_scan": 0.5}},
+    }]
+
+    aggregate = _phase_aggregates(rows)
+
+    assert aggregate["zip"]["top_phases"][0] == {"phase": "extract_total", "median_seconds": 2.0}
+
+
+def test_format_matrix_corpus_cache_reuses_generated_archives(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_create(root, extra, small_files, large_files, large_file_mib):
+        calls.append(root)
+        archive = root / "inputs" / "many_small-zip" / "many_small.zip"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b"cached archive")
+        return ({"many_small:zip": {
+            "workload": "many_small", "format": "zip", "path": archive, "expected_payload": [],
+        }}, {})
+
+    monkeypatch.setattr("benchmarks.scenarios.extraction_format_matrix.create_corpus", fake_create)
+    first, _, first_info = _cached_corpus(
+        tmp_path / "run-1" / "corpus", cache_root=tmp_path / "cache",
+        small_files=1, large_files=1, large_file_mib=1, rebuild=False,
+    )
+    second, _, second_info = _cached_corpus(
+        tmp_path / "run-2" / "corpus", cache_root=tmp_path / "cache",
+        small_files=1, large_files=1, large_file_mib=1, rebuild=False,
+    )
+
+    assert len(calls) == 1
+    assert first_info["hit"] is False and second_info["hit"] is True
+    assert Path(first["many_small:zip"]["path"]).read_bytes() == b"cached archive"
+    assert Path(second["many_small:zip"]["path"]).read_bytes() == b"cached archive"

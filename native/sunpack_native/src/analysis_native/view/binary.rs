@@ -433,9 +433,9 @@ impl AnalysisBinaryView {
         {
             return Ok(stream.unbind());
         }
-        let read_size = (self.reader.len() as usize).min(max_probe_bytes);
-        let data = self.read_at_bytes(0, read_size)?;
-        match decompress_sample(format, &data, TAR_BLOCK_SIZE * 2) {
+        let input_budget = self.reader.len().min(max_probe_bytes as u64);
+        let source = self.reader.stream_cursor().take(input_budget);
+        match decompress_sample(format, source, TAR_BLOCK_SIZE * 2) {
             Ok(sample) => {
                 if sample.len() < TAR_BLOCK_SIZE {
                     stream.set_item("tar_probe_error", "inner_sample_too_small")?;

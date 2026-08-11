@@ -39,10 +39,19 @@ bzip2, xz, zstd and the conventional compressed-TAR aliases. It uses the bundled
 binaries under `tools/`. Each archive is placed in an isolated scanner input directory,
 then both SunPack's complete detection/extraction flow and raw 7-Zip are timed. Only cases
 whose extracted payload hashes pass on both sides contribute to the comparison ratio.
-The matrix starts extractor commands strictly one at a time and adds a short cooldown
-between invocations, while leaving SunPack's internal scheduler at its program-controlled
+The matrix starts extractor commands strictly one at a time, while leaving SunPack's internal scheduler at its program-controlled
 default and using unlimited recursive extraction. Generated scanner entry files are
 rejected when they fall below the project's 1 MiB recognition floor.
+
+The format matrix now uses an adaptive host-pressure gate before every extractor launch.
+Tune it with `--max-cpu-percent`, `--min-available-memory-percent`, and
+`--pressure-max-wait-seconds`; `--case-cooldown-seconds` is an optional extra fixed delay.
+Generated corpora are content-addressed under `build/benchmark-cache/` and can be refreshed
+with `--rebuild-corpus-cache` or disabled with `--no-corpus-cache`. Use repeated `--format`
+options for a focused run. One diagnostic extraction per case reuses the large-archive
+runtime profiler and writes phase medians and per-format aggregates into the report; use
+`--no-phase-profile` when only end-to-end timing is needed. For stable internal medians,
+set `--phase-profile-warmups 1 --phase-profile-runs 3`.
 
 The reusable harness in `benchmarks/harness` defines the common wall/CPU clocks,
 process-tree memory sampling, real-archive workspace lifecycle, and versioned JSON report

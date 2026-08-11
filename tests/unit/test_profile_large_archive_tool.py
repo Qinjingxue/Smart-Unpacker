@@ -5,6 +5,7 @@ import pytest
 
 from benchmarks.scenarios.extraction_large_archive import (
     RequestRuntimeProfiler,
+    _derived_timing,
     _cleanup_generated_output,
     _generated_output_path,
     _run_profile_once,
@@ -69,3 +70,14 @@ def test_profile_run_cleans_output_when_pipeline_fails(tmp_path: Path):
         )
 
     assert not output.exists()
+
+
+def test_worker_wait_residual_excludes_protocol_processing():
+    derived = _derived_timing({
+        "worker_read_protocol": [1.0],
+        "worker_protocol_json_decode": [0.1],
+        "worker_protocol_drain_stderr": [0.02],
+        "worker_protocol_emit_progress": [0.03],
+    })
+
+    assert derived["worker_wait_residual"] == pytest.approx(0.85)
