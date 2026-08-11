@@ -16,6 +16,7 @@ from sunpack.detection.pipeline.rules.scoring._fuzzy import (
 class SevenZipStructureIdentityScoreRule(RuleBase):
     required_facts = {"7z.structure"}
     produced_facts = {"file.detected_ext", "file.magic_matched", "file.probe_detected_archive", "file.probe_offset"}
+    score_group = "archive_format"
     config_schema: dict[str, dict[str, Any]] = {}
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:

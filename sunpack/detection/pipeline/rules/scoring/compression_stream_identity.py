@@ -25,6 +25,7 @@ _FORMAT_META = {
 class CompressionStreamIdentityScoreRule(RuleBase):
     required_facts = {"compression.stream_structure"}
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
+    score_group = "archive_format"
     config_schema: dict[str, dict[str, Any]] = {}
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:

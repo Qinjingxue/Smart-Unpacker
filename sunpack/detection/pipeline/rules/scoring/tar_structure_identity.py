@@ -11,16 +11,27 @@ from sunpack.detection.pipeline.rules.scoring._fuzzy import add_component, fuzzy
 class TarStructureIdentityScoreRule(RuleBase):
     required_facts = {"tar.header_structure"}
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
+    score_group = "archive_format"
     config_schema: dict[str, dict[str, Any]] = {}
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:
         del config
         structure = facts.get("tar.header_structure") or {}
         naming, label = naming_prior(facts, formats={"tar"}, extensions={".tar"})
+        stored_checksum = int(structure.get("stored_checksum") or 0)
+        checksum_matches = (
+            stored_checksum > 0
+            and stored_checksum == int(structure.get("computed_checksum") or -1)
+        )
+        # A non-empty TAR name field is not format-specific: for an arbitrary
+        # binary it merely means that some byte in the first 100 bytes is not
+        # zero.  Require a fixed-layout TAR anchor before weaker fields may
+        # contribute supporting evidence.  This still admits checksum-damaged
+        # ustar headers and V7/GNU headers whose numeric layout survives.
         has_binary_anchor = bool(
             structure.get("ustar_magic")
-            or structure.get("fuzzy_name_nonempty")
             or structure.get("fuzzy_numeric_fields_valid")
+            or checksum_matches
         )
         if not has_binary_anchor:
             return RuleEffect.pass_()
@@ -40,8 +51,7 @@ class TarStructureIdentityScoreRule(RuleBase):
             components,
             "header-checksum",
             1,
-            int(structure.get("stored_checksum") or 0) > 0
-            and int(structure.get("stored_checksum") or 0) == int(structure.get("computed_checksum") or -1),
+            checksum_matches,
         )
         score += add_component(components, label, naming, naming > 0)
         score += add_component(

@@ -133,8 +133,25 @@ class RuleManager:
         total_score: int,
         remaining_rules: List[PreparedRule],
     ) -> bool:
+        # A remaining mutually-exclusive hypothesis may win even after the
+        # extraction threshold is fixed.  It must still run so that format
+        # facts do not depend on configuration order.
+        if any(getattr(rule.instance, "score_group", None) for rule in remaining_rules):
+            return False
         threshold = self.decision_policy.archive_threshold()
         return total_score >= threshold and total_score + self._remaining_minimum_score(remaining_rules) >= threshold
+
+    @staticmethod
+    def _fact_snapshot(bag: FactBag, keys: set[str]) -> dict[str, tuple[bool, Any]]:
+        return {key: (bag.has(key), bag.get(key)) for key in keys}
+
+    @staticmethod
+    def _restore_fact_snapshot(bag: FactBag, snapshot: dict[str, tuple[bool, Any]]):
+        for key, (present, value) in snapshot.items():
+            if present:
+                bag.set(key, value)
+            else:
+                bag.unset(key)
 
     @staticmethod
     def _routing_values(bag: FactBag) -> tuple[set[str], set[str]]:
@@ -256,11 +273,19 @@ class RuleManager:
             return decisions
 
         scoring_rules = self._prepare_rules("scoring")
+        group_fact_keys: dict[str, set[str]] = {}
+        for rule in scoring_rules:
+            score_group = str(getattr(rule.instance, "score_group", None) or "")
+            if score_group:
+                group_fact_keys.setdefault(score_group, set()).update(rule.instance.produced_facts)
         scoring_state: dict[FactBag, dict[str, Any]] = {
             bag: {
-                "total_score": 0,
-                "matched_rules": [],
-                "score_breakdown": [],
+                "additive_entries": [],
+                "group_entries": {},
+                "group_baselines": {
+                    group: self._fact_snapshot(bag, keys)
+                    for group, keys in group_fact_keys.items()
+                },
             }
             for bag in surviving
         }
@@ -274,18 +299,36 @@ class RuleManager:
             next_active_bags: List[FactBag] = []
             for bag in active_bags:
                 state = scoring_state[bag]
+                score_group = str(getattr(rule.instance, "score_group", None) or "")
+                if score_group:
+                    self._restore_fact_snapshot(bag, state["group_baselines"][score_group])
                 effect = rule.instance.evaluate(bag, rule.config)
                 if effect.decision == "score":
-                    state["total_score"] += effect.score
-                    state["score_breakdown"].append({
+                    entry = {
+                        "index": index,
                         "rule": rule.name,
                         "score": effect.score,
                         "reason": effect.reason,
-                    })
-                    if effect.score != 0:
-                        state["matched_rules"].append(rule.name)
+                    }
+                    if score_group:
+                        entry["facts"] = self._fact_snapshot(bag, rule.instance.produced_facts)
+                        current = state["group_entries"].get(score_group)
+                        candidate_rank = (int(effect.score), str(rule.name))
+                        current_rank = (
+                            (int(current["score"]), str(current["rule"]))
+                            if current is not None
+                            else (0, "")
+                        )
+                        if effect.score > 0 and candidate_rank > current_rank:
+                            state["group_entries"][score_group] = entry
+                    else:
+                        state["additive_entries"].append(entry)
+                if score_group:
+                    self._restore_fact_snapshot(bag, state["group_baselines"][score_group])
+                current_entries = list(state["additive_entries"]) + list(state["group_entries"].values())
+                total_score = sum(int(entry["score"]) for entry in current_entries)
                 if not self._scoring_decision_fixed(
-                    state["total_score"],
+                    total_score,
                     remaining_rules,
                 ):
                     next_active_bags.append(bag)
@@ -293,9 +336,28 @@ class RuleManager:
 
         for bag in surviving:
             state = scoring_state[bag]
-            total_score = state["total_score"]
-            matched_rules: List[str] = list(state["matched_rules"])
-            score_breakdown: list[dict[str, Any]] = list(state["score_breakdown"])
+            selected_entries = list(state["additive_entries"]) + list(state["group_entries"].values())
+            selected_entries.sort(key=lambda entry: int(entry["index"]))
+            for entry in selected_entries:
+                for key, (present, value) in entry.get("facts", {}).items():
+                    if present:
+                        bag.set(key, value)
+                    else:
+                        bag.unset(key)
+            total_score = sum(int(entry["score"]) for entry in selected_entries)
+            matched_rules = [
+                str(entry["rule"])
+                for entry in selected_entries
+                if int(entry["score"]) != 0
+            ]
+            score_breakdown = [
+                {
+                    "rule": entry["rule"],
+                    "score": entry["score"],
+                    "reason": entry["reason"],
+                }
+                for entry in selected_entries
+            ]
             decisions[bag] = self.finalize_scored_evidence(
                 bag,
                 total_score,

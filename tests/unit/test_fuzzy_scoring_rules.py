@@ -87,6 +87,45 @@ def test_tar_checksum_damage_keeps_ustar_and_field_layout_evidence():
     assert effect.score >= 6
 
 
+def test_tar_nonempty_prefix_without_fixed_layout_anchor_does_not_score():
+    bag = _bag("ordinary.bin")
+    bag.set("tar.header_structure", {
+        "ustar_magic": False,
+        "fuzzy_name_nonempty": True,
+        "fuzzy_numeric_fields_valid": False,
+        "fuzzy_typeflag_valid": True,
+        "fuzzy_payload_in_range": True,
+        "stored_checksum": 0,
+        "computed_checksum": 15970,
+        "error": "invalid_checksum_field",
+    })
+
+    effect = TarStructureIdentityScoreRule().evaluate(bag, {})
+
+    assert effect.decision == "pass"
+    assert bag.get("file.detected_ext") is None
+
+
+def test_embedded_zip_with_verified_directory_and_local_links_reaches_threshold():
+    bag = _bag("carrier.bin")
+    bag.set("zip.local_header", {})
+    bag.set("zip.eocd_structure", {
+        "eocd_candidate_found": True,
+        "eocd_candidate_declared_entry_count_present": True,
+        "eocd_candidate_declared_cd_offset_present": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "local_header_links_ok": True,
+        "archive_offset": 4096,
+    })
+
+    effect = ZipStructureIdentityScoreRule().evaluate(bag, {})
+
+    assert effect.score == 6
+    assert bag.get("file.detected_ext") == ".zip"
+    assert bag.get("file.probe_offset") == 4096
+
+
 def test_truncated_gzip_header_can_score_without_complete_decode():
     bag = _bag("damaged.gz")
     bag.set("compression.stream_structure", {

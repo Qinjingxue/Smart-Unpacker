@@ -7,6 +7,10 @@ class RuleBase:
     required_facts: set[str] = set()
     fact_requirements: list[FactRequirement] = []
     produced_facts: set[str] = set()
+    # Scoring rules in the same group represent mutually exclusive
+    # hypotheses.  The manager selects the strongest hypothesis instead of
+    # adding their scores or allowing evaluation order to choose its facts.
+    score_group: str | None = None
     config_schema: Dict[str, Dict[str, Any]] = {}
     # Routing metadata is only an execution hint.  A match may move a strict
     # identity precheck earlier, but never changes the rule's decision.

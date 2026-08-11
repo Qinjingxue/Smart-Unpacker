@@ -24,6 +24,7 @@ class ZipStructureIdentityScoreRule(RuleBase):
         FactRequirement("zip.eocd_structure", MagicBytesStartsWith(ZIP_START_MAGICS)),
     ]
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
+    score_group = "archive_format"
     config_schema: dict[str, dict[str, Any]] = {}
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:
@@ -48,9 +49,21 @@ class ZipStructureIdentityScoreRule(RuleBase):
         score += add_component(components, "EOCD-fields", 1, eocd_candidate and declared_cd)
         score += add_component(
             components,
-            "central-directory-anchor",
+            "central-directory-signature",
             1,
-            bool(eocd.get("central_directory_present") or eocd.get("central_directory_walk_ok")),
+            bool(eocd.get("central_directory_present")),
+        )
+        score += add_component(
+            components,
+            "central-directory-walk",
+            1,
+            bool(eocd.get("central_directory_walk_ok")),
+        )
+        score += add_component(
+            components,
+            "local-header-links",
+            1,
+            bool(eocd.get("local_header_links_ok")),
         )
         naming, label = naming_prior(
             facts,
