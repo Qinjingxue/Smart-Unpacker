@@ -10,46 +10,10 @@ import pytest
 from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.extraction.scheduler import ExtractionScheduler
 from tests.helpers.detection_probe import detect_archive_hits
-from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, corrupt_file
-from tests.integration.test_real_archive_edge_cases import assert_success, run_pipeline
+from tests.helpers.real_archives import ArchiveFixtureFactory, corrupt_file
 
 
 FACTORY = ArchiveFixtureFactory()
-PASSWORD = "sunpack-acceptance-123"
-
-
-@pytest.mark.parametrize(
-    ("case_id", "archive_format", "password", "split"),
-    [
-        ("zip-zipcrypto-ascii", "zip", PASSWORD, False),
-        ("zip-zipcrypto-special", "zip", "space & symbols !@#", False),
-        ("zip-zipcrypto-split", "zip", PASSWORD, True),
-        ("7z-header-encrypted-ascii", "7z", PASSWORD, False),
-        ("7z-header-encrypted-unicode", "7z", "密码-かな-🔐", False),
-        ("7z-header-encrypted-split", "7z", PASSWORD, True),
-    ],
-)
-def test_acceptance_real_encrypted_archives(
-    tmp_path: Path,
-    case_id: str,
-    archive_format: str,
-    password: str,
-    split: bool,
-):
-    case = FACTORY.create(
-        tmp_path,
-        case_id,
-        archive_format,
-        password=password,
-        split=split,
-        payload_size=220 * 1024,
-    )
-
-    without_password = run_pipeline(case.archive_dir)
-    assert without_password.success_count == 0
-    assert without_password.failed_tasks
-
-    assert_success(case, passwords=["definitely-wrong", password])
 
 
 @pytest.mark.parametrize(
@@ -133,18 +97,6 @@ def test_acceptance_real_damage_patterns(
     result = _extract_direct(case.entry_path, tmp_path / f"{case_id}-out", detected_ext="zip")
 
     assert result.success is expected_success
-
-
-@pytest.mark.parametrize(
-    ("case_id", "password"),
-    [
-        ("7z-sfx-encrypted", PASSWORD),
-    ],
-)
-def test_acceptance_real_sfx_archives(tmp_path: Path, case_id: str, password: str | None):
-    case = FACTORY.create(tmp_path, case_id, "7z", password=password, sfx=True)
-
-    assert_success(case, passwords=[password] if password else None)
 
 
 @pytest.mark.parametrize("tool_name", ["7z.exe", "sunpack_sevenzip_worker.exe"])

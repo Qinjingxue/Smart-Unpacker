@@ -37,6 +37,31 @@ def plan2_error(plan_error) -> dict:
     return plan_error
 
 
+@pytest.fixture
+def plan3_error(plan_error) -> dict:
+    return plan_error
+
+
+@pytest.fixture
+def plan4_error(plan_error) -> dict:
+    return plan_error
+
+
+@pytest.fixture
+def plan5_error(plan_error) -> dict:
+    return plan_error
+
+
+@pytest.fixture
+def plan6_error(plan_error) -> dict:
+    return plan_error
+
+
+@pytest.fixture
+def plan7_error(plan_error) -> dict:
+    return plan_error
+
+
 def _in_real_folder(item) -> bool:
     try:
         item_path = Path(getattr(item, "path", None) or item.fspath)

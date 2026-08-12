@@ -8,11 +8,11 @@ from tests.real.plan2_encrypted_archives.plan2_support import (
     assert_plan2_success,
     encrypted_password_list,
 )
+from tests.real.encrypted_cases import SFX_FORMATS
 
 
 FACTORY = ArchiveFixtureFactory()
 RAR_AVAILABLE = get_optional_rar() is not None
-SFX_FORMATS = ["7z", "zip", "rar"]
 
 
 @pytest.mark.parametrize("archive_format", SFX_FORMATS)
