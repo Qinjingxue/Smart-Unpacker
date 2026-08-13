@@ -118,7 +118,11 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         assert password in builtin_path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("include_real_password", [True, False], ids=["later-success", "all-inconclusive"])
+@pytest.mark.parametrize(
+    "include_real_password",
+    [True, False],
+    ids=["later-success", "all-candidates-rejected"],
+)
 def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, include_real_password):
     seven_zip = get_test_tools().get("seven_zip")
     if seven_zip is None or not seven_zip.is_file():
@@ -197,9 +201,14 @@ def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, incl
 
     assert result.succeeded == (1 if include_real_password else 0), result
     assert result.failed == (0 if include_real_password else 1), result
-    assert not watcher.state.entries
     if include_real_password:
+        assert not watcher.state.entries
         assert len(extracted) == 1
         assert extracted[0].read_text(encoding="utf-8") == payload
     else:
+        entries = list(watcher.state.entries.values())
+        assert len(entries) == 1, entries
+        assert entries[0].status == "failed_password"
+        assert entries[0].failure_payload["kind"] == "wrong_password"
+        assert entries[0].failure_payload["blockers"] == ["password"]
         assert extracted == []
