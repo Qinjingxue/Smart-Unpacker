@@ -1,5 +1,7 @@
 {
   "seven_zip": "tools/7z.exe",
   "seven_zip_sfx": "tools/7zCon.sfx",
-  "rar_exe": "tools/Rar.exe"
+  "rar_exe": ".sunpack_test_tools/winrar/Rar.exe",
+  "winrar_exe": ".sunpack_test_tools/winrar/WinRAR.exe",
+  "zstd_exe": ".sunpack_test_tools/zstd/zstd.exe"
 }

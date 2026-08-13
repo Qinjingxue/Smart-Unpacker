@@ -62,7 +62,9 @@ function Invoke-TestStep {
                 ExitCode = -1
                 DurationSeconds = [math]::Round($duration, 2)
             }
-            throw "Test step timed out after $TimeoutSeconds seconds: $Label"
+            Write-Host ("    FAIL ({0:N2}s) - timed out after {1} seconds" -f $duration, $TimeoutSeconds) -ForegroundColor Red
+            Write-Host ("    Command: " + $joinedCommand) -ForegroundColor DarkGray
+            return
         }
 
         $exitCode = [int]$process.ExitCode
@@ -80,7 +82,7 @@ function Invoke-TestStep {
 
         Write-Host ("    FAIL ({0:N2}s)" -f $duration) -ForegroundColor Red
         Write-Host ("    Command: " + $joinedCommand) -ForegroundColor DarkGray
-        throw "Test step failed: $Label (exit code $exitCode)"
+        return
     } finally {
         if ($process) {
             $process.Dispose()
@@ -161,6 +163,100 @@ function Test-PythonImports {
     $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
     & $PythonPath -c "import importlib; modules = [$importList]; [importlib.import_module(name) for name in modules]" *> $null
     return ($LASTEXITCODE -eq 0)
+}
+
+function Get-AcceptanceTestToolRequirements {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $testToolsRoot = Join-Path $RepoRoot ".sunpack_test_tools"
+    $rarRoot = Join-Path $testToolsRoot "winrar"
+    $zstdRoot = Join-Path $testToolsRoot "zstd"
+    return @(
+        [pscustomobject]@{
+            Path = Join-Path $rarRoot "Rar.exe"
+            Description = "RAR archive generator"
+            Arguments = @()
+        },
+        [pscustomobject]@{
+            Path = Join-Path $rarRoot "Default.SFX"
+            Description = "RAR SFX module"
+            Arguments = $null
+        },
+        [pscustomobject]@{
+            Path = Join-Path $rarRoot "WinRAR.exe"
+            Description = "WinRAR archive generator"
+            Arguments = $null
+        },
+        [pscustomobject]@{
+            Path = Join-Path $zstdRoot "zstd.exe"
+            Description = "zstd stream generator"
+            Arguments = @("--version")
+        }
+    )
+}
+
+function Test-AcceptanceTestToolRuns {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string[]]$Arguments = @()
+    )
+
+    try {
+        & $Path @Arguments *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-AcceptanceRarGeneratorVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string]$RequiredVersion = "6.22"
+    )
+
+    try {
+        $output = (& $Path "iver" 2>&1 | Out-String)
+        # Rar.exe returns exit code 7 for the informational iver command.
+        return ($output -match ("RAR " + [regex]::Escape($RequiredVersion) + " x64"))
+    } catch {
+        return $false
+    }
+}
+
+function Assert-AcceptanceTestTools {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($tool in @(Get-AcceptanceTestToolRequirements -RepoRoot $RepoRoot)) {
+        if (-not (Test-Path -LiteralPath $tool.Path -PathType Leaf)) {
+            $missing.Add("$($tool.Description): $($tool.Path)")
+            continue
+        }
+        if ($tool.Description -eq "RAR archive generator" -and
+            -not (Test-AcceptanceRarGeneratorVersion -Path $tool.Path)) {
+            $missing.Add("$($tool.Description) must be WinRAR 6.22 x64 for RAR4 fixtures: $($tool.Path)")
+        } elseif ($null -ne $tool.Arguments -and
+            -not (Test-AcceptanceTestToolRuns -Path $tool.Path -Arguments $tool.Arguments)) {
+            $missing.Add("$($tool.Description) is not executable: $($tool.Path)")
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw (
+            "Acceptance test generator tools are incomplete:`n  - " +
+            ($missing -join "`n  - ") +
+            "`nRun scripts\setup_windows_dev.ps1 on a Windows x64 environment or configure the test tool paths."
+        )
+    }
+    Write-Host "    Acceptance generator tools are present and executable." -ForegroundColor Green
 }
 
 function Get-ModuleOrigin {
@@ -268,6 +364,17 @@ function Get-EnvironmentRefreshReasons {
             $reasons.Add("required runtime tool is missing: $toolPath")
         }
     }
+    foreach ($tool in @(Get-AcceptanceTestToolRequirements -RepoRoot $RepoRoot)) {
+        if (-not (Test-Path -LiteralPath $tool.Path -PathType Leaf)) {
+            $reasons.Add("acceptance test generator is missing: $($tool.Path)")
+        } elseif ($tool.Description -eq "RAR archive generator" -and
+            -not (Test-AcceptanceRarGeneratorVersion -Path $tool.Path)) {
+            $reasons.Add("acceptance RAR generator must be WinRAR 6.22 x64: $($tool.Path)")
+        } elseif ($null -ne $tool.Arguments -and
+            -not (Test-AcceptanceTestToolRuns -Path $tool.Path -Arguments $tool.Arguments)) {
+            $reasons.Add("acceptance test generator cannot run: $($tool.Path)")
+        }
+    }
     if ($requiredTools | Where-Object { -not (Test-Path -LiteralPath $_) }) {
         return $reasons
     }
@@ -339,11 +446,15 @@ trap {
 
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
 Ensure-AcceptanceEnvironment -RepoRoot $repoRoot -VenvPython $venvPython
+Assert-AcceptanceTestTools -RepoRoot $repoRoot
 $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
-Invoke-TestStep -Label "Real archive boundary tests" -Command @($python, "-m", "pytest", "-q", "tests/real/test_real_archive_boundaries.py", "--durations=20")
+Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit", "--durations=20")
+Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional", "--durations=20")
+Invoke-TestStep -Label "Integration tests" -Command @($python, "-m", "pytest", "-q", "tests/integration", "--durations=20")
+Invoke-TestStep -Label "Full real archive and watch matrix" -Command @($python, "-m", "pytest", "-q", "tests/real", "--durations=20")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
@@ -353,9 +464,27 @@ Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py",
 Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan
 foreach ($result in $script:StepResults) {
-    Write-Host ("  PASS  {0,-40} {1,6:N2}s" -f $result.Label, $result.DurationSeconds) -ForegroundColor Green
+    if ($result.ExitCode -eq 0) {
+        Write-Host ("  PASS  {0,-40} {1,6:N2}s" -f $result.Label, $result.DurationSeconds) -ForegroundColor Green
+    } else {
+        Write-Host ("  FAIL  {0,-40} {1,6:N2}s (exit {2})" -f $result.Label, $result.DurationSeconds, $result.ExitCode) -ForegroundColor Red
+    }
 }
 
 Write-Host ""
-Write-Host "All acceptance tests passed." -ForegroundColor Green
-Wait-BeforeExit
+$failedResults = @($script:StepResults | Where-Object { $_.ExitCode -ne 0 })
+if ($failedResults.Count -gt 0) {
+    Write-Host ("{0} acceptance test step(s) failed; all scheduled steps have completed." -f $failedResults.Count) -ForegroundColor Red
+} else {
+    Write-Host "All acceptance tests passed." -ForegroundColor Green
+}
+if (-not $NoWait) {
+    if ($failedResults.Count -gt 0) {
+        Wait-BeforeExit ("{0} acceptance test step(s) failed. Press any key to exit..." -f $failedResults.Count)
+    } else {
+        Wait-BeforeExit
+    }
+}
+if ($failedResults.Count -gt 0) {
+    exit 1
+}

@@ -855,6 +855,43 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination 
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Destination $distAdvancedConfigPath
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
+
+# RAR/WinRAR and zstd are acceptance-fixture generators only. They may be
+# present in a developer's ignored tools directory, but must never enter a
+# release package. The product runtime only consumes the 7-Zip DLL and the
+# SunPack bridge/worker files validated below.
+$acceptanceOnlyToolPatterns = @(
+    "Rar.exe",
+    "Rar.txt",
+    "RarFiles.lst",
+    "RarExt*.dll",
+    "RarExt*.exe",
+    "RarExt*.msix",
+    "RarExtLogo*.png",
+    "rarreg.key",
+    "UnRAR.exe",
+    "WinRAR.exe",
+    "WinRAR.chm",
+    "Default*.SFX",
+    "WinCon*.SFX",
+    "Zip*.SFX",
+    "Ace32Loader.exe",
+    "UNACEV2.DLL",
+    "Order.htm",
+    "ReadMe.txt",
+    "WhatsNew.txt",
+    "Uninstall.exe",
+    "Uninstall.lst",
+    "Resources.pri",
+    "Descript.ion",
+    "License.txt",
+    "zstd.exe"
+)
+foreach ($pattern in $acceptanceOnlyToolPatterns) {
+    Get-ChildItem -LiteralPath $distToolsRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+}
+
 $packagedSevenZipExe = Join-Path $distToolsRoot "7z.exe"
 if (Test-Path -LiteralPath $packagedSevenZipExe) {
     Remove-Item -LiteralPath $packagedSevenZipExe -Force
@@ -881,6 +918,12 @@ Assert-PathExists -LiteralPath $distPasswordPath -Description "External password
 Assert-PathExists -LiteralPath $distConfigPath -Description "External config file"
 Assert-PathExists -LiteralPath $distIconPath -Description "External icon file"
 Assert-PathMissing -LiteralPath (Join-Path $distToolsRoot "7z.exe") -Description "Build-only tools/7z.exe"
+foreach ($pattern in $acceptanceOnlyToolPatterns) {
+    $remaining = Get-ChildItem -LiteralPath $distToolsRoot -Filter $pattern -File -ErrorAction SilentlyContinue
+    if ($remaining) {
+        throw ("Acceptance-only tool files leaked into the release package: " + (($remaining | ForEach-Object FullName) -join ", "))
+    }
+}
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.dll") -Description "External tools/7z.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip.dll") -Description "External tools/sunpack_sevenzip.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip_worker.exe") -Description "External tools/sunpack_sevenzip_worker.exe"

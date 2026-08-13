@@ -211,6 +211,30 @@ def test_release_packages_exclude_build_only_7z_executable():
     assert 'Assert-PathMissing -LiteralPath (Join-Path $root "tools\\7z.exe")' in verifier
 
 
+def test_release_packages_exclude_acceptance_only_archive_generators():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "$acceptanceOnlyToolPatterns" in build_script
+    assert '"Rar.exe"' in build_script
+    assert '"WinRAR.exe"' in build_script
+    assert '"zstd.exe"' in build_script
+    assert "Acceptance-only tool files leaked into the release package" in build_script
+
+
+def test_acceptance_setup_bootstraps_and_checks_real_archive_generators():
+    setup_script = (ROOT / "scripts" / "setup_windows_dev.ps1").read_text(encoding="utf-8")
+    acceptance_script = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+
+    assert ".sunpack_test_tools" in setup_script
+    assert "winrar-x64-622.exe" in setup_script
+    assert "zstd-v1.5.7-win64.zip" in setup_script
+    assert "Test-RarGeneratorVersion" in setup_script
+    assert "SkipAcceptanceTestTools" in setup_script
+    assert "Assert-AcceptanceTestTools" in acceptance_script
+    assert "Default.SFX" in acceptance_script
+    assert "zstd.exe" in acceptance_script
+
+
 def test_release_package_includes_console_and_gui_executables():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     spec = (ROOT / "SunPack.spec").read_text(encoding="utf-8")

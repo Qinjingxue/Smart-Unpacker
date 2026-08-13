@@ -157,7 +157,7 @@ jobs:
       - name: Prepare native/tool environment
         shell: pwsh
         run: |
-          .\scripts\setup_windows_dev.ps1 -Arch ${{ matrix.arch }} -RepairSystem ${{ matrix.repair_system }}
+          .\scripts\setup_windows_dev.ps1 -Arch ${{ matrix.arch }} -RepairSystem ${{ matrix.repair_system }} -SkipAcceptanceTestTools
 
       - name: Ensure Inno Setup compiler
         shell: pwsh

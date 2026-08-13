@@ -22,6 +22,24 @@ def _resolve_tool(value: str | None, repo_root: Path) -> Path | None:
     return path.resolve()
 
 
+def _resolve_configured_tool(
+    *,
+    env_name: str,
+    config: dict[str, str],
+    config_key: str,
+    default: str | None,
+    legacy: str | None,
+    repo_root: Path,
+) -> Path | None:
+    explicit = os.environ.get(env_name)
+    value = explicit or config.get(config_key) or default
+    resolved = _resolve_tool(value, repo_root)
+    if explicit or (resolved and resolved.is_file()) or not legacy:
+        return resolved
+    legacy_path = _resolve_tool(legacy, repo_root)
+    return legacy_path if legacy_path and legacy_path.is_file() else resolved
+
+
 def get_test_tools() -> dict[str, Path | None]:
     repo_root = _repo_root()
     config = {}
@@ -29,20 +47,56 @@ def get_test_tools() -> dict[str, Path | None]:
     if path.exists():
         config = json.loads(path.read_text(encoding="utf-8"))
 
-    seven_zip = os.environ.get("sunpack_TEST_7Z") or config.get("seven_zip") or "tools/7z.exe"
-    seven_zip_sfx = os.environ.get("sunpack_TEST_7Z_SFX") or config.get("seven_zip_sfx") or "tools/7zCon.sfx"
-    zstd_exe = os.environ.get("sunpack_TEST_ZSTD") or config.get("zstd_exe") or "tools/zstd.exe"
-    rar_exe = os.environ.get("sunpack_TEST_RAR") or config.get("rar_exe")
-    winrar_exe = os.environ.get("sunpack_TEST_WINRAR") or config.get("winrar_exe")
-    if not winrar_exe:
-        winrar_exe = shutil.which("WinRAR.exe")
+    seven_zip = _resolve_configured_tool(
+        env_name="sunpack_TEST_7Z",
+        config=config,
+        config_key="seven_zip",
+        default="tools/7z.exe",
+        legacy=None,
+        repo_root=repo_root,
+    )
+    seven_zip_sfx = _resolve_configured_tool(
+        env_name="sunpack_TEST_7Z_SFX",
+        config=config,
+        config_key="seven_zip_sfx",
+        default="tools/7zCon.sfx",
+        legacy=None,
+        repo_root=repo_root,
+    )
+    zstd_exe = _resolve_configured_tool(
+        env_name="sunpack_TEST_ZSTD",
+        config=config,
+        config_key="zstd_exe",
+        default=".sunpack_test_tools/zstd/zstd.exe",
+        legacy="tools/zstd.exe",
+        repo_root=repo_root,
+    )
+    rar_exe = _resolve_configured_tool(
+        env_name="sunpack_TEST_RAR",
+        config=config,
+        config_key="rar_exe",
+        default=".sunpack_test_tools/winrar/Rar.exe",
+        legacy="tools/Rar.exe",
+        repo_root=repo_root,
+    )
+    winrar_exe = _resolve_configured_tool(
+        env_name="sunpack_TEST_WINRAR",
+        config=config,
+        config_key="winrar_exe",
+        default=".sunpack_test_tools/winrar/WinRAR.exe",
+        legacy="tools/WinRAR.exe",
+        repo_root=repo_root,
+    )
+    if not winrar_exe or not winrar_exe.is_file():
+        winrar_from_path = shutil.which("WinRAR.exe")
+        winrar_exe = _resolve_tool(winrar_from_path, repo_root)
 
     return {
-        "seven_zip": _resolve_tool(seven_zip, repo_root),
-        "seven_zip_sfx": _resolve_tool(seven_zip_sfx, repo_root),
-        "zstd_exe": _resolve_tool(zstd_exe, repo_root),
-        "rar_exe": _resolve_tool(rar_exe, repo_root),
-        "winrar_exe": _resolve_tool(winrar_exe, repo_root),
+        "seven_zip": seven_zip,
+        "seven_zip_sfx": seven_zip_sfx,
+        "zstd_exe": zstd_exe,
+        "rar_exe": rar_exe,
+        "winrar_exe": winrar_exe,
     }
 
 

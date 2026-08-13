@@ -42,7 +42,18 @@ python -m benchmarks --list
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、`tests/real/test_real_archive_boundaries.py` 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、混合分卷 acceptance 和 CLI smoke checks。
+`run_acceptance_tests.ps1` 会运行 CLI、unit、functional、integration 和完整 `tests/real` 真实归档/watch 矩阵，并执行 CLI smoke checks；暂不包含 `tests/training/`。模型张量化、训练边界和其他专项脚本仍留在 pytest/CI 专项路径中运行。
+
+脚本中的各测试步骤相互独立：某一步失败或超时后仍会继续执行后续步骤，最后统一汇总；只要存在失败步骤，脚本最终仍返回非零退出码。
+
+Windows x64 的 acceptance 环境准备会自动缓存真实归档生成器到仓库根目录的
+`.sunpack_test_tools/`（该目录被忽略，不会进入发布包）：RAR/WinRAR 固定使用
+RARLAB WinRAR 6.22，以保留 Plan 7 所需的 RAR4 生成能力；zstd 固定使用官方
+`facebook/zstd` v1.5.7 Windows x64 二进制。下载包会先校验 SHA-256，再安装或提取，
+并由 acceptance preflight 检查 `Rar.exe`、`Default.SFX`、`WinRAR.exe` 和 `zstd.exe`。
+如需使用镜像，可通过 `SUNPACK_TEST_RAR_INSTALLER_URI`、
+`SUNPACK_TEST_RAR_INSTALLER_SHA256`、`SUNPACK_TEST_ZSTD_URI` 和
+`SUNPACK_TEST_ZSTD_SHA256` 覆盖下载源及校验值。
 
 完整真实归档/watch 场景统一从 `tests/real/` 运行；`tests/integration/` 只保留真实场景中仍有独立价值的底层关系解析、原生桥接、错误分类、性能和密码源更新契约，避免同一行为在两套端到端矩阵中重复维护。
 

@@ -4,7 +4,8 @@ param(
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
-    [string]$RepairSystem = "full"
+    [string]$RepairSystem = "full",
+    [switch]$SkipAcceptanceTestTools
 )
 
 Set-StrictMode -Version Latest
@@ -259,6 +260,168 @@ function Ensure-Bundled7ZipAssets {
     }
 }
 
+function Invoke-VerifiedFileDownload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+        [Parameter(Mandatory = $true)]
+        [string]$Sha256
+    )
+
+    $expectedHash = $Sha256.Trim().ToUpperInvariant()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Remove-IfExists -LiteralPath $DestinationPath
+            Invoke-FileDownload -Uri $Uri -DestinationPath $DestinationPath -Description $Description
+            $actualHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($actualHash -ne $expectedHash) {
+                throw "SHA-256 mismatch for $Description. Expected $expectedHash, got $actualHash."
+            }
+            return
+        } catch {
+            if ($attempt -eq 3) {
+                throw
+            }
+            Write-Warning ("Download attempt {0} for {1} failed: {2}. Retrying." -f $attempt, $Description, $_.Exception.Message)
+        }
+    }
+}
+
+function Ensure-AcceptanceTestTools {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ToolsRoot
+    )
+
+    # Keep these generator binaries outside tools/. build_windows.ps1 copies
+    # tools/ into release packages, while these are test-only dependencies.
+    $testToolsRoot = Join-Path $RepoRoot ".sunpack_test_tools"
+    $rarRoot = Join-Path $testToolsRoot "winrar"
+    $rarPath = Join-Path $rarRoot "Rar.exe"
+    $rarSfxPath = Join-Path $rarRoot "Default.SFX"
+    $winrarPath = Join-Path $rarRoot "WinRAR.exe"
+    $requiredRarVersion = "6.22"
+    $zstdRoot = Join-Path $testToolsRoot "zstd"
+    $zstdPath = Join-Path $zstdRoot "zstd.exe"
+    New-Item -ItemType Directory -Path $testToolsRoot -Force | Out-Null
+
+    $rarReady = (Test-Path -LiteralPath $rarPath) -and
+        (Test-Path -LiteralPath $rarSfxPath) -and
+        (Test-Path -LiteralPath $winrarPath) -and
+        (Test-RarGeneratorVersion -FilePath $rarPath -RequiredVersion $requiredRarVersion)
+    $zstdReady = (Test-Path -LiteralPath $zstdPath) -and
+        (Test-CommandRuns -FilePath $zstdPath -Arguments @("--version"))
+    if ($rarReady -and $zstdReady) {
+        Write-Host "Acceptance archive generator tools are already present." -ForegroundColor Green
+        return
+    }
+
+    Write-Step "Bootstrapping acceptance archive generator tools"
+    $rarInstallerUri = if ($env:SUNPACK_TEST_RAR_INSTALLER_URI) {
+        $env:SUNPACK_TEST_RAR_INSTALLER_URI
+    } else {
+        # Official RARLAB WinRAR x64 release. 6.22 is pinned because Plan 7
+        # must generate RAR4 fixtures with the -ma4 switch.
+        "https://www.rarlab.com/rar/winrar-x64-622.exe"
+    }
+    $rarInstallerSha256 = if ($env:SUNPACK_TEST_RAR_INSTALLER_SHA256) {
+        $env:SUNPACK_TEST_RAR_INSTALLER_SHA256
+    } else {
+        "BC6440121C023A5068C558BEE72EAE5C2B2EEA1580C95EF7FBA354780C689F7F"
+    }
+    $zstdArchiveUri = if ($env:SUNPACK_TEST_ZSTD_URI) {
+        $env:SUNPACK_TEST_ZSTD_URI
+    } else {
+        # Official facebook/zstd release artifact for Windows x64.
+        "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip"
+    }
+    $zstdArchiveSha256 = if ($env:SUNPACK_TEST_ZSTD_SHA256) {
+        $env:SUNPACK_TEST_ZSTD_SHA256
+    } else {
+        "ACB4E8111511749DC7A3EBEDCA9B04190E37A17AFEB73F55D4425DBF0B90FAD9"
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sunpack-test-tools-" + [guid]::NewGuid().ToString("N"))
+    $rarInstallerPath = Join-Path $tempRoot "winrar-x64-installer.exe"
+    $zstdArchivePath = Join-Path $tempRoot "zstd-win64.zip"
+    $rarInstallRoot = Join-Path $tempRoot "winrar"
+    $zstdExtractRoot = Join-Path $tempRoot "zstd"
+    try {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+
+    if (-not $rarReady) {
+            Invoke-VerifiedFileDownload `
+                -Uri $rarInstallerUri `
+                -DestinationPath $rarInstallerPath `
+                -Description "WinRAR x64 test generator" `
+                -Sha256 $rarInstallerSha256
+
+            Remove-IfExists -LiteralPath $rarRoot
+            New-Item -ItemType Directory -Path $rarInstallRoot -Force | Out-Null
+            Write-Host "Installing WinRAR test generator into temporary workspace $rarInstallRoot" -ForegroundColor Yellow
+            $installer = Start-Process `
+                -FilePath $rarInstallerPath `
+                -ArgumentList @("/s", ("/d" + $rarInstallRoot)) `
+                -WindowStyle Hidden `
+                -Wait `
+                -PassThru
+            if ($installer.ExitCode -ne 0) {
+                throw "WinRAR installer exited with code $($installer.ExitCode)"
+            }
+            Assert-PathExists -LiteralPath (Join-Path $rarInstallRoot "Rar.exe") -Description "Installed Rar.exe"
+            Assert-PathExists -LiteralPath (Join-Path $rarInstallRoot "Default.SFX") -Description "Installed Default.SFX"
+            Assert-PathExists -LiteralPath (Join-Path $rarInstallRoot "WinRAR.exe") -Description "Installed WinRAR.exe"
+            Move-Item -LiteralPath $rarInstallRoot -Destination $rarRoot -Force
+        }
+
+        if (-not $zstdReady) {
+            Invoke-VerifiedFileDownload `
+                -Uri $zstdArchiveUri `
+                -DestinationPath $zstdArchivePath `
+                -Description "zstd Windows x64 test generator" `
+                -Sha256 $zstdArchiveSha256
+
+            $sevenZipPath = Join-Path $ToolsRoot "7z.exe"
+            Assert-PathExists -LiteralPath $sevenZipPath -Description "7-Zip extractor for acceptance test tools"
+            Remove-IfExists -LiteralPath $zstdRoot
+            New-Item -ItemType Directory -Path $zstdExtractRoot -Force | Out-Null
+            Invoke-Native -FilePath $sevenZipPath -Arguments @(
+                "x",
+                $zstdArchivePath,
+                ("-o" + $zstdExtractRoot),
+                "-y"
+            )
+            $zstdSource = Get-ChildItem -LiteralPath $zstdExtractRoot -Filter "zstd.exe" -File -Recurse |
+                Select-Object -First 1
+            if ($null -eq $zstdSource) {
+                throw "Downloaded zstd archive does not contain zstd.exe."
+            }
+            New-Item -ItemType Directory -Path $zstdRoot -Force | Out-Null
+            Copy-Item -LiteralPath $zstdSource.FullName -Destination $zstdPath -Force
+        }
+    } finally {
+        Remove-IfExists -LiteralPath $tempRoot
+    }
+
+    if (-not (Test-Path -LiteralPath $rarPath) -or
+        -not (Test-Path -LiteralPath $rarSfxPath) -or
+        -not (Test-Path -LiteralPath $winrarPath) -or
+        -not (Test-RarGeneratorVersion -FilePath $rarPath -RequiredVersion $requiredRarVersion)) {
+        throw "Acceptance RAR generator installation is incomplete under $rarRoot"
+    }
+    if (-not (Test-Path -LiteralPath $zstdPath) -or
+        -not (Test-CommandRuns -FilePath $zstdPath -Arguments @("--version"))) {
+        throw "Acceptance zstd generator installation is incomplete under $zstdRoot"
+    }
+    Write-Host "Acceptance archive generator tools are ready: $rarPath, $zstdPath" -ForegroundColor Green
+}
+
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)]
@@ -313,6 +476,27 @@ function Test-CommandRuns {
     try {
         & $FilePath @Arguments *> $null
         return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-RarGeneratorVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true)]
+        [string]$RequiredVersion
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $false
+    }
+    try {
+        $output = (& $FilePath "iver" 2>&1 | Out-String)
+        # Rar.exe uses exit code 7 for the informational iver command even
+        # though the version output is valid.
+        return ($output -match ("RAR " + [regex]::Escape($RequiredVersion) + " x64"))
     } catch {
         return $false
     }
@@ -592,6 +776,9 @@ Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--forc
 Test-NativeImport -PythonPath $venvPython
 
 Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZipLicensePath -BuildArch $buildArch
+if ($buildArch -eq "x64" -and -not $SkipAcceptanceTestTools) {
+    Ensure-AcceptanceTestTools -RepoRoot $repoRoot -ToolsRoot $toolsRoot
+}
 $cmakeCommand = Ensure-CMake -PythonPath $venvPython -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
