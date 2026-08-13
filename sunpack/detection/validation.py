@@ -1,6 +1,7 @@
 from typing import Any
 
 from sunpack.config.detection_view import rule_pipeline_config
+from sunpack.config.edition import detection_scoring_enabled
 from sunpack.detection.pipeline.facts.registry import discover_collectors, get_registry as get_fact_registry
 from sunpack.detection.pipeline.facts.schema import known_fact_names
 from sunpack.detection.pipeline.rules.metadata import discover_rule_metadata
@@ -29,6 +30,9 @@ def validate_detection_contracts(payload: dict) -> dict[str, Any]:
 
     configured = []
     for layer in ("precheck", "scoring"):
+        if layer == "scoring" and not detection_scoring_enabled():
+            continue
+
         rules = rule_pipeline_config(payload).get(layer, [])
         if not isinstance(rules, list):
             errors.append(f"detection.rule_pipeline.{layer} must be a list")

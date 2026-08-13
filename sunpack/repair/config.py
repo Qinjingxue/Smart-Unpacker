@@ -1,8 +1,8 @@
-import os
 from copy import deepcopy
 from typing import Any
 
 from sunpack.config.advanced_defaults import advanced_config_value
+from sunpack.config.edition import is_lite_edition
 
 DEFAULT_REPAIR_CONFIG = advanced_config_value(("repair",))
 
@@ -13,10 +13,7 @@ def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def repair_system_mode() -> str:
-    value = os.environ.get("SUNPACK_REPAIR_SYSTEM", "full").strip().lower()
-    if value in {"lite", "disabled", "off", "none"}:
-        return "lite"
-    return "full"
+    return "lite" if is_lite_edition() else "full"
 
 
 def normalize_repair_config(value: Any) -> dict[str, Any]:
