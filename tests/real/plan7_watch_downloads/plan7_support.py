@@ -78,6 +78,7 @@ class WatchHarness:
     stable_at_by_name: dict[str, float] = field(default_factory=dict)
 
     def close(self) -> None:
+        self.watcher.stop()
         self.engine.close()
 
 
@@ -446,6 +447,7 @@ def start_watch(
     cleanup_mode: str = "keep",
     quiet_seconds: float = 0.0,
     state_path: Path | None = None,
+    initial_scan: bool = False,
 ) -> WatchHarness:
     watch_root = tmp_path / label / "watch"
     output_root = tmp_path / label / "out"
@@ -467,10 +469,12 @@ def start_watch(
         out_dir=str(output_root),
         state_path=str(state_path or (tmp_path / label / "state.json")),
         quiet_seconds=quiet_seconds,
-        initial_scan=False,
+        initial_scan=initial_scan,
         pipeline_engine=engine,
         group_coordinator=WatchGroupCoordinator(config),
     )
+    if initial_scan:
+        watcher.start()
     return WatchHarness(
         watch_root=watch_root,
         output_root=output_root,

@@ -48,6 +48,16 @@
 - 直接写最终文件名；
 - 中断下载、关闭 watcher、持久化状态后重新启动并续写。
 
+`test_plan7_lifecycle.py` 进一步覆盖：
+
+- watcher 启动时已有完整文件、非零 quiet window、残留 `.downloading`；
+- 临时下载文件被删除后重新完整下载；
+- 缺尾分卷后来到达、watcher 重启后续传未完成分卷；
+- 同 stem 普通包与 SFX 交错到达；
+- 同名归档替换、删除后重新出现；
+- 流格式直接写入最终路径；
+- 失败归档不产生输出且保留给用户排查。
+
 ### 阶段 4：分卷到达顺序
 
 `test_plan7_arrival_orders.py` 覆盖：

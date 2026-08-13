@@ -9,7 +9,10 @@ from tests.helpers.detection_probe import detect_archive_hits, detection_pipelin
 from tests.helpers.marker_utils import marker_was_extracted
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, get_test_tools
-from tests.real.plan1_real_archives.plan1_support import run_plan1_pipeline
+from tests.real.plan1_real_archives.plan1_support import (
+    assert_expected_files_extracted,
+    run_plan1_pipeline,
+)
 
 
 FACTORY = ArchiveFixtureFactory()
@@ -37,7 +40,8 @@ def test_plan1_mixed_same_name_plain_formats_in_one_directory(tmp_path, plan1_er
             tmp_path,
             f"mixed_src_{archive_format.replace('.', '_')}",
             archive_format,
-            payload_size=16 * 1024,
+            payload_size=256,
+            payload_profile="structured",
         )
         suffix = {"zip": ".zip", "rar": ".rar", "7z": ".7z", "tar.gz": ".tar.gz"}[archive_format]
         target = common / f"release{suffix}"
@@ -72,11 +76,61 @@ def test_plan1_mixed_same_name_plain_formats_in_one_directory(tmp_path, plan1_er
     # 目录整体解压，每个 marker 都要出现。
     summary = run_plan1_pipeline(common)
     plan1_error["pipeline_success_count"] = summary.success_count
+    plan1_error["pipeline_partial_success_count"] = summary.partial_success_count
     plan1_error["pipeline_failed_tasks"] = [str(item) for item in summary.failed_tasks]
     assert summary.failed_tasks == [], f"pipeline reported failures: {summary.failed_tasks}"
+    assert summary.partial_success_count == 0
     for _archive_format, (_target, case) in cases.items():
+        assert_expected_files_extracted(case, common)
         assert marker_was_extracted(common, case.marker_name, case.marker_text), (
             f"marker {case.marker_name!r} not extracted"
+        )
+
+
+def test_plan1_mixed_compressed_formats_in_one_directory(tmp_path, plan1_error):
+    """Directory scheduling must also keep compressed codecs separated by format."""
+    common = tmp_path / "mixed_compressed"
+    common.mkdir()
+    cases = {}
+    settings = {
+        "7z": {"compression_method": "LZMA2", "compression_level": 5, "solid": True},
+        "zip": {"compression_method": "Deflate", "compression_level": 5},
+        "rar": {"compression_level": 5, "solid": True},
+    }
+    suffixes = {"7z": ".7z", "zip": ".zip", "rar": ".rar"}
+    for archive_format, options in settings.items():
+        if archive_format == "rar" and not RAR_AVAILABLE:
+            pytest.skip("RAR generator is not configured")
+        case = FACTORY.create(
+            tmp_path,
+            f"mixed_compressed_src_{archive_format}",
+            archive_format,
+            payload_size=512,
+            payload_profile="structured",
+            **options,
+        )
+        target = common / f"release{suffixes[archive_format]}"
+        case.entry_path.replace(target)
+        cases[archive_format] = case
+
+    tasks = ArchiveTaskProvider(detection_pipeline_config()).scan_targets([str(common)])
+    tasks_by_name = {Path(task.main_path).name: task for task in tasks}
+    plan1_error["directory_scan_heads"] = sorted(tasks_by_name)
+    assert len(tasks_by_name) == 3, f"expected 3 logical archives, got {sorted(tasks_by_name)}"
+    for archive_format, expected in (("7z", ".7z"), ("zip", ".zip"), ("rar", ".rar")):
+        name = f"release{suffixes[archive_format]}"
+        assert tasks_by_name[name].fact_bag.get("file.detected_ext") == expected
+
+    summary = run_plan1_pipeline(common)
+    plan1_error["pipeline_success_count"] = summary.success_count
+    plan1_error["pipeline_partial_success_count"] = summary.partial_success_count
+    plan1_error["pipeline_failed_tasks"] = [str(item) for item in summary.failed_tasks]
+    assert summary.failed_tasks == [], f"pipeline reported failures: {summary.failed_tasks}"
+    assert summary.partial_success_count == 0
+    for archive_format, case in cases.items():
+        assert_expected_files_extracted(case, common)
+        assert marker_was_extracted(common, case.marker_name, case.marker_text), (
+            f"{archive_format}: marker {case.marker_name!r} not extracted"
         )
 
 
@@ -98,7 +152,8 @@ def test_plan1_mixed_same_stem_split_formats_in_one_directory(tmp_path, plan1_er
             f"split_src_{archive_format}",
             archive_format,
             split=True,
-            payload_size=420 * 1024,
+            payload_size=96 * 1024,
+            payload_profile="structured",
         )
         parts = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
         for index, source in enumerate(parts, start=1):
@@ -119,9 +174,12 @@ def test_plan1_mixed_same_stem_split_formats_in_one_directory(tmp_path, plan1_er
 
     summary = run_plan1_pipeline(common)
     plan1_error["pipeline_success_count"] = summary.success_count
+    plan1_error["pipeline_partial_success_count"] = summary.partial_success_count
     plan1_error["pipeline_failed_tasks"] = [str(item) for item in summary.failed_tasks]
     assert summary.failed_tasks == [], f"pipeline reported failures: {summary.failed_tasks}"
+    assert summary.partial_success_count == 0
     for archive_format, case in cases.items():
+        assert_expected_files_extracted(case, common)
         assert marker_was_extracted(common, case.marker_name, case.marker_text), (
             f"{archive_format}: marker {case.marker_name!r} not extracted"
         )

@@ -1,5 +1,6 @@
 import bz2
 import gzip
+import hashlib
 import io
 import lzma
 import random
@@ -8,6 +9,7 @@ import struct
 import subprocess
 import tarfile
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -137,15 +139,26 @@ class ArchiveFixtureFactory:
         disguise_ext: str | None = None,
         payload_size: int = 256 * 1024,
         split_volume_size: int = 100 * 1024,
+        payload_profile: str = "default",
+        compression_method: str | None = None,
+        compression_level: int | None = None,
+        solid: bool | None = None,
     ) -> ArchiveCase:
         if carrier and carrier not in SUPPORTED_CARRIERS:
             raise ValueError(f"Unsupported carrier: {carrier}")
         archive_format = normalize_archive_format(archive_format)
         if split_issue and not split:
             raise ValueError("split_issue requires split=True")
+        if payload_profile not in {"default", "structured"}:
+            raise ValueError(f"Unsupported payload profile: {payload_profile}")
 
         source_dir = root / f"{case_id}_src"
-        payload = write_payload(source_dir, case_id, size_bytes=payload_size)
+        payload = write_payload(
+            source_dir,
+            case_id,
+            size_bytes=payload_size,
+            profile=payload_profile,
+        )
         archive_dir = root / case_id
         archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -158,10 +171,16 @@ class ArchiveFixtureFactory:
             split=split,
             sfx=sfx,
             split_volume_size=split_volume_size,
+            compression_method=compression_method,
+            compression_level=compression_level,
+            solid=solid,
         )
         shutil.rmtree(source_dir, ignore_errors=True)
 
         entry_path = choose_entry_path(archive_dir, case_id, archive_format, sfx=sfx)
+        expected_files = payload["expected_files"]
+        if archive_format in STREAM_FORMATS:
+            expected_files = {payload["marker_name"]: expected_files[payload["marker_name"]]}
         case = ArchiveCase(
             case_id=case_id,
             archive_dir=archive_dir,
@@ -176,6 +195,13 @@ class ArchiveFixtureFactory:
             disguise_ext=disguise_ext,
             corruption=corruption,
             split_issue=split_issue,
+            metadata={
+                "expected_files": expected_files,
+                "payload_profile": payload_profile,
+                "compression_method": compression_method,
+                "compression_level": compression_level,
+                "solid": solid,
+            },
         )
 
         if carrier:
@@ -199,10 +225,23 @@ class ArchiveFixtureFactory:
         split: bool,
         sfx: bool,
         split_volume_size: int,
+        compression_method: str | None,
+        compression_level: int | None,
+        solid: bool | None,
     ):
         archive_format = normalize_archive_format(archive_format)
-        if archive_format in TAR_FORMATS | STREAM_FORMATS and (password or split or sfx):
-            raise ValueError(f"{archive_format} fixtures do not support password, split, or sfx variants.")
+        if archive_format in TAR_FORMATS | STREAM_FORMATS and (
+            password
+            or split
+            or sfx
+            or compression_method
+            or compression_level is not None
+            or solid is not None
+        ):
+            raise ValueError(
+                f"{archive_format} fixtures do not support password, split, sfx, "
+                "or container compression variants."
+            )
         if archive_format == "7z":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.7z'}"
             create_7z_archive(
@@ -212,6 +251,9 @@ class ArchiveFixtureFactory:
                 split=split,
                 sfx=sfx,
                 split_volume_size=split_volume_size,
+                compression_method=compression_method,
+                compression_level=compression_level,
+                solid=solid,
             )
             return
         if archive_format == "zip":
@@ -223,6 +265,8 @@ class ArchiveFixtureFactory:
                 split=split,
                 sfx=sfx,
                 split_volume_size=split_volume_size,
+                compression_method=compression_method,
+                compression_level=compression_level,
             )
             return
         if archive_format == "rar":
@@ -234,6 +278,8 @@ class ArchiveFixtureFactory:
                 split=split,
                 sfx=sfx,
                 split_volume_size=split_volume_size,
+                compression_level=compression_level or 0,
+                solid=solid,
             )
             return
         if archive_format in TAR_FORMATS:
@@ -257,14 +303,49 @@ def run_cmd(cmd: list[str], cwd: Path):
     return result
 
 
-def write_payload(source_dir: Path, case_id: str, size_bytes: int = 256 * 1024) -> dict[str, str]:
+def _file_manifest(source_dir: Path) -> dict[str, dict[str, int | str]]:
+    manifest: dict[str, dict[str, int | str]] = {}
+    for path in sorted(path for path in source_dir.rglob("*") if path.is_file()):
+        data = path.read_bytes()
+        name = path.relative_to(source_dir).as_posix()
+        manifest[name] = {
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return manifest
+
+
+def write_payload(
+    source_dir: Path,
+    case_id: str,
+    size_bytes: int = 256 * 1024,
+    *,
+    profile: str = "default",
+) -> dict[str, Any]:
     source_dir.mkdir(parents=True, exist_ok=True)
     marker_name = f"{case_id}.marker.txt"
     marker_text = f"edge::{case_id}"
     (source_dir / marker_name).write_text(marker_text, encoding="utf-8")
     rng = random.Random(case_id)
     (source_dir / "payload.bin").write_bytes(bytes(rng.getrandbits(8) for _ in range(size_bytes)))
-    return {"marker_name": marker_name, "marker_text": marker_text}
+    if profile == "structured":
+        (source_dir / "repeat.txt").write_bytes(
+            (f"SUNPACK-REPEAT-{case_id}-".encode("utf-8") * 32) + b"\n"
+        )
+        (source_dir / "empty.bin").write_bytes(b"")
+        nested = source_dir / "nested"
+        nested.mkdir(exist_ok=True)
+        (nested / "inner.txt").write_text(
+            f"nested-content::{case_id}\n" * 8,
+            encoding="utf-8",
+        )
+    elif profile != "default":
+        raise ValueError(f"Unsupported payload profile: {profile}")
+    return {
+        "marker_name": marker_name,
+        "marker_text": marker_text,
+        "expected_files": _file_manifest(source_dir),
+    }
 
 
 def create_7z_archive(
@@ -274,10 +355,20 @@ def create_7z_archive(
     split: bool = False,
     sfx: bool = False,
     split_volume_size: int = 100 * 1024,
+    compression_method: str | None = None,
+    compression_level: int | None = None,
+    solid: bool | None = None,
 ):
     tools = get_test_tools()
     seven_zip = require_7z()
-    cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-mx=0", "-y"]
+    level = 0 if compression_level is None else int(compression_level)
+    if not 0 <= level <= 9:
+        raise ValueError("7z compression level must be between 0 and 9")
+    cmd = [str(seven_zip), "a", str(output_path), str(source_dir), f"-mx={level}", "-y"]
+    if compression_method:
+        cmd.append(f"-m0={compression_method}")
+    if solid is not None:
+        cmd.append(f"-ms={'on' if solid else 'off'}")
     if password:
         cmd.extend([f"-p{password}", "-mhe=on"])
     if split:
@@ -297,10 +388,17 @@ def create_zip_archive(
     split: bool = False,
     sfx: bool = False,
     split_volume_size: int = 100 * 1024,
+    compression_method: str | None = None,
+    compression_level: int | None = None,
 ):
     tools = get_test_tools()
     seven_zip = require_7z()
-    cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-tzip", "-mx=0", "-y"]
+    level = 0 if compression_level is None else int(compression_level)
+    if not 0 <= level <= 9:
+        raise ValueError("ZIP compression level must be between 0 and 9")
+    cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-tzip", f"-mx={level}", "-y"]
+    if compression_method:
+        cmd.append(f"-mm={compression_method}")
     if password:
         cmd.append(f"-p{password}")
     if split:
@@ -320,13 +418,22 @@ def create_rar_archive(
     split: bool = False,
     sfx: bool = False,
     split_volume_size: int = 100 * 1024,
+    compression_level: int = 0,
+    solid: bool | None = None,
 ):
     rar = get_optional_rar()
     if sfx and (rar is None or not (rar.parent / "Default.SFX").is_file()):
         rar = get_optional_winrar()
     if not rar:
         raise FileNotFoundError("RAR generator is not configured.")
-    cmd = [str(rar), "a", "-ep1", "-r", "-idq", "-m0", "-ma5", "-y"]
+    compression_level = int(compression_level)
+    if not 0 <= compression_level <= 5:
+        raise ValueError("RAR compression level must be between 0 and 5")
+    cmd = [str(rar), "a", "-ep1", "-r", "-idq", f"-m{compression_level}", "-ma5", "-y"]
+    if solid is True:
+        cmd.append("-s")
+    elif solid is False:
+        cmd.append("-s-")
     if password:
         cmd.append(f"-hp{password}")
     if split:
@@ -359,21 +466,57 @@ def create_tar_archive(source_dir: Path, output_path: Path, archive_format: str)
             archive.add(path, arcname=path.name)
 
 
-def create_compression_stream(source_path: Path, output_path: Path, archive_format: str):
+def create_compression_stream(
+    source_path: Path,
+    output_path: Path,
+    archive_format: str,
+    *,
+    compression_level: int | None = None,
+    gzip_filename: str | None = None,
+    xz_check: str | None = None,
+    zstd_checksum: bool = True,
+):
     if archive_format == "gzip":
+        level = 9 if compression_level is None else int(compression_level)
         with source_path.open("rb") as src, output_path.open("wb") as raw:
-            with gzip.GzipFile(filename=source_path.name, mode="wb", fileobj=raw) as dst:
+            with gzip.GzipFile(
+                filename=source_path.name if gzip_filename is None else gzip_filename,
+                mode="wb",
+                fileobj=raw,
+                compresslevel=level,
+            ) as dst:
                 shutil.copyfileobj(src, dst)
         return
     if archive_format == "bzip2":
-        output_path.write_bytes(bz2.compress(source_path.read_bytes()))
+        level = 9 if compression_level is None else int(compression_level)
+        output_path.write_bytes(bz2.compress(source_path.read_bytes(), compresslevel=level))
         return
     if archive_format == "xz":
-        output_path.write_bytes(lzma.compress(source_path.read_bytes(), format=lzma.FORMAT_XZ))
+        level = 6 if compression_level is None else int(compression_level)
+        check_by_name = {
+            None: lzma.CHECK_CRC64,
+            "crc32": lzma.CHECK_CRC32,
+            "crc64": lzma.CHECK_CRC64,
+            "sha256": lzma.CHECK_SHA256,
+        }
+        if xz_check not in check_by_name:
+            raise ValueError(f"Unsupported XZ check: {xz_check}")
+        output_path.write_bytes(
+            lzma.compress(
+                source_path.read_bytes(),
+                format=lzma.FORMAT_XZ,
+                preset=level,
+                check=check_by_name[xz_check],
+            )
+        )
         return
     if archive_format == "zstd":
         zstd_exe = require_zstd()
-        run_cmd([str(zstd_exe), "-q", "-f", str(source_path), "-o", str(output_path)], output_path.parent)
+        level = 3 if compression_level is None else int(compression_level)
+        cmd = [str(zstd_exe), "-q", "-f", f"-{level}"]
+        cmd.append("--check" if zstd_checksum else "--no-check")
+        cmd.extend([str(source_path), "-o", str(output_path)])
+        run_cmd(cmd, output_path.parent)
         return
     raise ValueError(f"Unsupported compression stream format: {archive_format}")
 
@@ -403,6 +546,8 @@ def _case_from_payload(
     payload: dict[str, str],
     **metadata,
 ) -> ArchiveCase:
+    metadata = dict(metadata)
+    metadata.setdefault("expected_files", payload.get("expected_files", {}))
     return ArchiveCase(
         case_id=case_id,
         archive_dir=archive_dir,
@@ -410,7 +555,7 @@ def _case_from_payload(
         marker_name=payload["marker_name"],
         marker_text=payload["marker_text"],
         archive_format=normalize_archive_format(archive_format),
-        metadata=dict(metadata),
+        metadata=metadata,
     )
 
 
@@ -457,6 +602,102 @@ def create_zip64_archive(
     shutil.rmtree(source_dir, ignore_errors=True)
     return _case_from_payload(
         root, case_id, "zip", archive_dir, archive_path, payload, zip64=True
+    )
+
+
+def create_zip_multidisk_archive(
+    root: Path,
+    case_id: str,
+    *,
+    payload_size: int = 512,
+) -> ArchiveCase:
+    """Create a tiny real PKZIP multi-disk archive (.z01 + .zip).
+
+    The central directory is on the last disk and local entries are on disk 0;
+    this is intentionally different from 7-Zip's generic ``-v`` split format.
+    """
+    source_dir = root / f"{case_id}_src"
+    payload = write_payload(source_dir, case_id, size_bytes=payload_size, profile="structured")
+    archive_dir = root / case_id
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    local_body = bytearray()
+    local_offsets: dict[str, int] = {}
+    for path in sorted(path for path in source_dir.rglob("*") if path.is_file()):
+        name = path.relative_to(source_dir).as_posix().encode("utf-8")
+        data = path.read_bytes()
+        offset = len(local_body)
+        local_offsets[path.relative_to(source_dir).as_posix()] = offset
+        local_body.extend(
+            struct.pack(
+                "<4s5H3I2H",
+                b"PK\x03\x04",
+                20,
+                0,
+                0,
+                0,
+                0,
+                zlib.crc32(data) & 0xFFFFFFFF,
+                len(data),
+                len(data),
+                len(name),
+                0,
+            )
+        )
+        local_body.extend(name)
+        local_body.extend(data)
+        entries.append((path.relative_to(source_dir).as_posix(), name, data))
+
+    central_directory = bytearray()
+    for entry_name, name, data in entries:
+        central_directory.extend(
+            struct.pack(
+                "<4s6H3I5H2HI",
+                b"PK\x01\x02",
+                20,
+                20,
+                0,
+                0,
+                0,
+                0,
+                zlib.crc32(data) & 0xFFFFFFFF,
+                len(data),
+                len(data),
+                len(name),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                local_offsets[entry_name],
+            )
+        )
+        central_directory.extend(name)
+    eocd = struct.pack(
+        "<4sHHHHIIH",
+        b"PK\x05\x06",
+        1,
+        1,
+        len(entries),
+        len(entries),
+        len(central_directory),
+        0,
+        0,
+    )
+    (archive_dir / f"{case_id}.z01").write_bytes(bytes(local_body))
+    archive_path = archive_dir / f"{case_id}.zip"
+    archive_path.write_bytes(bytes(central_directory) + eocd)
+    shutil.rmtree(source_dir, ignore_errors=True)
+    return _case_from_payload(
+        root,
+        case_id,
+        "zip",
+        archive_dir,
+        archive_dir / f"{case_id}.z01",
+        payload,
+        multidisk=True,
+        disk_count=2,
     )
 
 
@@ -535,16 +776,31 @@ def create_rar4_archive(
     split: bool = False,
     payload_size: int = 16 * 1024,
     split_volume_size: int = 100 * 1024,
+    compression_level: int = 0,
+    solid: bool | None = None,
+    payload_profile: str = "default",
 ) -> ArchiveCase:
     rar = get_optional_rar()
     if not rar:
         raise FileNotFoundError("RAR generator is not configured.")
     source_dir = root / f"{case_id}_src"
-    payload = write_payload(source_dir, case_id, size_bytes=payload_size)
+    payload = write_payload(
+        source_dir,
+        case_id,
+        size_bytes=payload_size,
+        profile=payload_profile,
+    )
     archive_dir = root / case_id
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive_path = archive_dir / f"{case_id}.rar"
-    cmd = [str(rar), "a", "-ep1", "-idq", "-m0", "-ma4", "-y"]
+    compression_level = int(compression_level)
+    if not 0 <= compression_level <= 5:
+        raise ValueError("RAR compression level must be between 0 and 5")
+    cmd = [str(rar), "a", "-ep1", "-idq", f"-m{compression_level}", "-ma4", "-y"]
+    if solid is True:
+        cmd.append("-s")
+    elif solid is False:
+        cmd.append("-s-")
     if split:
         cmd.append(f"-v{max(1024, int(split_volume_size))}b")
     cmd.extend([str(archive_path), str(source_dir)])
@@ -736,18 +992,57 @@ def create_xz_sha256_archive(
     *,
     payload_size: int = 16 * 1024,
 ) -> ArchiveCase:
+    return create_stream_variant_archive(
+        root,
+        case_id,
+        "xz",
+        payload_size=payload_size,
+        xz_check="sha256",
+    )
+
+
+def create_stream_variant_archive(
+    root: Path,
+    case_id: str,
+    stream_format: str,
+    *,
+    payload_size: int = 256,
+    compression_level: int | None = None,
+    gzip_filename: str | None = None,
+    xz_check: str | None = None,
+    zstd_checksum: bool = True,
+) -> ArchiveCase:
+    stream_format = normalize_archive_format(stream_format)
+    if stream_format not in STREAM_FORMATS:
+        raise ValueError(f"Unsupported stream format: {stream_format}")
     source_dir = root / f"{case_id}_src"
     payload = write_payload(source_dir, case_id, size_bytes=payload_size)
     archive_dir = root / case_id
     archive_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = archive_dir / f"{case_id}.xz"
-    marker_bytes = (source_dir / payload["marker_name"]).read_bytes()
-    archive_path.write_bytes(
-        lzma.compress(marker_bytes, format=lzma.FORMAT_XZ, check=lzma.CHECK_SHA256)
+    marker_path = source_dir / payload["marker_name"]
+    archive_path = archive_dir / f"{case_id}{ARCHIVE_EXTENSIONS[stream_format]}"
+    create_compression_stream(
+        marker_path,
+        archive_path,
+        stream_format,
+        compression_level=compression_level,
+        gzip_filename=gzip_filename,
+        xz_check=xz_check,
+        zstd_checksum=zstd_checksum,
     )
     shutil.rmtree(source_dir, ignore_errors=True)
     return _case_from_payload(
-        root, case_id, "xz", archive_dir, archive_path, payload, xz_check="sha256"
+        root,
+        case_id,
+        stream_format,
+        archive_dir,
+        archive_path,
+        payload,
+        expected_files={payload["marker_name"]: payload["expected_files"][payload["marker_name"]]},
+        compression_level=compression_level,
+        gzip_filename=gzip_filename,
+        xz_check=xz_check,
+        zstd_checksum=zstd_checksum,
     )
 
 

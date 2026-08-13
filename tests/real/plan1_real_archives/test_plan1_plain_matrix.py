@@ -31,7 +31,13 @@ def test_plan1_plain_single_archives_extract_and_detect_format(
     case_id = f"plain_single_{archive_format.replace('.', '_')}"
     plan1_error["case_id"] = case_id
     plan1_error["archive_format"] = archive_format
-    case = FACTORY.create(tmp_path, case_id, archive_format, payload_size=32 * 1024)
+    case = FACTORY.create(
+        tmp_path,
+        case_id,
+        archive_format,
+        payload_size=256,
+        payload_profile="structured",
+    )
 
     assert_plan1_success(case, EXPECTED_DETECTED_EXT[archive_format], error_info=plan1_error)
 
@@ -53,7 +59,8 @@ def test_plan1_plain_single_disguised_archives_extract_and_detect_format(
         tmp_path,
         case_id,
         archive_format,
-        payload_size=32 * 1024,
+        payload_size=256,
+        payload_profile="structured",
         disguise_ext=".unrelated",
     )
 

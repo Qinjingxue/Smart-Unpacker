@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from sunpack.config.schema import normalize_config
@@ -98,6 +99,52 @@ def marker_text_contained(root: Path, marker_text: str) -> bool:
     return False
 
 
+def _expected_files_extracted(case: ArchiveCase, root: Path) -> dict[str, dict[str, object]]:
+    """Validate every known fixture member by size and SHA-256, not only its marker."""
+    expected_files = case.metadata.get("expected_files") or {}
+    validation: dict[str, dict[str, object]] = {}
+    for member_name, expected in expected_files.items():
+        normalized_name = str(member_name).replace("\\", "/")
+        expected_size = int(expected["size"])
+        expected_sha256 = str(expected["sha256"])
+        matches = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            name_matches = (
+                case.archive_format in {"gzip", "bzip2", "xz", "zstd"}
+                or relative == normalized_name
+                or relative.endswith(f"/{normalized_name}")
+                or path.name == Path(normalized_name).name
+            )
+            if not name_matches:
+                continue
+            try:
+                if path.stat().st_size != expected_size:
+                    continue
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if digest == expected_sha256:
+                matches.append(str(path))
+        validation[normalized_name] = {
+            "expected_size": expected_size,
+            "expected_sha256": expected_sha256,
+            "matches": matches,
+            "ok": bool(matches),
+        }
+    return validation
+
+
+def assert_expected_files_extracted(case: ArchiveCase, root: Path) -> None:
+    validation = _expected_files_extracted(case, root)
+    missing_files = [
+        name for name, result in validation.items() if not result["ok"]
+    ]
+    assert not missing_files, f"expected extracted members missing or corrupted: {missing_files}"
+
+
 def assert_plan1_success(
     case: ArchiveCase,
     expected_ext: str,
@@ -146,6 +193,7 @@ def assert_plan1_success(
         )
 
     summary = run_plan1_pipeline(case.archive_dir, passwords=passwords)
+    expected_file_validation = _expected_files_extracted(case, case.archive_dir)
     extracted = marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
     if error_info is not None:
         error_info.update(
@@ -154,7 +202,12 @@ def assert_plan1_success(
                 "pipeline_partial_success_count": summary.partial_success_count,
                 "pipeline_failed_tasks": [str(item) for item in summary.failed_tasks],
                 "marker_extracted": extracted,
+                "expected_file_validation": expected_file_validation,
             }
         )
     assert summary.failed_tasks == [], f"pipeline reported failures: {summary.failed_tasks}"
+    assert summary.partial_success_count == 0, (
+        f"pipeline reported partial successes: {summary.partial_success_count}"
+    )
+    assert_expected_files_extracted(case, case.archive_dir)
     assert extracted, f"marker {case.marker_name!r} was not extracted for {case.entry_path.name}"

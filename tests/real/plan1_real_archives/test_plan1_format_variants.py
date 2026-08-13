@@ -7,12 +7,15 @@ from tests.helpers.real_archives import (
     create_7z_nonsolid_archive,
     create_multi_member_stream_archive,
     create_rar4_archive,
+    create_stream_variant_archive,
     create_streaming_zip_archive,
     create_xz_sha256_archive,
     create_zip64_archive,
+    create_zip_multidisk_archive,
 )
 from tests.helpers.tool_config import get_optional_rar, get_test_tools
 from tests.real.plan1_real_archives.plan1_support import (
+    EXPECTED_DETECTED_EXT,
     assert_plan1_success,
     marker_text_contained,
     run_plan1_pipeline,
@@ -60,6 +63,22 @@ def test_plan1_zip64_archive_extracts_and_detects(tmp_path, plan1_error):
     case = create_zip64_archive(tmp_path, "zip64_extract", payload_size=4096)
     plan1_error["case_id"] = case.case_id
     assert_plan1_success(case, ".zip", error_info=plan1_error)
+
+
+def test_plan1_real_pkzip_multidisk_archive_extracts_and_detects(tmp_path, plan1_error):
+    """A real .z01 + .zip PKZIP disk pair, not a generic 7-Zip split stream."""
+    case = create_zip_multidisk_archive(tmp_path, "zip_multidisk", payload_size=512)
+    plan1_error["case_id"] = case.case_id
+    plan1_error["archive_format"] = "zip"
+    plan1_error["multidisk"] = True
+    assert case.entry_path.name.endswith(".z01")
+    assert (case.archive_dir / "zip_multidisk.zip").is_file()
+    assert_plan1_success(
+        case,
+        ".zip",
+        expected_member_count=2,
+        error_info=plan1_error,
+    )
 
 
 def test_plan1_7z_nonsolid_archive_extracts_and_detects(tmp_path, plan1_error):
@@ -158,3 +177,55 @@ def test_plan1_xz_sha256_check_archive_extracts_and_detects(tmp_path, plan1_erro
     plan1_error["case_id"] = case.case_id
     plan1_error["archive_format"] = "xz"
     assert_plan1_success(case, ".xz", error_info=plan1_error)
+
+
+@pytest.mark.parametrize(
+    ("stream_format", "level", "gzip_filename", "xz_check", "zstd_checksum"),
+    [
+        pytest.param("gzip", 1, "", None, True, id="gzip-level1-no-name"),
+        pytest.param("gzip", 9, "member.txt", None, True, id="gzip-level9-name"),
+        pytest.param("bzip2", 1, None, None, True, id="bzip2-level1"),
+        pytest.param("bzip2", 9, None, None, True, id="bzip2-level9"),
+        pytest.param("xz", 1, None, "crc32", True, id="xz-crc32"),
+        pytest.param("xz", 6, None, "crc64", True, id="xz-crc64"),
+        pytest.param("xz", 9, None, "sha256", True, id="xz-sha256"),
+        pytest.param("zstd", 1, None, None, False, id="zstd-level1-no-check"),
+        pytest.param("zstd", 19, None, None, True, id="zstd-level19-check"),
+    ],
+)
+def test_plan1_stream_codec_headers_levels_and_checks_extract(
+    tmp_path,
+    stream_format,
+    level,
+    gzip_filename,
+    xz_check,
+    zstd_checksum,
+    plan1_error,
+):
+    if stream_format == "zstd" and not _zstd_available():
+        pytest.skip("zstd.exe is not configured")
+    case = create_stream_variant_archive(
+        tmp_path,
+        f"stream_variant_{stream_format}_{level}",
+        stream_format,
+        payload_size=256,
+        compression_level=level,
+        gzip_filename=gzip_filename,
+        xz_check=xz_check,
+        zstd_checksum=zstd_checksum,
+    )
+    plan1_error.update(
+        {
+            "case_id": case.case_id,
+            "archive_format": stream_format,
+            "compression_level": level,
+            "gzip_filename": gzip_filename,
+            "xz_check": xz_check,
+            "zstd_checksum": zstd_checksum,
+        }
+    )
+    assert_plan1_success(
+        case,
+        EXPECTED_DETECTED_EXT[stream_format],
+        error_info=plan1_error,
+    )

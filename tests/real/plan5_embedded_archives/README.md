@@ -45,32 +45,13 @@ rar 依赖 `tools/Rar.exe`、zstd 依赖 `tools/zstd.exe`，工具缺失时自�
 - `test_plan5_embedded_detection.py`：检测层两个用例（native 覆盖 + 单任务扫描）。
 - `test_plan5_mixed_embedded.py`：主用例（正确密码全量解压）。
 - `test_plan5_wrong_password_partial.py`：全错密码的部分成功行为。
+- `test_plan5_large_embedded.py`：128 个真实归档循环嵌入，覆盖多种容器和压缩方法。
 
-## 当前状态（已知失败自动记录到 `tests/real/error_records/`，待统一修复）
+## 当前状态
 
-检测层两个用例当前通过（native 扫描能命中全部 13 个段，整文件也能作为一个任务）。
+原有 13 段检测/提取/错误密码用例当前通过。新增 128 段用例的检测层和整体任务处理已通过，
+但其中 16 个 `tar.gz/tar.bz2/tar.xz/tar.zst` 嵌入段的 marker 未能最终解出，保留该用例用于
+暴露“嵌入压缩流后的 tar 递归提取”缺口。
 
-提取层当前失败，主用例只规划并解出 4/13 段：
-
-- 成功：7z 头加密、rar5 头加密、tar、zip AES-256；
-- 缺失：zipcrypto、7z 仅数据、rar5 仅数据、rar4 头加密、rar4 仅数据、
-  gzip、bzip2、xz、zstd。
-
-本次运行记录的规划证据显示根因在嵌入扫描结果没有进入规划层：
-
-1. 整个文件顶层已被识别为 zip（carrier_prefix），`embedded_payload_identity`
-   的嵌入重扫只作用于“未被识别为压缩包”的目标，`analysis.signature_prepass`
-   没有携带完整嵌入候选；规划层只按头/尾签名预处理加各格式 probe 工作。
-2. 因此 gzip/bzip2/xz/zstd 完全不可见（压缩流模块只探测视图偏移 0 的流）；
-   zipcrypto 的 EOCD probe 未通过（同文件 zip AES-256 通过）；
-   7z 仅数据、rar5 仅数据、rar4 的 probe 未给出可提取证据；
-   tar 的边界在 PAX 头/载荷处提前结束（本例 40991→53791，实际应到 ~61471）。
-3. 已规划出的 rar 段范围 [28859, 84091] 吞掉了中间的 tar/流/垃圾
-   （7z 能容忍尾部垃圾所以该段仍解出）；tar 段被截断但 marker 幸存
-   （marker 是第一个成员）。
-4. 密码探测输入只取第一个段（7z 范围），全错密码时非加密 tar 段也一并报
-   “密码错误或未知密码”，因此反向用例当前 0 个非加密段解出。
-
-修复方向（供后续阶段参考）：即使顶层已被识别，也要让嵌入扫描候选进入规划层；
-native 为 zip/rar/bzip2/xz/zstd/tar 补齐精确 `end_offset`；压缩流模块支持按命中
-偏移探测；嵌入段密码探测输入改为逐段各自提供。
+修复方向：让嵌入段在非零偏移处继续递归识别/解出 tar 内容，并保证流格式的边界不会吞掉
+相邻嵌入段。
