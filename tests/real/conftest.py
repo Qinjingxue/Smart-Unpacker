@@ -83,6 +83,7 @@ def _write_error_record(item, report) -> None:
     ERROR_RECORDS_DIR.mkdir(parents=True, exist_ok=True)
     record_path = ERROR_RECORDS_DIR / f"{counter:03d}_{_safe_name(nodeid)}.txt"
     stdout = getattr(report, "capstdout", None) or ""
+    stderr = getattr(report, "capstderr", None) or ""
     lines = [
         f"test: {nodeid}",
         f"time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -93,6 +94,9 @@ def _write_error_record(item, report) -> None:
         "",
         "=== captured stdout ===",
         str(stdout),
+        "",
+        "=== captured stderr ===",
+        str(stderr),
         "",
         "=== plan context ===",
         json.dumps(info, ensure_ascii=False, indent=2, default=str),

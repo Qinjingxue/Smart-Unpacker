@@ -9,6 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.analysis import scan_embedded_archives
+from tests.real.diagnostics import (
+    case_snapshot,
+    environment_snapshot,
+    marker_locations,
+    password_summary,
+    pipeline_snapshot,
+    record_exception,
+    snapshot_path,
+)
 from tests.helpers.marker_utils import marker_was_extracted
 from tests.helpers.real_archives import (
     ArchiveFixtureFactory,
@@ -447,7 +456,12 @@ def _segment_table(case: EmbeddedMixedCase) -> list[dict[str, Any]]:
     ]
 
 
-def _marker_status(case: EmbeddedMixedCase, root: Path) -> list[dict[str, Any]]:
+def _marker_status(
+    case: EmbeddedMixedCase,
+    root: Path,
+    *,
+    include_locations: bool = False,
+) -> list[dict[str, Any]]:
     return [
         {
             "position": segment.position,
@@ -456,6 +470,11 @@ def _marker_status(case: EmbeddedMixedCase, root: Path) -> list[dict[str, Any]]:
             "encrypted": segment.encrypted,
             "marker_extracted": marker_was_extracted(
                 root, segment.marker_name, segment.marker_text
+            ),
+            **(
+                {"matches": marker_locations(root, segment.marker_name, segment.marker_text)}
+                if include_locations
+                else {}
             ),
         }
         for segment in case.segments
@@ -527,11 +546,110 @@ def assert_plan5_success(
     *,
     passwords: list[str] | None = None,
     error_info: dict[str, Any] | None = None,
+    detailed_diagnostics: bool = False,
 ) -> None:
     """第 5 条主断言：给出正确密码后，所有嵌入压缩段分别解压成功。"""
     effective = list(passwords) if passwords is not None else [case.password]
-    summary = run_plan1_pipeline(case.file_path, passwords=effective)
-    marker_status = _marker_status(case, case.file_path.parent)
+    diagnostics = (
+        error_info.setdefault("diagnostics", {})
+        if error_info is not None and detailed_diagnostics
+        else None
+    )
+    if diagnostics is not None:
+        diagnostics["environment"] = environment_snapshot()
+        diagnostics["case"] = {
+            **case_snapshot(case),
+            "file_path": str(case.file_path),
+            "file_size": case.file_path.stat().st_size,
+            "segment_count": len(case.segments),
+        }
+        diagnostics["passwords"] = password_summary(effective)
+        diagnostics["input_before_pipeline"] = snapshot_path(case.file_path.parent)
+        try:
+            native_scan = scan_embedded_archives(
+                str(case.file_path),
+                expected_size=case.file_path.stat().st_size,
+            )
+            expected = {
+                (segment.archive_format, segment.offset): segment.variant
+                for segment in case.segments
+            }
+            diagnostics["native_scan_before_pipeline"] = {
+                "candidate_count": len(native_scan.candidates),
+                "candidates": [
+                    {
+                        "format": candidate.format,
+                        "offset": candidate.offset,
+                        "end_offset": candidate.end_offset,
+                        "confidence": candidate.confidence,
+                        "validation": candidate.validation,
+                    }
+                    for candidate in native_scan.candidates
+                ],
+                "expected_segments": [
+                    {
+                        "format": archive_format,
+                        "offset": offset,
+                        "variant": variant,
+                    }
+                    for (archive_format, offset), variant in expected.items()
+                ],
+                "missing_expected_segments": [
+                    {
+                        "format": archive_format,
+                        "offset": offset,
+                        "variant": variant,
+                    }
+                    for (archive_format, offset), variant in expected.items()
+                    if not any(
+                        candidate.format == archive_format
+                        and candidate.offset == offset
+                        for candidate in native_scan.candidates
+                    )
+                ],
+            }
+        except BaseException as exc:
+            record_exception(error_info, "native_scan_before_pipeline", exc)
+            raise
+
+    summary = None
+    try:
+        summary = run_plan1_pipeline(case.file_path, passwords=effective)
+    except BaseException as exc:
+        if diagnostics is not None:
+            record_exception(error_info, "pipeline", exc)
+            pipeline_snapshot(
+                error_info,
+                phase="pipeline_exception",
+                roots=(case.file_path.parent,),
+            )
+        raise
+
+    if diagnostics is not None:
+        pipeline_snapshot(
+            error_info,
+            phase="pipeline_returned",
+            summary=summary,
+            roots=(case.file_path.parent,),
+        )
+
+    try:
+        marker_status = _marker_status(
+            case,
+            case.file_path.parent,
+            include_locations=detailed_diagnostics,
+        )
+    except BaseException as exc:
+        if diagnostics is not None:
+            record_exception(error_info, "marker_scan", exc)
+            pipeline_snapshot(
+                error_info,
+                phase="marker_scan_exception",
+                summary=summary,
+                roots=(case.file_path.parent,),
+            )
+        raise
+
     missing_markers = [
         item
         for item in marker_status
@@ -546,6 +664,14 @@ def assert_plan5_success(
             "failure_kinds": [str(failure.kind) for failure in summary.failures],
             "marker_status": marker_status,
         })
+        if diagnostics is not None:
+            diagnostics["marker_status"] = marker_status
+            pipeline_snapshot(
+                error_info,
+                phase="before_assertions",
+                summary=summary,
+                roots=(case.file_path.parent,),
+            )
     assert summary.failed_tasks == [], (
         f"pipeline reported failures: {[str(item) for item in summary.failed_tasks]}"
     )
