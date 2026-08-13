@@ -132,7 +132,17 @@ class RelationsGroupBuilder:
             head_missing_from_contract = path_key(group.head_path) not in group_keys
             if not bool(
                 anchor.get("confidence") == "strong"
-                and (anchor.get("multivolume") or anchor.get("sfx"))
+                and (
+                    anchor.get("multivolume")
+                    or anchor.get("sfx")
+                    or (
+                        anchor.get("format") == "rar"
+                        and (
+                            anchor.get("encrypted")
+                            or "rar5:encryption_header" in evidence
+                        )
+                    )
+                )
                 and (
                     "first" in roles
                     or anchor.get("sfx")

@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::io::reader::ManagedReader;
-use crate::password::rar::rar5_decrypt_main_header;
+use crate::password::rar::{rar4_decrypt_header_flags, rar5_decrypt_main_header};
 
 const SEVEN_ZIP: &[u8] = b"7z\xbc\xaf'\x1c";
 const RAR4: &[u8] = b"Rar!\x1a\x07\x00";
@@ -18,6 +18,7 @@ const ZIP_EMPTY: &[u8] = b"PK\x05\x06";
 const ZIP_SPLIT_MARKER: &[u8] = b"PK\x07\x08";
 const DEFAULT_PREFIX_LIMIT: usize = 1024 * 1024;
 const DEFAULT_TAIL_LIMIT: usize = 65_557;
+const RAR4_MAIN_HEADER_PASSWORD: u16 = 0x0080;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct VolumeAnchor {
@@ -147,7 +148,11 @@ fn probe_path(
         return result;
     }
     result.bytes_read += prefix.len() as u64;
-    if prefix.starts_with(b"MZ") && prefix_limit > base_prefix_len {
+    let allow_embedded = prefix.starts_with(b"MZ");
+    let has_rar4_signature = anchored_signature(&prefix, RAR4, allow_embedded).is_some();
+    if (allow_embedded || (password.is_some() && has_rar4_signature))
+        && prefix_limit > base_prefix_len
+    {
         prefix_len = size.min(prefix_limit as u64) as usize;
     }
     if prefix_len > base_prefix_len {
@@ -188,7 +193,6 @@ fn probe_path(
         }
     };
 
-    let allow_embedded = prefix.starts_with(b"MZ");
     if let Some(offset) = anchored_signature(&prefix, RAR5, allow_embedded)
         .or_else(|| anchored_signature(&prefix, RAR4, allow_embedded))
         .filter(|offset| probe_rar(&prefix, *offset, &mut result, password))
@@ -273,6 +277,21 @@ fn probe_rar(
     } else if let Some(flags) = rar4_main_flags(prefix, offset + RAR4.len()) {
         initialize_rar_anchor(out, offset);
         // RAR4 MHD_VOLUME and MHD_FIRSTVOLUME.
+        out.encrypted = flags & RAR4_MAIN_HEADER_PASSWORD != 0;
+        if out.encrypted {
+            if let Some(password) = password {
+                if rar4_decrypt_header_flags(&prefix[offset..], password).is_some() {
+                    out.evidence.push("rar4:decrypted_header");
+                } else {
+                    out.wrong_password = true;
+                    out.needs_password = true;
+                    out.evidence.push("rar4:wrong_password");
+                }
+            } else {
+                out.needs_password = true;
+                out.evidence.push("rar4:encrypted_header");
+            }
+        }
         out.multivolume = flags & 0x0001 != 0;
         if out.multivolume {
             out.anchor_roles.push(if flags & 0x0100 != 0 {
@@ -286,6 +305,25 @@ fn probe_rar(
             out.standalone = true;
             out.anchor_roles.push("standalone");
             out.evidence.push("rar4:single_archive_header");
+        }
+    } else if let Some(flags) = password
+        .and_then(|password| rar4_decrypt_header_flags(&prefix[offset..], password))
+    {
+        initialize_rar_anchor(out, offset);
+        out.encrypted = true;
+        out.evidence.push("rar4:decrypted_header");
+        out.multivolume = flags & 0x0001 != 0;
+        if out.multivolume {
+            out.anchor_roles.push(if flags & 0x0100 != 0 {
+                "first"
+            } else {
+                "member"
+            });
+            out.internal_volume_number = (flags & 0x0100 != 0).then_some(1);
+            out.needs_password = false;
+        } else {
+            out.standalone = true;
+            out.anchor_roles.push("standalone");
         }
     } else {
         return false;

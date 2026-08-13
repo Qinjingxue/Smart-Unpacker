@@ -28,14 +28,16 @@ def test_archive_task_exposes_default_descriptor_from_task_paths(tmp_path):
     assert task.archive_descriptor().relation.is_split is True
 
 
-def test_obfuscated_rar_names_without_valid_structure_stay_separate(tmp_path):
+def test_obfuscated_rar_names_use_part_number_fallback(tmp_path):
     first = tmp_path / "488.part1.rar123"
     second = tmp_path / "488.part2.rar123"
     first.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"x" * 64)
     second.write_bytes(b"x" * 72)
 
     groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
-    assert all(len(group.all_paths) == 1 for group in groups)
+    group = next(group for group in groups if group.kind == "split_archive")
+    assert {Path(path).name for path in group.all_paths} == {first.name, second.name}
+    assert [volume.number for volume in group.split_volumes] == [1, 2]
 
 
 def test_plain_name_sfx_does_not_attach_raw_camouflaged_volumes(tmp_path):

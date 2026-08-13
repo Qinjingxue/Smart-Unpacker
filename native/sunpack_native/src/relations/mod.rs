@@ -81,7 +81,7 @@ pub(crate) fn relations_parse_numbered_volume(
     py: Python<'_>,
     path: &str,
 ) -> PyResult<Option<Py<PyDict>>> {
-    Ok(parse_strict_numbered_volume(path)
+    Ok(parse_relation_numbered_volume(path)
         .map(|parsed| parsed_volume_to_dict(py, &parsed))
         .transpose()?)
 }
@@ -163,11 +163,7 @@ pub(crate) fn relations_resolve_volume_once(
     let current_structural: Vec<&VolumeAnchor> = current_paths
         .iter()
         .filter_map(|path| anchor_by_path.get(&path.to_ascii_lowercase()))
-        .filter(|anchor| {
-            anchor.confidence == "strong"
-                && (anchor.multivolume || anchor.sfx)
-                && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
-        })
+        .filter(|anchor| is_retry_anchor(anchor))
         .collect();
     if current_structural.is_empty() {
         return Ok(None);
@@ -191,11 +187,7 @@ pub(crate) fn relations_resolve_volume_once(
         .find(|path| {
             anchor_by_path
                 .get(&path.to_ascii_lowercase())
-                .is_some_and(|anchor| {
-                    anchor.confidence == "strong"
-                        && (anchor.multivolume || anchor.sfx)
-                        && anchor.format == target_format
-                })
+                .is_some_and(|anchor| is_retry_anchor(anchor) && anchor.format == target_format)
         })
         .cloned()
         .unwrap_or_else(|| current_paths[0].clone());
@@ -207,8 +199,7 @@ pub(crate) fn relations_resolve_volume_once(
     let structural_peers: Vec<&VolumeAnchor> = anchor_by_path
         .values()
         .filter(|anchor| {
-            anchor.confidence == "strong"
-                && (anchor.multivolume || anchor.sfx)
+            is_retry_anchor(anchor)
                 && anchor.format == target_format
                 && retry_primary_stem(basename(&anchor.path)) == primary_stem
                 && (anchor.anchor_roles.contains(&"first")
@@ -234,8 +225,7 @@ pub(crate) fn relations_resolve_volume_once(
     let structural_formats: HashSet<&str> = anchor_by_path
         .values()
         .filter(|anchor| {
-            anchor.confidence == "strong"
-                && (anchor.multivolume || anchor.sfx)
+            is_retry_anchor(anchor)
                 && retry_primary_stem(basename(&anchor.path)) == primary_stem
                 && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
         })
@@ -307,14 +297,12 @@ pub(crate) fn relations_resolve_volume_once(
         }
         // Do not reinterpret a structurally identified archive of another
         // format as an opaque middle part.
-        if evidence.is_some_and(|anchor| anchor.confidence == "strong" && !anchor.format.is_empty())
+        if evidence.is_some_and(|anchor| {
+            anchor.confidence == "strong"
+                && !anchor.format.is_empty()
+                && !(target_format == "rar" && anchor.format == "rar" && anchor.encrypted)
+        })
         {
-            continue;
-        }
-        // Native RAR volume sets normally carry a header in every part. Only
-        // a structurally confirmed SFX anchor opens the opaque fallback used
-        // by modern generic byte splitters; ordinary RAR remains structure-only.
-        if target_format == "rar" && !target_has_sfx_anchor {
             continue;
         }
         let Some(number) = retry_volume_number(name, target_format).or_else(|| {
@@ -450,6 +438,14 @@ fn normalize_retry_format(format_hint: &str) -> &str {
     }
 }
 
+fn is_retry_anchor(anchor: &VolumeAnchor) -> bool {
+    anchor.confidence == "strong"
+        && (anchor.multivolume
+            || anchor.sfx
+            || (anchor.format == "rar" && anchor.encrypted))
+        && matches!(anchor.format.as_str(), "7z" | "zip" | "rar")
+}
+
 fn retry_primary_stem(name: &str) -> String {
     name.split('.')
         .next()
@@ -518,6 +514,12 @@ fn retry_volume_number(name: &str, target_format: &str) -> Option<u32> {
         .into_iter()
         .find(|parsed| parsed.family == target_format && parsed.number > 0)
         .map(|parsed| parsed.number)
+        .or_else(|| {
+            (target_format == "rar")
+                .then(|| parse_loose_rar_part_volume(name))
+                .flatten()
+                .map(|parsed| parsed.number)
+        })
         .or_else(|| scan_retry_tokens(name, target_format))
 }
 
@@ -1154,7 +1156,7 @@ fn build_native_split_contract(
 ) -> NativeSplitContract {
     let parsed: Vec<(&RelationInput, ParsedVolume)> = group_entries
         .iter()
-        .filter_map(|entry| parse_strict_numbered_volume(&entry.path).map(|parsed| (entry, parsed)))
+        .filter_map(|entry| parse_relation_numbered_volume(&entry.path).map(|parsed| (entry, parsed)))
         .collect();
     if parsed.is_empty() && group_entries.len() == 1 {
         let entry = &group_entries[0];
@@ -1518,7 +1520,7 @@ fn build_file_relation(
     let mut parsed_volume = if structural_standalone {
         None
     } else {
-        parse_strict_numbered_volume(filename)
+        parse_relation_numbered_volume(filename)
     };
     if let (Some(parsed), Some(anchor)) = (parsed_volume.as_mut(), anchor) {
         if anchor.confidence == "strong" && !anchor.format.is_empty() {
@@ -1698,7 +1700,7 @@ fn parsed_volume_to_dict(py: Python<'_>, parsed: &ParsedVolume) -> PyResult<Py<P
 }
 
 fn detect_split_role(filename: &str) -> Option<&'static str> {
-    if let Some(parsed) = parse_strict_numbered_volume(filename) {
+    if let Some(parsed) = parse_relation_numbered_volume(filename) {
         return Some(if parsed.number == 1 {
             "first"
         } else {
@@ -1709,7 +1711,7 @@ fn detect_split_role(filename: &str) -> Option<&'static str> {
 }
 
 fn get_logical_name(filename: &str, is_archive: bool) -> String {
-    if let Some(parsed) = parse_strict_numbered_volume(filename) {
+    if let Some(parsed) = parse_relation_numbered_volume(filename) {
         return logical_name_from_parsed(&parsed);
     }
     let name = rar_part_suffix_re().replace(filename, "").to_string();
@@ -1772,11 +1774,15 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
     Some(parsed)
 }
 
-fn parse_strict_numbered_volume(path: &str) -> Option<ParsedVolume> {
+fn parse_relation_numbered_volume(path: &str) -> Option<ParsedVolume> {
     let (directory, filename) = split_relation_path(path);
     let mut parsed = parse_volume_candidates(filename)
         .into_iter()
-        .find(|candidate| !candidate.decorated)?;
+        .find(|candidate| {
+            !candidate.decorated
+                || (candidate.family == "rar"
+                    && matches!(candidate.style, "rar_part" | "rar_sfx_part"))
+        })?;
     if !directory.is_empty() {
         parsed.prefix = format!("{directory}{}", parsed.prefix);
     }
@@ -1795,7 +1801,7 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
         return Vec::new();
     }
     let mut keys = Vec::new();
-    if let Some(parsed) = parse_strict_numbered_volume(path) {
+    if let Some(parsed) = parse_relation_numbered_volume(path) {
         let scheme = match parsed.style {
             "rar_part" | "rar_sfx_part" => "rar:part",
             "rar_oldstyle" => "rar:oldstyle",
@@ -1806,6 +1812,8 @@ pub(crate) fn relations_size_filter_split_family_keys(path: &str) -> Vec<String>
             other => other,
         };
         keys.push(split_size_family_key(scheme, &parsed.prefix));
+    } else if let Some(parsed) = parse_loose_rar_part_volume(basename(path)) {
+        keys.push(split_size_family_key("rar:part", &parsed.prefix));
     }
 
     // Canonical heads/tails do not themselves carry a numeric suffix, but
@@ -1864,6 +1872,9 @@ pub(crate) fn relations_apply_split_size_anchors(
 
 fn may_have_size_deferred_split_identity(path: &str) -> bool {
     let name = basename(path).to_ascii_lowercase();
+    if parse_loose_rar_part_volume(&name).is_some() {
+        return true;
+    }
     if name.ends_with(".7z") || name.ends_with(".zip") || name.ends_with(".rar") {
         return true;
     }
@@ -2112,6 +2123,30 @@ fn parse_marker_numbered_volume(path: &str) -> Option<ParsedVolume> {
         family,
         decorated: !tail.eq_ignore_ascii_case(".rar")
             && !(number == 1 && tail.eq_ignore_ascii_case(".exe")),
+    })
+}
+
+/// RAR's `partN` token is often the only stable part of a disguised name.
+/// Keep this fallback out of the generic filename parser: without a structural
+/// RAR anchor, accepting arbitrary `partN` names would merge unrelated files.
+fn parse_loose_rar_part_volume(path: &str) -> Option<ParsedVolume> {
+    let captures = rar_loose_part_re().captures(path)?;
+    let raw_number = captures.name("number")?.as_str();
+    let number = raw_number.parse::<u32>().ok().filter(|value| *value > 0)?;
+    let prefix = captures
+        .name("prefix")?
+        .as_str()
+        .trim_end_matches(['.', '_', '-', ' ']);
+    if prefix.is_empty() {
+        return None;
+    }
+    Some(ParsedVolume {
+        prefix: prefix.to_string(),
+        number,
+        style: "rar_part",
+        width: raw_number.len(),
+        family: "rar",
+        decorated: true,
     })
 }
 
@@ -2504,6 +2539,11 @@ fn parse_marker_numbered_re() -> &'static Regex {
     VALUE.get_or_init(|| {
         re(r"^(?P<prefix>.+)\.(?:part|vol(?:ume)?)[-_ ]*(?P<number>\d+)(?:[-_ ][^.]*)?(?P<tail>(?:\.[^.]+)*)$")
     })
+}
+
+fn rar_loose_part_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.*?)part(?P<number>\d+).*$"))
 }
 
 // Decorated names preserve only the meaningful token order. Everything surrounding

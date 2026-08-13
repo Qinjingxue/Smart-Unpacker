@@ -89,7 +89,6 @@ def test_public_parser_exposes_only_strict_names(name, number, style):
     "name",
     [
         "archive.7z.001.noise.bin",
-        "archive.part1.rar.hidden",
         "archive.volume_1.fake",
         "archive.[z-02]~",
     ],
@@ -113,6 +112,22 @@ def test_public_parser_accepts_modern_split_zip_members():
     assert later is not None
     assert later["number"] == 12
     assert later["style"] == "zip_spanned"
+
+
+@pytest.mark.parametrize(
+    ("name", "number"),
+    [
+        ("archive.part1.rar.hidden", 1),
+        ("archive.part2.rar123", 2),
+    ],
+)
+def test_public_parser_accepts_decorated_rar_part_marker(name, number):
+    parsed = RelationsScheduler().parse_numbered_volume(name)
+
+    assert parsed is not None
+    assert parsed["number"] == number
+    assert parsed["style"] == "rar_part"
+    assert parsed["decorated"] is True
 
 
 def test_split_zip_structure_anchor_recovers_decorated_middle_member(tmp_path):

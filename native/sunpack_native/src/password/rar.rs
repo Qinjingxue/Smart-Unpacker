@@ -80,6 +80,23 @@ pub(crate) fn rar_fast_verify_passwords_with_reader(
             }
         };
     }
+    if rar4_prefix_needs_extended_scan(&data) {
+        data = match py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN)) {
+            Ok(data) => data,
+            Err(error) => {
+                let fault = ReadFault::from_io(
+                    error,
+                    "read_at",
+                    0,
+                    MAX_RAR_PREFIX_SCAN,
+                    0,
+                    reader.len(),
+                )
+                .with_field("rar4.encrypted_header", FieldLocation::Head);
+                return password_read_fault_status(py, &fault);
+            }
+        };
+    }
     if let Some(required) = rar4_data_prefix_requirement(&data) {
         if required > data.len() && required <= MAX_RAR_PREFIX_SCAN {
             data = match py.detach(|| reader.read_at(0, required)) {
@@ -149,6 +166,16 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
             Err(fault) => return password_read_fault_status(py, &fault),
         };
     }
+    if rar4_prefix_needs_extended_scan(&data) {
+        data = match read_prefix_from_ranges_field(
+            &parsed,
+            MAX_RAR_PREFIX_SCAN,
+            "rar4.encrypted_header",
+        ) {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
+    }
     if let Some(required) = rar4_data_prefix_requirement(&data) {
         if required > data.len() && required <= MAX_RAR_PREFIX_SCAN {
             data = match read_prefix_from_ranges_field(&parsed, required, "rar4.file_data") {
@@ -185,6 +212,14 @@ pub(crate) fn rar_fast_verify_passwords_from_volumes(
             Err(fault) => return password_read_fault_status(py, &fault),
         };
     }
+    if rar4_prefix_needs_extended_scan(&data) {
+        data = match py
+            .detach(|| volumes.first_prefix_field(MAX_RAR_PREFIX_SCAN, "rar4.encrypted_header"))
+        {
+            Ok(data) => data,
+            Err(fault) => return password_read_fault_status(py, &fault),
+        };
+    }
     if let Some(required) = rar4_data_prefix_requirement(&data) {
         if required > data.len() && required <= MAX_RAR_PREFIX_SCAN {
             data = match py.detach(|| {
@@ -200,6 +235,12 @@ pub(crate) fn rar_fast_verify_passwords_from_volumes(
 
 fn rar5_prefix_needs_extended_scan(data: &[u8]) -> bool {
     data.starts_with(RAR5_SIGNATURE) && find_rar5_encryption_header(data).is_none()
+}
+
+fn rar4_prefix_needs_extended_scan(data: &[u8]) -> bool {
+    data.starts_with(RAR4_SIGNATURE)
+        && parse_rar4_block(data, RAR4_SIGNATURE.len())
+            .is_some_and(|main| main.flags & RAR4_MAIN_HEADER_PASSWORD != 0)
 }
 
 #[derive(Clone, Copy)]
@@ -300,6 +341,61 @@ fn parse_rar4_block(data: &[u8], offset: usize) -> Option<Rar4Block> {
         header_end,
         next_offset,
     })
+}
+
+/// Verify a RAR4 `-hp` password against the first encrypted block header.
+///
+/// In the normal RAR4 layout the Main Header remains plaintext and carries
+/// MHD_PASSWORD; the salt is immediately after that header and all following
+/// block headers are AES-CBC encrypted.  A few legacy inputs instead encrypt
+/// the first header directly after the signature, so retain that form as a
+/// fallback for the existing verifier path.
+pub(crate) fn rar4_decrypt_header_flags(data: &[u8], password: &str) -> Option<u16> {
+    let main = parse_rar4_block(data, RAR4_SIGNATURE.len());
+    if let Some(main) = main.filter(|block| block.header_type == 0x73) {
+        if main.flags & RAR4_MAIN_HEADER_PASSWORD == 0 {
+            return None;
+        }
+        let encrypted_offset = main.next_offset.checked_add(8)?;
+        let encrypted = data.get(encrypted_offset..)?;
+        let first = decrypt_rar4_header(encrypted, password, &data[main.next_offset..])?;
+        return (0x72..=0x7b)
+            .contains(&first.header_type)
+            .then_some(main.flags);
+    }
+
+    let payload = data.get(RAR4_SIGNATURE.len()..)?;
+    let first = decrypt_rar4_header(payload.get(8..)?, password, &payload[..])?;
+    (first.header_type == 0x73).then_some(first.flags)
+}
+
+fn decrypt_rar4_header(
+    encrypted: &[u8],
+    password: &str,
+    salt_source: &[u8],
+) -> Option<Rar4Block> {
+    let salt: &[u8; 8] = salt_source.get(..8)?.try_into().ok()?;
+    if encrypted.len() < 16 {
+        return None;
+    }
+    let (key, iv) = derive_rar3_key_iv(password, Some(salt));
+    let mut first_block = encrypted[..16].to_vec();
+    let first_plaintext = Aes128CbcDecryptor::new(&key.into(), &iv.into())
+        .decrypt_padded::<NoPadding>(&mut first_block)
+        .ok()?;
+    let header_size = u16::from_le_bytes([first_plaintext[5], first_plaintext[6]]) as usize;
+    if header_size < RAR4_MIN_HEADER_SIZE {
+        return None;
+    }
+    let decrypt_len = header_size.checked_add(15)? & !0x0f;
+    if decrypt_len > encrypted.len() {
+        return None;
+    }
+    let mut plaintext = encrypted[..decrypt_len].to_vec();
+    let decrypted = Aes128CbcDecryptor::new(&key.into(), &iv.into())
+        .decrypt_padded::<NoPadding>(&mut plaintext)
+        .ok()?;
+    parse_rar4_block(decrypted, 0)
 }
 
 fn parse_rar4_file_probe(
@@ -511,6 +607,38 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
             );
         }
         return verify_rar4_stored_data(py, data, candidates, &probe);
+    }
+    if let Some(_main) = parse_rar4_block(data, RAR4_SIGNATURE.len())
+        .filter(|block| block.header_type == 0x73)
+        .filter(|block| block.flags & RAR4_MAIN_HEADER_PASSWORD != 0)
+    {
+        let matched_index = py.detach(|| {
+            if candidates.len() >= PARALLEL_PASSWORD_THRESHOLD {
+                candidates.par_iter().position_first(|password| {
+                    rar4_decrypt_header_flags(data, password).is_some()
+                })
+            } else {
+                candidates
+                    .iter()
+                    .position(|password| rar4_decrypt_header_flags(data, password).is_some())
+            }
+        });
+        if let Some(index) = matched_index {
+            return status(
+                py,
+                "match",
+                index as i32,
+                (index + 1) as i32,
+                "rar3/rar4 -hp encrypted header matched",
+            );
+        }
+        return status(
+            py,
+            "no_match",
+            -1,
+            candidates.len() as i32,
+            "rar3/rar4 -hp encrypted header did not match",
+        );
     }
     if parse_rar4_plain_header(payload).is_some() {
         return status(
