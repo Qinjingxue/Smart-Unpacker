@@ -1,3 +1,4 @@
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.support.output_inventory import collect_output_inventory
@@ -31,6 +32,93 @@ def test_output_scan_policy_finds_nested_archive_when_initial_scan_is_current_di
 
     assert policy.should_scan_output_dir(str(tmp_path))
     assert policy.scan_roots_from_outputs([str(tmp_path)]) == [str(tmp_path.resolve())]
+
+
+def test_output_scan_policy_projects_normal_archive_as_one_logical_root(tmp_path):
+    output_dir = tmp_path / "normal"
+    output_dir.mkdir()
+    archive = output_dir / "nested.zip"
+    archive.write_bytes(b"PK\x03\x04payload")
+    result = ExtractionResult(
+        success=True,
+        archive="normal.zip",
+        out_dir=str(output_dir),
+        all_parts=["normal.zip"],
+    )
+
+    projected = OutputScanPolicy.project_logical_scan_roots(str(output_dir), result)
+
+    assert [root for root, _inventory in projected] == [str(output_dir)]
+
+
+def test_output_scan_policy_projects_each_confirmed_embedded_segment(tmp_path):
+    carrier_dir = tmp_path / "carrier_extracted"
+    segment_one = carrier_dir / "embedded_00_zip"
+    segment_two = carrier_dir / "embedded_01_tar"
+    segment_one.mkdir(parents=True)
+    segment_two.mkdir()
+    (segment_one / "one.zip").write_bytes(b"PK\x03\x04one")
+    (segment_two / "two.tar").write_bytes(b"ustar" + b"x" * 512)
+    child_one = ExtractionResult(
+        success=True,
+        archive="one.zip",
+        out_dir=str(segment_one),
+        all_parts=["one.zip"],
+        output_inventory=collect_output_inventory(str(segment_one)),
+    )
+    child_two = ExtractionResult(
+        success=True,
+        archive="two.tar",
+        out_dir=str(segment_two),
+        all_parts=["two.tar"],
+        output_inventory=collect_output_inventory(str(segment_two)),
+    )
+    result = ExtractionResult(
+        success=True,
+        archive="carrier.bin",
+        out_dir=str(carrier_dir),
+        all_parts=["carrier.bin"],
+        embedded_results=[
+            ({"segment_id": "embedded_00_zip"}, child_one),
+            ({"segment_id": "embedded_01_tar"}, child_two),
+        ],
+    )
+
+    projected = OutputScanPolicy.project_logical_scan_roots(str(carrier_dir), result)
+
+    assert [root for root, _inventory in projected] == [str(segment_one), str(segment_two)]
+    assert projected[0][1] is child_one.output_inventory
+    assert projected[1][1] is child_two.output_inventory
+
+
+def test_output_scan_policy_scans_projected_embedded_roots_with_their_inventories(tmp_path):
+    carrier_dir = tmp_path / "carrier_extracted"
+    segment_one = carrier_dir / "embedded_00_zip"
+    segment_two = carrier_dir / "embedded_01_tar"
+    segment_one.mkdir(parents=True)
+    segment_two.mkdir()
+    first = segment_one / "first.zip"
+    second = segment_two / "second.tar.gz"
+    first.write_bytes(b"PK\x03\x04first")
+    second.write_bytes(b"\x1f\x8bsecond")
+    inventory_one = collect_output_inventory(str(segment_one))
+    inventory_two = collect_output_inventory(str(segment_two))
+    policy = OutputScanPolicy(_config())
+
+    roots = policy.scan_roots_from_outputs(
+        [str(carrier_dir)],
+        inventories={
+            str(segment_one.resolve()).lower(): inventory_one,
+            str(segment_two.resolve()).lower(): inventory_two,
+        },
+        logical_roots=[str(segment_one), str(segment_two)],
+    )
+
+    assert roots == [str(segment_one.resolve()), str(segment_two.resolve())]
+    session = policy.take_scan_session(roots)
+    assert session is not None
+    bags = build_fact_bags_for_targets(roots, session=session, config=_config())
+    assert {bag.get("candidate.entry_path") for bag in bags} == {str(first.resolve()), str(second.resolve())}
 
 
 def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):

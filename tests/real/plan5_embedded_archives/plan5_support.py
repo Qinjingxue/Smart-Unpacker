@@ -549,8 +549,11 @@ def assert_plan5_success(
     assert summary.failed_tasks == [], (
         f"pipeline reported failures: {[str(item) for item in summary.failed_tasks]}"
     )
-    assert summary.success_count == 1, (
-        f"expected 1 success, got {summary.success_count}"
+    # Recursive extraction reports independently successful nested archives as
+    # additional successes.  The user-visible contract here is that the
+    # carrier succeeds and every marker is present, not a fixed task count.
+    assert summary.success_count >= 1, (
+        f"expected at least the carrier success, got {summary.success_count}"
     )
     assert not missing_markers, (
         f"markers missing for segments: "

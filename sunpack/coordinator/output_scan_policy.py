@@ -64,16 +64,23 @@ class NestedOutputScanPolicy:
         self,
         output_dirs: Iterable[str],
         inventories: dict[str, OutputInventory | dict[str, Any]] | None = None,
+        logical_roots: Iterable[str] | None = None,
     ) -> list[str]:
         roots = []
         seen = set()
         inventories = inventories or {}
+        # A carrier can contain several independently extracted archives.  In
+        # that case the carrier output directory is only a physical container;
+        # authorization for the next recursive round must be evaluated from
+        # each confirmed segment directory independently.  Ordinary archives
+        # continue to use their output directory as their single logical root.
+        scan_dirs = logical_roots if logical_roots is not None else output_dirs
         scan_session = DetectionScanSession(
             config=self.config,
             include_raw_snapshots=True,
         )
         has_primed_snapshot = False
-        for output_dir in output_dirs:
+        for output_dir in scan_dirs:
             if not output_dir or not os.path.isdir(output_dir):
                 continue
             inventory = OutputInventory.from_value(
@@ -108,6 +115,47 @@ class NestedOutputScanPolicy:
             has_primed_snapshot = True
         self._pending_scan_session = scan_session if has_primed_snapshot else None
         return roots
+
+    @staticmethod
+    def project_logical_scan_roots(
+        output_dir: str,
+        extraction_result: Any,
+    ) -> list[tuple[str, OutputInventory | dict[str, Any] | None]]:
+        """Project one extraction result into independently authorized roots.
+
+        The projection is deliberately based on the in-process child results
+        produced by the extractor, rather than on directory names.  A normal
+        archive has one logical root (its existing output directory).  An
+        embedded carrier contributes the output directory of each confirmed
+        segment, together with that segment's inventory when available.
+
+        This only changes the recursive scan boundary.  It does not alter
+        extraction, verification, output naming, or the authorization
+        threshold itself.
+        """
+        embedded_results = list(getattr(extraction_result, "embedded_results", None) or [])
+        projected: list[tuple[str, OutputInventory | dict[str, Any] | None]] = []
+        for segment, child_result in embedded_results:
+            segment = segment if isinstance(segment, dict) else {}
+            segment_dir = str(
+                getattr(child_result, "out_dir", "")
+                or segment.get("out_dir")
+                or ""
+            ).strip()
+            if not segment_dir:
+                continue
+            child_inventory = getattr(child_result, "output_inventory", None)
+            if child_inventory is None:
+                child_inventory = getattr(child_result, "output_inventory_payload", None)
+            projected.append((segment_dir, child_inventory))
+
+        if projected:
+            return projected
+
+        inventory = getattr(extraction_result, "output_inventory", None)
+        if inventory is None:
+            inventory = getattr(extraction_result, "output_inventory_payload", None)
+        return [(output_dir, inventory)]
 
     def take_scan_session(self, scan_roots: Iterable[str]) -> DetectionScanSession | None:
         """Consume the inventory-backed session prepared for the next recursive round."""

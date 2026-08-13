@@ -244,22 +244,33 @@ class ExtractionBatchRunner:
         )
 
         output_dirs = []
+        logical_scan_roots = []
         output_inventories: dict[str, OutputInventory] = {}
         for task, outcome in results:
             output_dir = self.collect_result(task, outcome)
             if output_dir:
                 output_dirs.append(output_dir)
                 self.directory_password_contexts.remember(output_dir, task)
-                inventory = OutputInventory.from_value(
-                    outcome.result.output_inventory or outcome.result.output_inventory_payload,
-                    expected_root=output_dir,
-                )
-                if inventory is not None:
-                    output_inventories[os.path.normcase(os.path.abspath(output_dir))] = inventory
+                if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
+                    projected_roots = self.output_scan_policy.project_logical_scan_roots(
+                        output_dir,
+                        outcome.result,
+                    )
+                else:
+                    projected_roots = [(output_dir, None)]
+                for logical_root, projected_inventory in projected_roots:
+                    logical_scan_roots.append(logical_root)
+                    inventory = OutputInventory.from_value(
+                        projected_inventory,
+                        expected_root=logical_root,
+                    )
+                    if inventory is not None:
+                        output_inventories[os.path.normcase(os.path.abspath(logical_root))] = inventory
         if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
             return self.output_scan_policy.scan_roots_from_outputs(
                 output_dirs,
                 inventories=output_inventories,
+                logical_roots=logical_scan_roots,
             )
         return self.output_scan_policy.scan_roots_from_outputs(output_dirs)
 
