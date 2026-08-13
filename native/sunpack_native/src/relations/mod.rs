@@ -296,13 +296,16 @@ pub(crate) fn relations_resolve_volume_once(
             continue;
         }
         // Do not reinterpret a structurally identified archive of another
-        // format as an opaque middle part.
+        // format as an opaque middle part.  A same-format single-disk EOCD
+        // without a visible local header is deliberately allowed to fall
+        // through to strict filename evidence (for example
+        // `archive.zip.005.junk.dat`); this is how a real ZIP tail survives
+        // bounded probing without making a carrier ZIP a split anchor.
         if evidence.is_some_and(|anchor| {
             anchor.confidence == "strong"
                 && !anchor.format.is_empty()
-                && !(target_format == "rar" && anchor.format == "rar" && anchor.encrypted)
-        })
-        {
+                && anchor.format != target_format
+        }) {
             continue;
         }
         let Some(number) = retry_volume_number(name, target_format).or_else(|| {

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from tests.real.plan7_watch_downloads.plan7_support import (
     PASSWORD,
     MemorySampler,
@@ -17,7 +15,6 @@ from tests.real.plan7_watch_downloads.plan7_support import (
 )
 
 
-@pytest.mark.slow_real_archive
 def test_plan7_plain_and_sfx_downloads_complete_and_record_memory(
     tmp_path, plan7_error, record_property
 ):
@@ -28,6 +25,7 @@ def test_plan7_plain_and_sfx_downloads_complete_and_record_memory(
     plan7_error["case_id"] = "plan7_plain_sfx"
     plan7_error["skipped"] = skipped
     plan7_error["archives"] = sorted(cases)
+    assert not skipped, f"Plan 7 requires the full generator matrix: {skipped}"
     assert cases, "no plain/SFX cases could be generated"
 
     passwords = [*wrong_password_list(), PASSWORD]
@@ -42,7 +40,7 @@ def test_plan7_plain_and_sfx_downloads_complete_and_record_memory(
         for plan7_case in cases.values():
             arrive_slowly(harness, plan7_case.case.entry_path, tick_latencies=tick_latencies)
             arrived_count += 1
-            plan7_case.stable_at = time.perf_counter()
+            plan7_case.stable_at = harness.stable_at_by_name[plan7_case.case.entry_path.name]
             sampler.sample(
                 installed_volumes=arrived_count,
                 completed_archives=0,
@@ -74,6 +72,7 @@ def test_plan7_plain_and_sfx_downloads_complete_and_record_memory(
             cases,
             sampler=sampler,
             tick_latencies=tick_latencies,
+            expect_exact_submissions=False,
             error_info=plan7_error,
             record_property=record_property,
         )

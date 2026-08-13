@@ -3,8 +3,6 @@ from __future__ import annotations
 import random
 import time
 
-import pytest
-
 from tests.real.plan7_watch_downloads.plan7_support import (
     PASSWORD,
     MemorySampler,
@@ -12,6 +10,7 @@ from tests.real.plan7_watch_downloads.plan7_support import (
     arrive_slowly,
     build_split_cases,
     drive_watch_until,
+    input_volume_names,
     marker_text_extracted,
     split_arrival_order,
     start_watch,
@@ -19,7 +18,6 @@ from tests.real.plan7_watch_downloads.plan7_support import (
 )
 
 
-@pytest.mark.slow_real_archive
 def test_plan7_split_downloads_out_of_order_complete_and_record_memory(
     tmp_path, plan7_error, record_property
 ):
@@ -29,6 +27,7 @@ def test_plan7_split_downloads_out_of_order_complete_and_record_memory(
     plan7_error["case_id"] = "plan7_split"
     plan7_error["skipped"] = skipped
     plan7_error["archives"] = sorted(cases)
+    assert not skipped, f"Plan 7 requires the full generator matrix: {skipped}"
     assert cases, "no split cases could be generated"
 
     passwords = [*wrong_password_list(), PASSWORD]
@@ -49,7 +48,9 @@ def test_plan7_split_downloads_out_of_order_complete_and_record_memory(
             for volume in order:
                 arrive_slowly(harness, volume, tick_latencies=tick_latencies)
                 installed_volumes += 1
-            plan7_case.stable_at = time.perf_counter()
+            input_names = set(input_volume_names(plan7_case))
+            last_input = next(path for path in reversed(order) if path.name in input_names)
+            plan7_case.stable_at = harness.stable_at_by_name[last_input.name]
             arrived_count += 1
             sampler.sample(
                 installed_volumes=installed_volumes,

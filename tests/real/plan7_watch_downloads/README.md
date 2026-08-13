@@ -13,32 +13,75 @@
 
 - 旧测试只覆盖 rar/7z/zip 加密分卷，且关闭了检测管线；
 - 本套件迁移并升级：启用完整检测管线（复用 plan1 配置），覆盖全部支持格式，
-  并新增按到达数量采样的内存时间线。
+  并新增按到达数量采样的内存时间线、实际提交事件和稳定后的反应延迟断言。
 
 ## 模拟方式
 
 `arrive_slowly` 按真实下载器行为写入：分块（16KB）追加到
 `<name>.downloading` 临时文件，每块 fsync 并触发 watch 事件，全部写完后再
-`os.replace` 改名为最终文件名并触发 moved 事件。分卷则按每个卷逐一分块下载，
-卷号乱序到达（非头卷随机乱序、头卷最后），验证 watch 不会在卷未齐时误判，
-卷齐后会自动重试完成。
+`os.replace` 改名为最终文件名并触发 moved 事件；同时覆盖直接写最终文件名的下载器。
+`arrive_interleaved` 让多个归档交错下载，另有中断后重新创建 watcher 并续写的场景。
+分卷按每个卷逐一分块下载，卷号乱序到达（非头卷随机乱序、头卷最后），另测
+启动器先到、数据卷先到且启动器最后到，以及 RAR `part1.exe` 作为真实数据卷。
 
 密码文件 `.sunpack-passwords.txt` 写入 24 个错误密码 + 1 个正确密码；
 加密归档全部使用同一个正确密码。
 
-## 覆盖矩阵
+## 八阶段覆盖矩阵
 
-`test_plan7_plain_and_sfx_downloads.py`（11 个归档）：
+### 阶段 1-2：基线矩阵、反应/完成断言
 
-- 普通：zip / 7z / rar（加密）、tar、gzip、bzip2、xz、zstd；
-- SFX：zip / rar / 7z（加密）。
+`test_plan7_plain_and_sfx_downloads.py`：
 
-`test_plan7_split_downloads.py`（6 个归档）：
+- 普通：zip / 7z / rar（加密）、tar、tar.gz、tar.bz2、tar.xz、tar.zst、
+  gzip、bzip2、xz、zstd；
+- SFX：zip / rar / 7z（加密）；
+- 记录最后稳定时间、首次有效提交时间、完成时间，并要求稳定后在 15 秒内有反应、
+  60 秒内完成。
+
+### 阶段 3：写入方式、交错下载、重启续传
+
+`test_plan7_download_modes.py` 覆盖：
+
+- ZIP + 7z 多归档交错分块；
+- 直接写最终文件名；
+- 中断下载、关闭 watcher、持久化状态后重新启动并续写。
+
+### 阶段 4：分卷到达顺序
+
+`test_plan7_arrival_orders.py` 覆盖：
+
+- 7z/ZIP SFX 启动器先到；
+- 数据卷先到、启动器最后到（保留已约定的极端边界）；
+- RAR `part1.exe` 必须作为输入卷而不是 launcher companion。
+
+`test_plan7_split_downloads.py`：
 
 - 分卷：7z（`.001` 数值后缀）、zip（`.001` 数值后缀）、rar（`partN`）；
 - SFX 分卷：7z / zip / rar。
 
-工具缺失（Rar.exe / zstd.exe）时对应归档自动跳过并在上下文记录 `skipped`。
+### 阶段 5：密码和容器变体
+
+`test_plan7_variants.py` 覆盖 7z header encryption off、ZIP Crypto、ZIP AES-256、
+RAR4 header encryption 和 RAR4 data-only；所有场景都同时提供错误密码和正确密码。
+
+### 阶段 6：扩展名伪装与载体前缀
+
+`test_plan7_disguised.py` 覆盖 7z/RAR 伪装扩展名，以及带 JPG 前缀的 ZIP。后者还
+回归关系层不能把单盘 EOCD 误当成缺失尾卷的问题。
+
+### 阶段 7：简单嵌入
+
+`test_plan7_embedded.py` 只构造三个独立文件：一个只嵌入 7z、一个只嵌入 ZIP、
+一个只嵌入 RAR；不引入 Plan 5 的多段、多格式复杂嵌入。
+
+### 阶段 8：生命周期和清理
+
+`test_plan7_cleanup.py` 验证 SFX 分卷的 launcher 与所有数据卷都进入 owned/cleanup
+集合，解压成功后 `archive_cleanup_mode=delete` 会全部清理；各测试还检查 watch 状态
+无残留失败、完成路径重放不产生新提交和每次轮询延迟。
+
+Plan 7 要求完整生成能力（7z SFX 模块、RAR/WinRAR 及 zstd.exe）；缺失时直接失败并在上下文记录 `skipped`，避免只验证剩余格式却误报矩阵通过。
 
 ## 断言
 
@@ -59,12 +102,14 @@
 
 ## 运行
 
-本套件沿用真实归档矩阵的 slow 标记：
+本套件默认运行，无需额外参数：
 
 ```powershell
-pytest tests/real/plan7_watch_downloads --run-slow-real-archives -q
+pytest tests/real/plan7_watch_downloads -q
 ```
 
 ## 当前状态
 
-两个用例均通过（本机实测：普通+SFX 约 4.5s，分卷乱序约 9s）。
+套件默认运行，不再依赖 `slow_real_archive` 标记或额外参数。完整矩阵要求本机具备
+7z SFX 模块、RAR/WinRAR 和 `zstd.exe`；缺失时测试直接失败并把缺失能力写入测试上下文，
+不会把缩减后的矩阵误报为通过。

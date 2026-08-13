@@ -530,6 +530,13 @@ fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor
     if has_first && eocd_index.is_some() && !split_terminal {
         out.standalone = true;
         out.anchor_roles.push("standalone");
+    } else if eocd_index.is_some() && !split_terminal && start_offset.is_none() {
+        // A single-disk EOCD without a visible local header is not enough to
+        // prove either standalone content or a split terminal.  Keep it
+        // non-multivolume so carrier ZIPs do not block watch, while leaving
+        // filename-declared `.zip.00N` members available to Relations.
+        out.evidence
+            .push("zip:eocd_single_disk_without_local_header");
     } else {
         out.multivolume = true;
         out.continuation_from_previous = eocd_index.is_some();

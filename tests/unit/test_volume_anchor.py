@@ -58,6 +58,24 @@ def test_small_zip_tail_is_read_past_the_initial_prefix(tmp_path):
     assert {"first", "terminal", "standalone"} <= set(evidence.anchor_roles)
 
 
+def test_prefixed_single_disk_zip_is_not_promoted_to_multivolume(tmp_path):
+    archive = tmp_path / "payload.jpg"
+    source = tmp_path / "payload.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_STORED) as stream:
+        stream.writestr("payload.txt", "carrier")
+    archive.write_bytes(b"fake-jpeg-prefix" + source.read_bytes())
+    source.unlink()
+
+    evidence = probe_volume_anchor_paths([str(archive)]).get(str(archive))
+
+    assert evidence is not None
+    assert evidence.structurally_confirmed
+    assert evidence.format == "zip"
+    assert evidence.standalone is False
+    assert evidence.multivolume is False
+    assert "zip:eocd_single_disk_without_local_header" in evidence.evidence
+
+
 def test_modern_split_zip_first_marker_is_a_strong_volume_anchor(tmp_path):
     candidate = tmp_path / "archive.z01"
     name = b"x"

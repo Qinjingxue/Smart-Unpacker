@@ -1,5 +1,6 @@
 from pathlib import Path
 import struct
+import zipfile
 
 import pytest
 
@@ -250,6 +251,37 @@ def test_standalone_tbz2_cannot_become_zip_volume_two(tmp_path):
     assert by_name["payload.tbz2"].kind == "file"
     assert by_name["payload.tbz2"].head_metadata["format"] == "bzip2"
     assert by_name["payload.tbz2"].head_metadata["standalone"] is True
+
+
+def test_prefixed_single_disk_zip_carrier_is_not_waited_as_missing_tail(tmp_path):
+    carrier = tmp_path / "cover.jpg"
+    archive = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as stream:
+        stream.writestr("payload.txt", "carrier")
+    carrier.write_bytes(b"fake-jpeg-prefix" + archive.read_bytes())
+    archive.unlink()
+
+    group = _groups(tmp_path)[0]
+
+    assert group.kind == "file"
+    assert group.split_volumes == []
+    assert group.split_completeness_status != "tail_missing"
+    assert group.head_metadata["format"] == "zip"
+
+
+def test_raw_zip_numeric_tail_name_stays_in_split_relation(tmp_path):
+    first = tmp_path / "raw.zip.001"
+    tail = tmp_path / "raw.zip.003"
+    first.write_bytes(b"raw first volume")
+    tail.write_bytes(b"raw tail volume")
+
+    group = next(group for group in _groups(tmp_path) if group.logical_name == "raw")
+
+    assert group.kind == "split_archive"
+    assert group.relation.split_family == "zip_numbered"
+    assert [volume.number for volume in group.split_volumes] == [1, 3]
+    assert group.split_missing_indices == [2]
+    assert group.split_completeness_status == "middle_gap"
 
 
 def test_middle_gap_keeps_structured_missing_index(tmp_path):
