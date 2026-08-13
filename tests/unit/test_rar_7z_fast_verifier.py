@@ -245,6 +245,42 @@ def test_rar_fast_verifier_uses_structured_first_volume(tmp_path):
     assert outcome.matched_index == 1
 
 
+@pytest.mark.parametrize("volume_numbers", [[2, 3], [1, 3]])
+def test_rar_fast_verifier_reports_missing_noncontiguous_volumes(tmp_path, volume_numbers):
+    parts = []
+    for number in volume_numbers:
+        path = tmp_path / f"archive.part{number}.rar"
+        path.write_bytes(_rar5_encryption_header_fixture())
+        parts.append(
+            {
+                "path": str(path),
+                "role": "first" if number == 1 else "member",
+                "volume_number": number,
+                "canonical_name": path.name,
+            }
+        )
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(tmp_path / f"archive.part{volume_numbers[0]}.rar"),
+        "open_mode": "native_volumes",
+        "format_hint": "rar",
+        "volume_style": "rar_part",
+        "parts": parts,
+    }
+
+    outcome = RarFastVerifier().verify_batch(
+        archive_input["entry_path"],
+        ["wrong", "correct"],
+        part_paths=[part["path"] for part in parts],
+        archive_input=archive_input,
+    )
+
+    assert outcome.ok is False
+    assert outcome.status == "needs_volume_or_tail_damaged"
+    assert outcome.attempts == 0
+    assert "not contiguous" in outcome.error_text
+
+
 def test_rar_fast_verifier_parallel_batch_preserves_first_match(tmp_path):
     archive = tmp_path / "sample.rar"
     archive.write_bytes(_rar5_encryption_header_fixture())

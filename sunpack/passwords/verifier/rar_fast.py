@@ -28,6 +28,20 @@ class RarFastVerifier:
             archive_input=archive_input,
         )
         if volume_input is not None and volume_input[0] in {"rar_part", "rar_oldstyle"}:
+            volume_numbers = sorted(
+                int(item.get("volume_number") or 0) for item in volume_input[1]
+            )
+            if volume_numbers != list(range(1, len(volume_numbers) + 1)):
+                return self._from_outcome(
+                    {
+                        "status": "needs_volume_or_tail_damaged",
+                        "matched_index": -1,
+                        "attempts": 0,
+                        "message": (
+                            "structured RAR volume numbers are not contiguous from one"
+                        ),
+                    }
+                )
             retain_archive_sessions([item.get("path") for item in volume_input[1]])
             return self._from_outcome(
                 rar_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords)
