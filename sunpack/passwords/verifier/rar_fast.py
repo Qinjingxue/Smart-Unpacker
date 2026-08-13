@@ -86,5 +86,11 @@ class RarFastVerifier:
             test_result=outcome,
             error_text=message.lower(),
             terminal=status in {"damaged", "needs_volume_or_tail_damaged"},
-            final_confirmation_required="rar5 password check matched" not in message.lower(),
+            final_confirmation_required=bool(
+                outcome.get(
+                    "final_confirmation_required",
+                    "rar5 password check matched" not in message.lower(),
+                )
+            ),
+            match_evidence=str(outcome.get("match_evidence") or ""),
         )

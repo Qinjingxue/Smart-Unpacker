@@ -649,6 +649,20 @@ class ExtractionBatchRunner:
                             out_dir,
                             runtime_scheduler,
                         )
+                        if isinstance(beam_evaluation, _BeamRepairTerminal):
+                            state.record_result(
+                                beam_evaluation.repair_result,
+                                trigger="verification_beam",
+                            )
+                            selected = self._selected_acceptable_outcome(
+                                incumbent_outcome,
+                                outcome,
+                                out_dir,
+                                final=True,
+                            )
+                            selected = selected or outcome
+                            cleanup_shelved_outcome(incumbent_outcome, keep=selected)
+                            return selected
                         if beam_evaluation is not None:
                             handled = self._handle_beam_evaluation(
                                 task,
