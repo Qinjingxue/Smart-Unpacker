@@ -8,6 +8,7 @@
 - `unit/`：聚焦公开模块或契约的测试，不覆盖黑箱模块内部算法。
 - `functional/`：跨模块行为测试，尽量避免真实外部解压。
 - `integration/`：pipeline、解压和真实执行路径测试。
+- `real/`：按计划组织的真实归档和真实 watch 端到端矩阵；这里是完整真实场景的权威入口。
 - `cli/`：CLI parser、命令契约和命令行为测试。
 - `training/`：训练产物与正式模型运行时之间的评估和一致性测试。
 
@@ -43,12 +44,20 @@ python -m benchmarks --list
 
 `run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、真实归档 acceptance 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、混合分卷 acceptance 和 CLI smoke checks。
 
+完整真实归档/watch 场景统一从 `tests/real/` 运行；`tests/integration/` 只保留真实场景中仍有独立价值的底层关系解析、原生桥接、错误分类、性能和密码源更新契约，避免同一行为在两套端到端矩阵中重复维护。
+
 ## 慢速真实归档测试
 
 `tests/integration/test_real_archive_edge_cases.py` 默认保留一组快速真实归档 smoke 测试。完整格式矩阵标记为 `slow_real_archive`，默认跳过；需要时显式开启：
 
 ```powershell
 pytest tests/integration/test_real_archive_edge_cases.py --run-slow-real-archives
+```
+
+真实归档计划的完整入口示例：
+
+```powershell
+pytest tests/real -q
 ```
 
 ## 公共接口边界
