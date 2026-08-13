@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import json
 import os
 import random
@@ -10,12 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import psutil
 import pytest
 
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from sunpack.filesystem.watcher.scheduler import WatchRunResult, WatchScheduler
+from tests.helpers.watch_memory import WatchMemorySampler as MemorySampler
 from tests.helpers.marker_utils import marker_was_extracted
 from tests.helpers.real_archives import (
     ArchiveCase,
@@ -113,61 +112,6 @@ class _TimedPipelineEngine:
 
     def __getattr__(self, name):
         return getattr(self.delegate, name)
-
-
-class MemorySampler:
-    """按文件到达/完成数量采样进程与 worker 内存。"""
-
-    def __init__(self):
-        self.process = psutil.Process(os.getpid())
-        self.samples: list[dict[str, Any]] = []
-
-    def sample(
-        self,
-        *,
-        installed_volumes: int,
-        completed_archives: int,
-        elapsed: float,
-        label: str = "",
-    ) -> dict[str, Any]:
-        gc.collect()
-        children = [
-            child for child in self.process.children(recursive=True) if child.is_running()
-        ]
-        row = {
-            "label": label,
-            "installed_volumes": installed_volumes,
-            "completed_archives": completed_archives,
-            "parent_rss": self.process.memory_info().rss,
-            "worker_rss": sum(child.memory_info().rss for child in children),
-            "child_count": len(children),
-            "elapsed_seconds": round(elapsed, 3),
-        }
-        self.samples.append(row)
-        return row
-
-    def summary(self) -> dict[str, Any]:
-        if len(self.samples) < 2:
-            return {"samples": len(self.samples)}
-        completion_samples = [
-            item for item in self.samples if str(item["label"]).startswith("after_")
-        ] or self.samples[1:]
-        warm = completion_samples
-        return {
-            "samples": len(self.samples),
-            "arrival_samples": sum(
-                1 for item in self.samples if str(item["label"]).startswith("arrived_")
-            ),
-            "completion_samples": len(completion_samples),
-            "parent_growth": warm[-1]["parent_rss"] - warm[0]["parent_rss"],
-            "worker_growth": warm[-1]["worker_rss"] - warm[0]["worker_rss"],
-            "child_count_range": [
-                min(item["child_count"] for item in warm),
-                max(item["child_count"] for item in warm),
-            ],
-            "final_parent_rss": warm[-1]["parent_rss"],
-            "final_worker_rss": warm[-1]["worker_rss"],
-        }
 
 
 def plan7_watch_config(passwords: list[str] | None = None) -> dict:
@@ -793,9 +737,10 @@ def assert_plan7_success(
         )
         record_property("max_watch_tick_latency_ms", round(max(tick_latencies) * 1000, 3))
         record_property("memory_summary", json.dumps(memory, ensure_ascii=False))
+        timeline = [item.to_dict() for item in sampler.samples]
         record_property(
             "memory_timeline",
-            json.dumps(sampler.samples, ensure_ascii=False),
+            json.dumps(timeline, ensure_ascii=False),
         )
         print(
             "\nplan7 memory timeline (archives completed -> parent/worker RSS):\n"
@@ -806,7 +751,7 @@ def assert_plan7_success(
                 f"worker={item['worker_rss'] / 1024 / 1024:6.1f}MB "
                 f"children={item['child_count']} "
                 f"volumes={item['installed_volumes']}"
-                for item in sampler.samples
+                for item in timeline
             )
         )
 
