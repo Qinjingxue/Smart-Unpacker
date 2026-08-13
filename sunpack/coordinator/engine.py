@@ -39,7 +39,7 @@ from sunpack.rename.scheduler import OutputReservationRegistry, RenameScheduler
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
-from sunpack.support.archive_sessions import clear_archive_sessions, release_archive_sessions_under
+from sunpack.support.archive_sessions import release_archive_sessions_under
 from sunpack.detection.options import DetectionOptions
 
 
@@ -107,6 +107,7 @@ class PipelineEngine:
         self._request_runtime_factory = _RequestRuntime
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._runtime_cache_lock = threading.RLock()
         self._dispatch_condition = threading.Condition()
         self._pressure_lock = threading.Lock()
         self._active_request_count = 0
@@ -185,13 +186,33 @@ class PipelineEngine:
             config=request_config,
             future=Future(),
         )
-        with self._lifecycle_lock:
-            if not self._started or not self._accepting:
-                raise RuntimeError("PipelineEngine must be started before submit")
-            self._change_outstanding_request_count(1)
-            self._queue.put(submission)
-            self._sync_pipeline_pressure()
+        with self._runtime_cache_lock:
+            with self._lifecycle_lock:
+                if not self._started or not self._accepting:
+                    raise RuntimeError("PipelineEngine must be started before submit")
+                self._change_outstanding_request_count(1)
+                self._queue.put(submission)
+                self._sync_pipeline_pressure()
         return PipelineHandle(self, submission)
+
+    def clear_runtime_caches(self) -> dict:
+        """Clear process-wide runtime caches only while this engine is idle."""
+
+        with self._runtime_cache_lock:
+            if not self.is_idle():
+                return {"skipped": "engine_busy"}
+            from sunpack.support.runtime_cache_cleanup import (
+                clear_all_runtime_caches,
+                runtime_cache_stats,
+            )
+
+            services = (self._services.repair_inspection_service,)
+            before = runtime_cache_stats(inspection_services=services)
+            cleared = clear_all_runtime_caches(
+                inspection_services=(self._services.repair_inspection_service,),
+            )
+            after = runtime_cache_stats(inspection_services=services)
+            return {"before": before, "cleared": cleared, "after": after}
 
     def update_password_sources(self, *, user_passwords: Iterable[str], builtin_passwords: Iterable[str]) -> None:
         with self._password_source_lock:
@@ -501,7 +522,11 @@ class _PipelineServices:
         self.executor_pool.shutdown(wait=True, cancel_futures=False)
         self.input_planning_executor_pool.shutdown(wait=True, cancel_futures=False)
         self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
-        clear_archive_sessions()
+        from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
+
+        clear_all_runtime_caches(
+            inspection_services=(self.repair_inspection_service,),
+        )
 
 
 class _RequestRuntime:

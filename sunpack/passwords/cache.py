@@ -29,3 +29,20 @@ class PasswordAttemptCache:
     def remember_negative_batch(self, fingerprint_key: str, passwords: list[str]) -> None:
         with self._lock:
             self._negative.update((fingerprint_key, password) for password in passwords)
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "successes": len(self._successes),
+                "negative": len(self._negative),
+            }
+
+    def clear(self) -> dict[str, int]:
+        with self._lock:
+            result = {
+                "successes": len(self._successes),
+                "negative": len(self._negative),
+            }
+            self._successes.clear()
+            self._negative.clear()
+            return result

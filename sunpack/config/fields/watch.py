@@ -33,6 +33,11 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
+    config["runtime_cache_cleanup_enabled"] = bool(config["runtime_cache_cleanup_enabled"])
+    config["runtime_cache_cleanup_idle_seconds"] = max(
+        0.0,
+        _float_field(config, "runtime_cache_cleanup_idle_seconds"),
+    )
     config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config["password_retry_include_subtree"])

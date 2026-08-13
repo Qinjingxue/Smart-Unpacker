@@ -643,6 +643,25 @@ fn with_volume_context<T>(
     result
 }
 
+pub(crate) fn volume_context_count() -> usize {
+    VOLUME_CONTEXTS
+        .get()
+        .and_then(|contexts| contexts.lock().ok().map(|contexts| contexts.len()))
+        .unwrap_or(0)
+}
+
+pub(crate) fn clear_volume_contexts() -> usize {
+    let Some(contexts) = VOLUME_CONTEXTS.get() else {
+        return 0;
+    };
+    let Ok(mut contexts) = contexts.lock() else {
+        return 0;
+    };
+    let removed = contexts.len();
+    contexts.clear();
+    removed
+}
+
 fn journal_capability_error(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(1) | Some(5))
 }

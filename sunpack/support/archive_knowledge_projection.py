@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import threading
 from collections import OrderedDict, Counter
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ _PROJECTION_CACHE_MAX = 512
 _PROJECTION_CACHE: OrderedDict[tuple[str, str, str], Any] = OrderedDict()
 _PROJECTION_HITS: Counter[str] = Counter()
 _PROJECTION_MISSES: Counter[str] = Counter()
+_PROJECTION_CACHE_LOCK = threading.RLock()
 
 
 def task_knowledge(task: Any) -> ArchiveKnowledge:
@@ -222,10 +224,12 @@ def resource_profile_key(task: Any) -> str:
 
 
 def projection_cache_stats() -> dict[str, Any]:
-    hits = dict(_PROJECTION_HITS)
-    misses = dict(_PROJECTION_MISSES)
+    with _PROJECTION_CACHE_LOCK:
+        hits = dict(_PROJECTION_HITS)
+        misses = dict(_PROJECTION_MISSES)
+        entries = len(_PROJECTION_CACHE)
     return {
-        "entries": len(_PROJECTION_CACHE),
+        "entries": entries,
         "max_entries": _PROJECTION_CACHE_MAX,
         "hits": sum(hits.values()),
         "misses": sum(misses.values()),
@@ -234,6 +238,15 @@ def projection_cache_stats() -> dict[str, Any]:
             for name in sorted(set(hits) | set(misses))
         },
     }
+
+
+def clear_projection_cache() -> dict[str, Any]:
+    with _PROJECTION_CACHE_LOCK:
+        entries = len(_PROJECTION_CACHE)
+        _PROJECTION_CACHE.clear()
+        _PROJECTION_HITS.clear()
+        _PROJECTION_MISSES.clear()
+    return {"entries": entries}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -247,17 +260,19 @@ def _cached_projection(knowledge: ArchiveKnowledge, name: str, compute) -> Any:
     revision = str(revision_value)
     identity = _stable_digest(_source_fingerprint_uncached(knowledge))
     cache_key = (revision, str(name), identity)
-    if cache_key in _PROJECTION_CACHE:
-        value = _PROJECTION_CACHE.pop(cache_key)
-        _PROJECTION_CACHE[cache_key] = value
-        _PROJECTION_HITS[str(name)] += 1
-        return copy.deepcopy(value)
-    _PROJECTION_MISSES[str(name)] += 1
+    with _PROJECTION_CACHE_LOCK:
+        if cache_key in _PROJECTION_CACHE:
+            value = _PROJECTION_CACHE.pop(cache_key)
+            _PROJECTION_CACHE[cache_key] = value
+            _PROJECTION_HITS[str(name)] += 1
+            return copy.deepcopy(value)
+        _PROJECTION_MISSES[str(name)] += 1
     value = compute()
-    _PROJECTION_CACHE[cache_key] = copy.deepcopy(value)
-    _PROJECTION_CACHE.move_to_end(cache_key)
-    while len(_PROJECTION_CACHE) > _PROJECTION_CACHE_MAX:
-        _PROJECTION_CACHE.popitem(last=False)
+    with _PROJECTION_CACHE_LOCK:
+        _PROJECTION_CACHE[cache_key] = copy.deepcopy(value)
+        _PROJECTION_CACHE.move_to_end(cache_key)
+        while len(_PROJECTION_CACHE) > _PROJECTION_CACHE_MAX:
+            _PROJECTION_CACHE.popitem(last=False)
     return value
 
 

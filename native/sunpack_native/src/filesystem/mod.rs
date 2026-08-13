@@ -1,5 +1,6 @@
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -77,6 +78,29 @@ pub(crate) fn validate_ntfs_watch_root(path: &str) -> PyResult<()> {
     {
         let _ = path;
         Err(PyRuntimeError::new_err("watch mode requires Windows NTFS"))
+    }
+}
+
+#[pyfunction]
+pub(crate) fn watch_filesystem_resource_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    #[cfg(windows)]
+    let volume_contexts = windows::volume_context_count();
+    #[cfg(not(windows))]
+    let volume_contexts = 0usize;
+    dict.set_item("volume_contexts", volume_contexts)?;
+    Ok(dict.unbind())
+}
+
+#[pyfunction]
+pub(crate) fn clear_watch_filesystem_resources() -> PyResult<usize> {
+    #[cfg(windows)]
+    {
+        return Ok(windows::clear_volume_contexts());
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
     }
 }
 

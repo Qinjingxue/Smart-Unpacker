@@ -35,6 +35,12 @@ class FakePipelineEngine:
         self.user_passwords = list(user_passwords)
         self.builtin_passwords = list(builtin_passwords)
 
+    def is_idle(self):
+        return True
+
+    def clear_runtime_caches(self):
+        return {"fake": True}
+
     def submit(self, targets, *, direct=False, defer_postprocess=False):
         paths = [target.path if hasattr(target, "path") else str(target) for target in targets]
         output = dict(targets[0].output) if targets and hasattr(targets[0], "output") else {}

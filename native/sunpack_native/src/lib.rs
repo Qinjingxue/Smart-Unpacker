@@ -60,6 +60,14 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(io::reader::reader_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(io::reader::clear_reader_resources, m)?)?;
     m.add_function(wrap_pyfunction!(
+        formats::seven_zip::seven_zip_runtime_cache_stats,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        formats::seven_zip::clear_seven_zip_runtime_caches,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         io::reader::release_reader_handles_under,
         m
     )?)?;
@@ -70,6 +78,14 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scan::directory::NativeOutputInventory>()?;
     m.add_class::<scan::directory::NativeWorkerManifest>()?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_after_markers, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        filesystem::watch_filesystem_resource_stats,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        filesystem::clear_watch_filesystem_resources,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
         analysis_native::fuzzy_binary_profile_for_paths,

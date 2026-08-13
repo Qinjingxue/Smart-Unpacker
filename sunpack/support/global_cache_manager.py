@@ -49,13 +49,39 @@ class CacheManager:
         self.set(namespace, key, value)
         return value
 
-    def clear_namespace(self, namespace: str):
+    def clear_namespace(self, namespace: str) -> int:
         with self._lock:
-            self._caches.pop(namespace, None)
+            cache = self._caches.pop(namespace, None)
+            return len(cache) if cache is not None else 0
 
-    def clear_all(self):
+    def stats(self) -> dict[str, Any]:
         with self._lock:
+            namespaces = {
+                str(namespace): len(cache)
+                for namespace, cache in self._caches.items()
+            }
+            return {
+                "entries": int(sum(namespaces.values())),
+                "namespaces": namespaces,
+                "capacities": {
+                    str(namespace): int(
+                        self._capacities.get(namespace, self.default_capacity)
+                    )
+                    for namespace in self._caches
+                },
+            }
+
+    def clear_all(self) -> dict[str, Any]:
+        with self._lock:
+            namespaces = {
+                str(namespace): len(cache)
+                for namespace, cache in self._caches.items()
+            }
             self._caches.clear()
+            return {
+                "entries": int(sum(namespaces.values())),
+                "namespaces": namespaces,
+            }
 
 
 GLOBAL_CACHE = CacheManager()
@@ -119,9 +145,13 @@ def cached_readonly_command(
     return result
 
 
-def clear_cache_namespace(namespace: str):
-    GLOBAL_CACHE.clear_namespace(namespace)
+def global_cache_stats() -> dict[str, Any]:
+    return GLOBAL_CACHE.stats()
 
 
-def clear_all_caches():
-    GLOBAL_CACHE.clear_all()
+def clear_cache_namespace(namespace: str) -> int:
+    return GLOBAL_CACHE.clear_namespace(namespace)
+
+
+def clear_all_caches() -> dict[str, Any]:
+    return GLOBAL_CACHE.clear_all()

@@ -219,6 +219,14 @@ class WatchScheduler:
         self._started = False
         self._run_wakeup = threading.Event()
         self._wake_callback = wake_callback
+        self.runtime_cache_cleanup_enabled = bool(
+            watch_config.get("runtime_cache_cleanup_enabled", True)
+        )
+        self.runtime_cache_cleanup_idle_seconds = max(
+            0.0,
+            float(watch_config.get("runtime_cache_cleanup_idle_seconds", 10.0)),
+        )
+        self._cache_cleanup_deadline: float | None = None
         if pipeline_engine is None:
             raise ValueError("WatchScheduler requires a PipelineEngine")
         self.pipeline_engine = pipeline_engine
@@ -333,6 +341,8 @@ class WatchScheduler:
         self._observer.join(timeout=self.observer_stop_timeout_seconds)
         self._clipboard_monitor.stop()
         self._completion_pool.shutdown(wait=True, cancel_futures=False)
+        with self._lock:
+            self._cache_cleanup_deadline = None
         self._started = False
 
     def run_forever(self):
@@ -390,6 +400,7 @@ class WatchScheduler:
             self._inflight_requests.extend(active_requests)
         self._merge_run_result(result, self._harvest_completed_requests())
         result.pending = self.pending_count
+        self._maybe_clear_idle_caches()
         return result
 
     def _filter_output_conflicts(self, dispatches):
@@ -477,6 +488,7 @@ class WatchScheduler:
             )
         else:
             self.state.complete_work_if_matches(request.candidate)
+        self._arm_idle_cache_cleanup()
         return single
 
     @staticmethod
@@ -544,7 +556,59 @@ class WatchScheduler:
                     ),
                 )
                 delay = password_delay if delay is None else min(delay, password_delay)
+            if self.runtime_cache_cleanup_enabled and self._cache_cleanup_deadline is not None:
+                cleanup_delay = max(0.0, self._cache_cleanup_deadline - monotonic_now)
+                delay = cleanup_delay if delay is None else min(delay, cleanup_delay)
             return delay
+
+    def _reset_idle_cache_cleanup(self) -> None:
+        if not self.runtime_cache_cleanup_enabled:
+            return
+        with self._lock:
+            self._cache_cleanup_deadline = None
+
+    def _arm_idle_cache_cleanup(self) -> None:
+        if not self.runtime_cache_cleanup_enabled:
+            return
+        with self._lock:
+            self._cache_cleanup_deadline = (
+                time.monotonic() + self.runtime_cache_cleanup_idle_seconds
+            )
+        self.log.write(
+            "cache_cleanup_scheduled",
+            idle_seconds=self.runtime_cache_cleanup_idle_seconds,
+        )
+        self._run_wakeup.set()
+
+    def _maybe_clear_idle_caches(self) -> None:
+        if not self.runtime_cache_cleanup_enabled:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self._cache_cleanup_deadline is None or now < self._cache_cleanup_deadline:
+                return
+            if self._pending or self._inflight_requests or self._completion_requests:
+                return
+            self._cache_cleanup_deadline = None
+        self.log.write("cache_cleanup_started")
+        started = time.perf_counter()
+        report = self.pipeline_engine.clear_runtime_caches()
+        if report.get("skipped"):
+            with self._lock:
+                if (
+                    self._cache_cleanup_deadline is None
+                    and not self._pending
+                    and not self._inflight_requests
+                    and not self._completion_requests
+                ):
+                    self._cache_cleanup_deadline = (
+                        time.monotonic() + self.runtime_cache_cleanup_idle_seconds
+                    )
+        self.log.write(
+            "cache_cleanup_finished",
+            elapsed_seconds=time.perf_counter() - started,
+            report=report,
+        )
 
     def enqueue(
         self,
@@ -1046,6 +1110,7 @@ class WatchScheduler:
             self._release_output_roots([probe_workspace, *predicted_probe_dirs])
             self._cleanup_probe_workspace(probe_workspace)
             raise
+        self._reset_idle_cache_cleanup()
         add_done_callback = getattr(handle, "add_done_callback", None)
         if callable(add_done_callback):
             add_done_callback(lambda _handle: self._wake_service())

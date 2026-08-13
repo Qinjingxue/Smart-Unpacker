@@ -32,6 +32,20 @@ def _shared_attempt_cache():
         return _RELATION_PROBE_CACHE
 
 
+def relation_probe_cache_stats() -> dict[str, int]:
+    with _RELATION_PROBE_CACHE_LOCK:
+        if _RELATION_PROBE_CACHE is None:
+            return {"successes": 0, "negative": 0}
+        return _RELATION_PROBE_CACHE.stats()
+
+
+def clear_relation_probe_cache() -> dict[str, int]:
+    with _RELATION_PROBE_CACHE_LOCK:
+        if _RELATION_PROBE_CACHE is None:
+            return {"successes": 0, "negative": 0}
+        return _RELATION_PROBE_CACHE.clear()
+
+
 class RelationsPasswordProber:
     """Resolve passwords for header-encrypted RAR5 files with bounded probing.
 

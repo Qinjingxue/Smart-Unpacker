@@ -583,6 +583,22 @@ fn seven_zip_kdf_cache(
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
 }
 
+pub(crate) fn seven_zip_kdf_cache_len() -> usize {
+    seven_zip_kdf_cache()
+        .lock()
+        .map(|cache| cache.len())
+        .unwrap_or(0)
+}
+
+pub(crate) fn clear_seven_zip_kdf_cache() -> usize {
+    let mut cache = seven_zip_kdf_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let removed = cache.len();
+    cache.clear();
+    removed
+}
+
 fn cached_seven_zip_aes_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 32] {
     if std::env::var_os("SUNPACK_DISABLE_7Z_KDF_CACHE").is_some() {
         return derive_seven_zip_aes_key(cycles, salt, password);

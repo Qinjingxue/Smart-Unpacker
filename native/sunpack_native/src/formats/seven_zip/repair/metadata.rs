@@ -1494,6 +1494,22 @@ fn seven_zip_encoded_header_coder_properties_cache() -> &'static std::sync::Mute
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+pub(crate) fn seven_zip_encoded_header_coder_properties_cache_len() -> usize {
+    seven_zip_encoded_header_coder_properties_cache()
+        .lock()
+        .map(|cache| cache.len())
+        .unwrap_or(0)
+}
+
+pub(crate) fn clear_seven_zip_encoded_header_coder_properties_cache() -> usize {
+    let mut cache = seven_zip_encoded_header_coder_properties_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let removed = cache.len();
+    cache.clear();
+    removed
+}
+
 fn seven_zip_encoded_header_pack_stream_range_from_raw(
     header: &SevenZipHeader,
     raw: &[u8],

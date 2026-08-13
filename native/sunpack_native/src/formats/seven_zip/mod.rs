@@ -34,3 +34,25 @@ include!("repair/boundary.rs");
 include!("repair/crc.rs");
 include!("repair/next_header.rs");
 include!("repair/metadata.rs");
+
+#[pyfunction]
+pub(crate) fn seven_zip_runtime_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("kdf_entries", seven_zip_kdf_cache_len())?;
+    dict.set_item(
+        "encoded_header_coder_properties_entries",
+        seven_zip_encoded_header_coder_properties_cache_len(),
+    )?;
+    Ok(dict.unbind())
+}
+
+#[pyfunction]
+pub(crate) fn clear_seven_zip_runtime_caches(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("kdf_entries", clear_seven_zip_kdf_cache())?;
+    dict.set_item(
+        "encoded_header_coder_properties_entries",
+        clear_seven_zip_encoded_header_coder_properties_cache(),
+    )?;
+    Ok(dict.unbind())
+}

@@ -49,10 +49,14 @@ def retain_archive_sessions(paths) -> None:
         get_archive_session(path)
 
 
-def clear_archive_sessions() -> None:
+def clear_archive_sessions() -> dict:
     with _LOCK:
+        sessions = len(_SESSIONS)
         _SESSIONS.clear()
-    clear_reader_resources()
+    return {
+        "sessions": sessions,
+        "reader": dict(clear_reader_resources()),
+    }
 
 
 def release_archive_sessions_under(path: str) -> None:

@@ -13,6 +13,7 @@ from tests.helpers.watch_memory import (
     count_output_files,
     create_small_zip,
     drive_watch_until,
+    drive_watch_until_cache_cleanup,
     env_float,
     env_int,
     publish_files,
@@ -29,6 +30,15 @@ def _watch_memory_config() -> dict:
         "cold_start_seconds": 0,
         "quiet_min_seconds": 0,
         "quiet_max_seconds": 0,
+        "runtime_cache_cleanup_enabled": os.environ.get(
+            "SUNPACK_WATCH_MEMORY_CACHE_CLEANUP_ENABLED",
+            "1",
+        ) != "0",
+        "runtime_cache_cleanup_idle_seconds": env_float(
+            "SUNPACK_WATCH_MEMORY_CACHE_CLEANUP_IDLE_SECONDS",
+            10.0,
+            minimum=0.0,
+        ),
     }
     config["cli"] = {
         **(config.get("cli") or {}),
@@ -96,6 +106,11 @@ def test_watch_memory_growth_with_many_completed_files(tmp_path, record_property
         0.1,
         minimum=0.0,
     )
+    cleanup_wait_seconds = env_float(
+        "SUNPACK_WATCH_MEMORY_CACHE_CLEANUP_WAIT_SECONDS",
+        12.0,
+        minimum=0.0,
+    )
     trace_python = os.environ.get("SUNPACK_WATCH_MEMORY_TRACEMALLOC", "0") == "1"
     total_files = batches * files_per_batch
     corpus_root = tmp_path / "corpus"
@@ -151,6 +166,16 @@ def test_watch_memory_growth_with_many_completed_files(tmp_path, record_property
                     completed_files=completed,
                     label=f"idle_batch_{batch + 1}",
                 )
+                if cleanup_wait_seconds:
+                    drive_watch_until_cache_cleanup(
+                        harness.watcher,
+                        timeout_seconds=max(timeout, cleanup_wait_seconds + 5.0),
+                    )
+                    sampler.sample(
+                        files_seen=published_count,
+                        completed_files=completed,
+                        label=f"after_cache_cleanup_{batch + 1}",
+                    )
 
             assert published_count == total_files
             assert count_output_files(harness.output_root, "payload-*.txt") == total_files

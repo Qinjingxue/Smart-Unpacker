@@ -127,6 +127,34 @@ def drive_watch_until(
     )
 
 
+def drive_watch_until_cache_cleanup(
+    watcher: WatchScheduler,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 0.01,
+) -> None:
+    """Keep driving the manual scheduler until its idle cleanup has run."""
+
+    deadline = time.perf_counter() + max(0.1, timeout_seconds)
+    while time.perf_counter() < deadline:
+        watcher.run_once()
+        with watcher._lock:
+            active = bool(
+                watcher._pending
+                or watcher._inflight_requests
+                or watcher._completion_requests
+            )
+            cleanup_pending = watcher._cache_cleanup_deadline is not None
+        engine_idle = True
+        is_idle = getattr(watcher.pipeline_engine, "is_idle", None)
+        if callable(is_idle):
+            engine_idle = bool(is_idle())
+        if not active and engine_idle and not cleanup_pending:
+            return
+        time.sleep(max(0.0, poll_seconds))
+    raise TimeoutError("watch cache cleanup did not settle")
+
+
 def count_output_files(root: Path, pattern: str = "*.txt") -> int:
     return sum(1 for path in root.rglob(pattern) if path.is_file())
 
@@ -325,8 +353,28 @@ def _known_cache_stats(engine: PipelineEngine | None) -> dict[str, Any]:
         "archive_sessions": _archive_session_count(),
         "relation_password": _relation_password_cache_stats(),
         "inspection": _inspection_cache_stats(engine),
+        "native_seven_zip": _native_seven_zip_cache_stats(),
+        "watch_filesystem": _watch_filesystem_cache_stats(),
         "persistent_worker_pool": _persistent_worker_pool_stats(engine),
     }
+
+
+def _native_seven_zip_cache_stats() -> dict[str, Any]:
+    try:
+        from sunpack_native import seven_zip_runtime_cache_stats
+
+        return dict(seven_zip_runtime_cache_stats())
+    except (ImportError, AttributeError, TypeError):
+        return {}
+
+
+def _watch_filesystem_cache_stats() -> dict[str, Any]:
+    try:
+        from sunpack_native import watch_filesystem_resource_stats
+
+        return dict(watch_filesystem_resource_stats())
+    except (ImportError, AttributeError, TypeError):
+        return {}
 
 
 def _state_stats(watcher: WatchScheduler, state_path: Path) -> dict[str, Any]:
@@ -347,6 +395,23 @@ def _state_stats(watcher: WatchScheduler, state_path: Path) -> dict[str, Any]:
         result["event_log_bytes"] = state_path.with_name("events.jsonl").stat().st_size
     except OSError:
         result["event_log_bytes"] = 0
+    cleanup_events = {"scheduled": 0, "started": 0, "finished": 0}
+    try:
+        with state_path.with_name("events.jsonl").open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line).get("event")
+                except (TypeError, ValueError):
+                    continue
+                if event == "cache_cleanup_scheduled":
+                    cleanup_events["scheduled"] += 1
+                elif event == "cache_cleanup_started":
+                    cleanup_events["started"] += 1
+                elif event == "cache_cleanup_finished":
+                    cleanup_events["finished"] += 1
+    except (OSError, UnicodeError):
+        pass
+    result["cache_cleanup"] = cleanup_events
     return result
 
 
