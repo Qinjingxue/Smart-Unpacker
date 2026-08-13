@@ -243,10 +243,28 @@ fn validate_raw_hits(
     let mut ordinary = collect_parallel(
         raw_hits
             .iter()
-            .filter(|hit| !matches!(hit.kind, "zip_eocd" | "zip" | "tar"))
+            .filter(|hit| !matches!(hit.kind, "zip_eocd" | "zip" | "tar" | "bzip2"))
             .collect(),
     )?;
     candidates.append(&mut ordinary);
+
+    // A bzip2 file may be a concatenation of complete streams.  Validation
+    // from the first stream walks every immediately adjacent stream, so later
+    // BZh hits inside that exact range are member anchors rather than separate
+    // logical archives.  Process roots in order to avoid decoding the same
+    // suffix repeatedly for large concatenated files.
+    let mut bzip2_range_end = None::<u64>;
+    for hit in raw_hits.iter().filter(|hit| hit.kind == "bzip2") {
+        if bzip2_range_end.is_some_and(|end| hit.offset < end) {
+            continue;
+        }
+        if let Some(candidate) = validate_candidate(reader, file_size, hit.kind, hit.offset)? {
+            if let Some(end) = candidate.end_offset {
+                bzip2_range_end = Some(end);
+            }
+            candidates.push(candidate);
+        }
+    }
 
     let mut orphan_zip_anchors = collect_parallel(
         raw_hits
@@ -380,6 +398,7 @@ fn candidates_contained_anchor_count(
     let raw_kind = match format {
         "zip" => Some("zip"),
         "tar" => Some("tar"),
+        "bzip2" => Some("bzip2"),
         _ => None,
     };
     if let Some(kind) = raw_kind {
@@ -1380,6 +1399,40 @@ fn validate_bzip2(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
+    let Some(mut end) = validate_one_bzip2_stream(file, size, offset)? else {
+        return Ok(None);
+    };
+    let mut stream_count = 1usize;
+    while stream_count < MAX_ARCHIVE_METADATA_RECORDS && end < size {
+        let header = read_at(file, end, 4)?;
+        if header.len() < 4 || &header[..3] != BZIP2 || !(b'1'..=b'9').contains(&header[3]) {
+            break;
+        }
+        let Some(next_end) = validate_one_bzip2_stream(file, size, end)? else {
+            break;
+        };
+        end = next_end;
+        stream_count += 1;
+    }
+    Ok(Some(candidate(
+        "bzip2",
+        ".bz2",
+        offset,
+        Some(end),
+        1.0,
+        if stream_count > 1 {
+            "bzip2_concatenated_streams_and_combined_crcs"
+        } else {
+            "bzip2_stream_end_and_combined_crc"
+        },
+    )))
+}
+
+fn validate_one_bzip2_stream(
+    file: &ManagedReader,
+    size: u64,
+    offset: u64,
+) -> std::io::Result<Option<u64>> {
     let header = read_at(file, offset, 4)?;
     if header.len() < 4 || &header[..3] != BZIP2 || !(b'1'..=b'9').contains(&header[3]) {
         return Ok(None);
@@ -1415,14 +1468,7 @@ fn validate_bzip2(
     if consumed < 14 || end > size {
         return Ok(None);
     }
-    Ok(Some(candidate(
-        "bzip2",
-        ".bz2",
-        offset,
-        Some(end),
-        1.0,
-        "bzip2_stream_end_and_combined_crc",
-    )))
+    Ok(Some(end))
 }
 
 fn validate_xz(
@@ -1963,6 +2009,61 @@ mod tests {
         assert_eq!(tar[0].offset, start);
         assert_eq!(tar[0].end_offset, Some(end));
         assert_eq!(tar[0].contained_anchor_count, 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn aggregates_concatenated_bzip2_streams_into_one_logical_archive() {
+        let mut data = b"carrier-prefix".to_vec();
+        let start = data.len() as u64;
+        let mut first = BzEncoder::new(Vec::new(), BzCompression::fast());
+        first.write_all(b"first payload").unwrap();
+        data.extend_from_slice(&first.finish().unwrap());
+        let mut second = BzEncoder::new(Vec::new(), BzCompression::fast());
+        second.write_all(b"second payload").unwrap();
+        data.extend_from_slice(&second.finish().unwrap());
+        let end = data.len() as u64;
+        let path = temp_file("embedded_concatenated_bzip2", &data);
+
+        let result = scan_embedded_archives_native(ManagedReader::open(&path).unwrap()).unwrap();
+        let bzip2 = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.format == "bzip2")
+            .collect::<Vec<_>>();
+
+        assert_eq!(bzip2.len(), 1);
+        assert_eq!(bzip2[0].offset, start);
+        assert_eq!(bzip2[0].end_offset, Some(end));
+        assert_eq!(bzip2[0].contained_anchor_count, 2);
+        assert_eq!(
+            bzip2[0].validation,
+            "bzip2_concatenated_streams_and_combined_crcs"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn keeps_bzip2_streams_separate_across_invalid_gap() {
+        let mut first = BzEncoder::new(Vec::new(), BzCompression::fast());
+        first.write_all(b"first payload").unwrap();
+        let mut data = first.finish().unwrap();
+        data.extend_from_slice(b"invalid gap");
+        let second_start = data.len() as u64;
+        let mut second = BzEncoder::new(Vec::new(), BzCompression::fast());
+        second.write_all(b"second payload").unwrap();
+        data.extend_from_slice(&second.finish().unwrap());
+        let path = temp_file("embedded_gapped_bzip2", &data);
+
+        let result = scan_embedded_archives_native(ManagedReader::open(&path).unwrap()).unwrap();
+        let bzip2_offsets = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.format == "bzip2")
+            .map(|candidate| candidate.offset)
+            .collect::<Vec<_>>();
+
+        assert_eq!(bzip2_offsets, [0, second_start]);
         let _ = fs::remove_file(path);
     }
 
