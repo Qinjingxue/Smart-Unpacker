@@ -42,7 +42,7 @@ python -m benchmarks --list
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、真实归档 acceptance 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、混合分卷 acceptance 和 CLI smoke checks。
+`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、`tests/real/test_real_archive_boundaries.py` 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、混合分卷 acceptance 和 CLI smoke checks。
 
 完整真实归档/watch 场景统一从 `tests/real/` 运行；`tests/integration/` 只保留真实场景中仍有独立价值的底层关系解析、原生桥接、错误分类、性能和密码源更新契约，避免同一行为在两套端到端矩阵中重复维护。
 

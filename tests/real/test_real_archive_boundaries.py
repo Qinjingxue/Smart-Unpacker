@@ -32,7 +32,7 @@ FACTORY = ArchiveFixtureFactory()
         ("path-traversal", {"../escape.txt": "must-not-escape", "safe/marker.txt": "safe"}, False),
     ],
 )
-def test_acceptance_real_windows_name_and_path_boundaries(
+def test_real_windows_name_and_path_boundaries(
     tmp_path: Path,
     case_id: str,
     members: dict[str, str],
@@ -68,7 +68,7 @@ def test_acceptance_real_windows_name_and_path_boundaries(
         ("7z-missing-middle-volume", "missing_middle", False),
     ],
 )
-def test_acceptance_real_damage_patterns(
+def test_real_damage_patterns(
     tmp_path: Path,
     case_id: str,
     damage: str,
@@ -100,9 +100,9 @@ def test_acceptance_real_damage_patterns(
 
 
 @pytest.mark.parametrize("tool_name", ["7z.exe", "sunpack_sevenzip_worker.exe"])
-def test_acceptance_real_executables_are_not_archive_candidates(tmp_path: Path, tool_name: str):
+def test_real_executables_are_not_archive_candidates(tmp_path: Path, tool_name: str):
     source = Path(__file__).resolve().parents[2] / "tools" / tool_name
-    assert source.is_file(), f"Acceptance runtime tool is missing: {source}"
+    assert source.is_file(), f"Real test runtime tool is missing: {source}"
     executable = tmp_path / tool_name
     shutil.copyfile(source, executable)
 

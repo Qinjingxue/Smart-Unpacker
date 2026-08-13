@@ -343,7 +343,7 @@ $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-Pyt
 $env:PYTHONPATH = $repoRoot
 
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
-Invoke-TestStep -Label "Real archive acceptance matrix" -Command @($python, "-m", "pytest", "-q", "tests/acceptance/test_real_archive_matrix.py", "--durations=20")
+Invoke-TestStep -Label "Real archive boundary tests" -Command @($python, "-m", "pytest", "-q", "tests/real/test_real_archive_boundaries.py", "--durations=20")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
