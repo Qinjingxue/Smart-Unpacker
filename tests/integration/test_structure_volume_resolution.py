@@ -42,7 +42,7 @@ def test_mixed_camouflaged_real_volumes_are_structure_resolved_and_extractable(m
         group = scheduler.resolve_volume_once(current, all_paths, format_hint=archive_format)
 
         assert group is not None
-        assert {Path(path).name for path in group.all_paths} == {
+        assert {Path(path).name for path in group.input_paths} == {
             path.name for path in paths_by_format[archive_format]
         }
         assert [volume.number for volume in group.split_volumes] == list(

@@ -159,7 +159,7 @@ def test_split_hp_rar_group_accepts_camouflage_around_contiguous_part_token(tmp_
     split_group = next(group for group in groups if group.kind == "split_archive")
 
     assert [volume.number for volume in split_group.split_volumes] == [1, 2]
-    assert {os.path.basename(path) for path in split_group.all_paths} == {
+    assert {os.path.basename(path) for path in split_group.input_paths} == {
         first_name,
         second_name,
     }

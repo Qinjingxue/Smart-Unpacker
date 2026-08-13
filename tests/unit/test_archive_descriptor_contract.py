@@ -36,7 +36,7 @@ def test_obfuscated_rar_names_use_part_number_fallback(tmp_path):
 
     groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
     group = next(group for group in groups if group.kind == "split_archive")
-    assert {Path(path).name for path in group.all_paths} == {first.name, second.name}
+    assert {Path(path).name for path in group.input_paths} == {first.name, second.name}
     assert [volume.number for volume in group.split_volumes] == [1, 2]
 
 

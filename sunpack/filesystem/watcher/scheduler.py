@@ -378,7 +378,7 @@ class WatchScheduler:
                 "split_group_suspended",
                 group_id=snapshot.group_id,
                 head_path=snapshot.head_path,
-                member_paths=list(snapshot.member_paths),
+                input_paths=list(snapshot.input_paths),
                 missing_reason=snapshot.missing_reason,
                 missing_indices=list(snapshot.missing_indices),
             )
@@ -497,7 +497,7 @@ class WatchScheduler:
             if request.group is not None:
                 paths.update(
                     os.path.normcase(os.path.abspath(path))
-                    for path in request.group.member_paths
+                    for path in request.group.owned_paths
                 )
         return paths
 
@@ -922,7 +922,7 @@ class WatchScheduler:
             if candidate.path in self._pending or candidate.path in self._active_states:
                 # A newer event already re-armed this path after it was popped.
                 return
-            member_keys = {path_key(member) for member in snapshot.member_paths}
+            member_keys = {path_key(member) for member in snapshot.owned_paths}
             own_key = path_key(candidate.path)
             pending_deadlines = [
                 state.last_event_at + state.quiet_seconds
@@ -1401,7 +1401,7 @@ class WatchScheduler:
         snapshot = self.group_coordinator.resolve_paths([candidate.path]).get(path_key(candidate.path))
         if snapshot is None or not snapshot.head_path:
             return False
-        member_keys = {path_key(path) for path in snapshot.member_paths}
+        member_keys = {path_key(path) for path in snapshot.input_paths}
         return path_key(candidate.path) in member_keys
 
     def _output_suppression_reason(self, path: str) -> str:

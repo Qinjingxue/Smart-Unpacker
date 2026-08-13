@@ -54,7 +54,7 @@ class WatchGroupCoordinator:
             snapshots = [self._snapshot(group, directory) for group in groups if group.kind == "split_archive"]
             for path in directory_paths:
                 selected = next(
-                    (snapshot for snapshot in snapshots if path_key(path) in {path_key(item) for item in snapshot.member_paths}),
+                    (snapshot for snapshot in snapshots if path_key(path) in {path_key(item) for item in snapshot.owned_paths}),
                     None,
                 )
                 resolved[path_key(path)] = selected
@@ -71,12 +71,14 @@ class WatchGroupCoordinator:
         volumes = list(group.split_volumes or [])
         first = next((volume for volume in volumes if volume.number == 1), None)
         head_path = os.path.abspath(first.path) if first is not None else ""
-        members = tuple(os.path.abspath(path) for path in group.all_paths)
+        input_paths = tuple(os.path.abspath(path) for path in group.input_paths)
+        companion_paths = tuple(os.path.abspath(path) for path in (group.companion_paths or []))
+        owned_paths = tuple(os.path.abspath(path) for path in group.owned_paths)
         split_family = str(group.relation.split_family or (volumes[0].style if volumes else "split"))
         group_id = _group_id(directory, group.logical_name, split_family)
         payload = {
             "group_id": group_id,
-            "members": [_file_version(path) for path in members],
+            "members": [_file_version(path) for path in input_paths],
             "complete": group.split_group_complete,
             "missing_reason": group.split_missing_reason,
             "missing_indices": list(group.split_missing_indices or []),
@@ -86,15 +88,22 @@ class WatchGroupCoordinator:
             "completeness_basis": list(group.split_completeness_basis or []),
             "encrypted_unresolved": bool(getattr(group, "encrypted_unresolved", False)),
         }
-        fingerprint = _fingerprint(payload)
+        input_fingerprint = _fingerprint(payload)
+        ownership_fingerprint = _fingerprint({
+            **payload,
+            "owned_members": [_file_version(path) for path in owned_paths],
+        })
         return WatchGroupSnapshot(
             group_id=group_id,
             directory=os.path.abspath(directory),
             logical_name=str(group.logical_name),
             split_family=split_family,
             head_path=head_path,
-            member_paths=members,
-            fingerprint=fingerprint,
+            input_paths=input_paths,
+            companion_paths=companion_paths,
+            owned_paths=owned_paths,
+            input_fingerprint=input_fingerprint,
+            ownership_fingerprint=ownership_fingerprint,
             complete=group.split_group_complete,
             missing_reason=str(group.split_missing_reason or ""),
             missing_indices=tuple(int(value) for value in (group.split_missing_indices or [])),

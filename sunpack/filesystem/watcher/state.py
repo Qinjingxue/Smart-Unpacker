@@ -17,8 +17,8 @@ from .group_models import (
 from sunpack.support.collections import dedupe_normalized_paths
 
 
-STATE_VERSION = 10
-LOADABLE_STATE_VERSIONS = {9, STATE_VERSION}
+STATE_VERSION = 11
+LOADABLE_STATE_VERSIONS = {STATE_VERSION}
 
 
 @dataclass
@@ -234,7 +234,7 @@ class WatchStateStore:
             changed = self.pending_work.pop(key, None) is not None or changed
             changed = self.entries.pop(key, None) is not None or changed
         for group_id, group in list(self.groups.items()):
-            members = [group.head_path, *group.member_paths]
+            members = [group.head_path, *group.owned_paths]
             if any(_path_matches(member, normalized, recursive=recursive) for member in members if member):
                 self.groups.pop(group_id, None)
                 changed = True
@@ -347,7 +347,7 @@ class WatchStateStore:
             previous=previous,
             status="waiting",
             blockers=sorted(blockers),
-            last_attempted_fingerprint=snapshot.fingerprint,
+            last_attempted_input_fingerprint=snapshot.input_fingerprint,
             password_generation=previous.password_generation if previous else self.password_generation,
             failure_payload={
                 "kind": "relation_waiting",
@@ -371,7 +371,7 @@ class WatchStateStore:
             previous=previous,
             status="running",
             blockers=list(previous.blockers if previous else []),
-            last_attempted_fingerprint=snapshot.fingerprint,
+            last_attempted_input_fingerprint=snapshot.input_fingerprint,
             password_generation=previous.password_generation if previous else self.password_generation,
             failure_payload=dict(previous.failure_payload if previous else {}),
             increment_attempt=True,
@@ -391,7 +391,7 @@ class WatchStateStore:
             previous=previous,
             status="suspended",
             blockers=sorted(set(blockers)),
-            last_attempted_fingerprint=snapshot.fingerprint,
+            last_attempted_input_fingerprint=snapshot.input_fingerprint,
             password_generation=self.password_generation,
             failure_payload=dict(failure_payload or {}),
         )
@@ -410,7 +410,7 @@ class WatchStateStore:
             previous=previous,
             status=status,
             blockers=[],
-            last_attempted_fingerprint=snapshot.fingerprint,
+            last_attempted_input_fingerprint=snapshot.input_fingerprint,
             password_generation=self.password_generation,
             failure_payload=dict(failure_payload or {}),
         )
@@ -426,7 +426,7 @@ class WatchStateStore:
         previous: WatchGroupState | None,
         status: str,
         blockers: list[str],
-        last_attempted_fingerprint: str,
+        last_attempted_input_fingerprint: str,
         password_generation: int,
         failure_payload: dict[str, Any],
         increment_attempt: bool = False,
@@ -437,11 +437,13 @@ class WatchStateStore:
             logical_name=snapshot.logical_name,
             split_family=snapshot.split_family,
             head_path=snapshot.head_path,
-            member_paths=list(snapshot.member_paths),
+            input_paths=list(snapshot.input_paths),
+            owned_paths=list(snapshot.owned_paths),
             status=status,
             blockers=list(blockers),
-            relation_fingerprint=snapshot.fingerprint,
-            last_attempted_fingerprint=last_attempted_fingerprint,
+            input_fingerprint=snapshot.input_fingerprint,
+            ownership_fingerprint=snapshot.ownership_fingerprint,
+            last_attempted_input_fingerprint=last_attempted_input_fingerprint,
             password_generation=password_generation,
             missing_reason=snapshot.missing_reason,
             missing_indices=list(snapshot.missing_indices),

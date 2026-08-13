@@ -324,6 +324,9 @@ def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTas
         "file.detected_ext",
         "candidate.entry_path",
         "candidate.member_paths",
+        "candidate.carrier_path",
+        "candidate.companion_paths",
+        "candidate.cleanup_paths",
         "candidate.logical_name",
         "relation.split_volumes",
     ):
@@ -336,6 +339,8 @@ def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTas
         key=f"{task.key}{key_suffix}" if key_suffix else task.key,
         main_path=task.main_path,
         all_parts=list(task.all_parts or []),
+        carrier_path=task.carrier_path,
+        cleanup_parts=list(task.cleanup_parts or []),
         logical_name=task.logical_name,
         split_info=type(task.split_info)(
             is_split=task.split_info.is_split,

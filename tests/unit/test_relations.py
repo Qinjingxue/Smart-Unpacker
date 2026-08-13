@@ -4,6 +4,7 @@ import struct
 import pytest
 
 from sunpack.filesystem.directory_scanner import DirectoryScanner
+from sunpack.coordinator.target_scan import build_fact_bags_for_target
 from sunpack.relations import RelationsScheduler
 
 
@@ -19,8 +20,46 @@ def test_strict_standard_numbered_7z_is_grouped(tmp_path):
     group = next(group for group in _groups(tmp_path) if group.logical_name == "archive")
 
     assert group.kind == "split_archive"
-    assert [Path(path).name for path in group.all_paths] == names
+    assert [Path(path).name for path in group.input_paths] == names
     assert [volume.number for volume in group.split_volumes] == [1, 2, 3]
+
+
+@pytest.mark.parametrize("archive_format", ["7z", "zip"])
+def test_sfx_launcher_attaches_to_data_volumes_but_stays_out_of_input(tmp_path, archive_format):
+    launcher = tmp_path / "payload.exe"
+    first = tmp_path / f"payload.{archive_format}.001"
+    second = tmp_path / f"payload.{archive_format}.002"
+    launcher.write_bytes(b"MZ launcher")
+    first.write_bytes(b"data volume 1")
+    second.write_bytes(b"data volume 2")
+
+    groups = _groups(tmp_path)
+    group = next(group for group in groups if group.logical_name == "payload")
+
+    assert [Path(path).name for path in group.input_paths] == [first.name, second.name]
+    assert [Path(path).name for path in group.companion_paths] == [launcher.name]
+    assert Path(group.carrier_path).name == launcher.name
+
+    bags = build_fact_bags_for_target(str(launcher))
+    assert len(bags) == 1
+    bag = bags[0]
+    assert Path(bag.get("file.path")).name == launcher.name
+    assert Path(bag.get("candidate.entry_path")).name == first.name
+    assert [Path(path).name for path in bag.get("candidate.member_paths")] == [first.name, second.name]
+    assert [Path(path).name for path in bag.get("candidate.cleanup_paths")] == [first.name, second.name, launcher.name]
+
+
+def test_rar_part1_exe_remains_a_data_volume(tmp_path):
+    first = tmp_path / "payload.part1.exe"
+    second = tmp_path / "payload.part2.rar"
+    first.write_bytes(b"rar sfx data volume 1")
+    second.write_bytes(b"rar data volume 2")
+
+    groups = _groups(tmp_path)
+    group = next(group for group in groups if group.logical_name == "payload")
+
+    assert not group.companion_paths
+    assert {Path(path).name for path in group.input_paths} == {first.name, second.name}
 
 
 def test_strict_formats_with_same_stem_never_cross_merge(tmp_path):
@@ -34,7 +73,7 @@ def test_strict_formats_with_same_stem_never_cross_merge(tmp_path):
             (tmp_path / name).write_bytes(name.encode())
 
     actual = {
-        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        group.relation.split_family: {Path(path).name for path in group.input_paths}
         for group in _groups(tmp_path)
         if group.logical_name == "same"
     }
@@ -59,11 +98,11 @@ def test_filename_camouflage_without_structure_never_builds_a_group(tmp_path, na
 
     if names[0] == "setup.exe":
         exe_group = next(group for group in groups if Path(group.head_path).name == "setup.exe")
-        assert exe_group.all_paths == [str(tmp_path / "setup.exe")]
+        assert exe_group.input_paths == [str(tmp_path / "setup.exe")]
         numeric_group = next(group for group in groups if Path(group.head_path).name == "setup.001")
-        assert {Path(path).name for path in numeric_group.all_paths} == {"setup.001", "setup.002"}
+        assert {Path(path).name for path in numeric_group.input_paths} == {"setup.001", "setup.002"}
     else:
-        assert all(len(group.all_paths) == 1 for group in groups)
+        assert all(len(group.input_paths) == 1 for group in groups)
 
 
 @pytest.mark.parametrize(
@@ -140,7 +179,7 @@ def test_split_zip_structure_anchor_recovers_decorated_middle_member(tmp_path):
 
     group = next(group for group in _groups(tmp_path) if group.logical_name == "modern")
 
-    assert [Path(path).name for path in group.all_paths] == [
+    assert [Path(path).name for path in group.input_paths] == [
         first.name,
         disguised_second.name,
         terminal.name,

@@ -15,8 +15,11 @@ class WatchGroupSnapshot:
     logical_name: str
     split_family: str
     head_path: str
-    member_paths: tuple[str, ...]
-    fingerprint: str
+    input_paths: tuple[str, ...]
+    companion_paths: tuple[str, ...]
+    owned_paths: tuple[str, ...]
+    input_fingerprint: str
+    ownership_fingerprint: str
     complete: bool | None
     missing_reason: str = ""
     missing_indices: tuple[int, ...] = ()
@@ -50,11 +53,13 @@ class WatchGroupState:
     logical_name: str
     split_family: str
     head_path: str
-    member_paths: list[str] = field(default_factory=list)
+    input_paths: list[str] = field(default_factory=list)
+    owned_paths: list[str] = field(default_factory=list)
     status: str = "waiting"
     blockers: list[str] = field(default_factory=list)
-    relation_fingerprint: str = ""
-    last_attempted_fingerprint: str = ""
+    input_fingerprint: str = ""
+    ownership_fingerprint: str = ""
+    last_attempted_input_fingerprint: str = ""
     password_generation: int = 0
     missing_reason: str = ""
     missing_indices: list[int] = field(default_factory=list)
@@ -67,12 +72,12 @@ class WatchGroupState:
 
     def retry_ready(self, snapshot: WatchGroupSnapshot, password_generation: int) -> bool:
         if self.status == "running":
-            return snapshot.fingerprint != self.last_attempted_fingerprint
-        input_changed = snapshot.fingerprint != self.last_attempted_fingerprint
+            return snapshot.input_fingerprint != self.last_attempted_input_fingerprint
+        input_changed = snapshot.input_fingerprint != self.last_attempted_input_fingerprint
         password_changed = self.has_blocker(BLOCKER_PASSWORD) and password_generation > self.password_generation
         missing_ready = not self.has_blocker(BLOCKER_MISSING_VOLUME) or input_changed
         # A password failure only describes the bytes from the previous
-        # attempt.  A changed split-group fingerprint means that a new volume
+        # attempt. A changed split-group input fingerprint means that a new volume
         # (or new bytes for an existing volume) arrived, so the old password
         # verdict must not prevent one attempt against the new input.
         password_ready = not self.has_blocker(BLOCKER_PASSWORD) or password_changed or input_changed

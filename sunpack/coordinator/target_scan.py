@@ -12,10 +12,20 @@ RELATIONS = RelationsScheduler()
 
 def _bag_paths(bag: FactBag) -> list[str]:
     paths = []
-    main = bag.get("file.path")
-    if main:
-        paths.append(main)
-    paths.extend(bag.get("file.split_members", []) or [])
+    for key in (
+        "file.path",
+        "candidate.entry_path",
+        "candidate.carrier_path",
+        "file.split_members",
+        "candidate.member_paths",
+        "candidate.companion_paths",
+        "candidate.cleanup_paths",
+    ):
+        value = bag.get(key)
+        if isinstance(value, list):
+            paths.extend(value)
+        elif value:
+            paths.append(value)
     return [path_key(path) for path in paths if path]
 
 def _bag_key(bag: FactBag) -> str:

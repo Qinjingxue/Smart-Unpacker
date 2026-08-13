@@ -39,7 +39,7 @@ class CandidateGroup:
     head_path: str
     logical_name: str
     relation: FileRelation
-    member_paths: List[str]
+    input_paths: List[str]
     is_split_candidate: bool = False
     head_size: int | None = None
     split_volumes: List[SplitVolumeEntry] = None
@@ -53,6 +53,12 @@ class CandidateGroup:
     split_completeness_basis: List[str] = None
     head_metadata: Dict[str, Any] | None = None
     encrypted_unresolved: bool = False
+    # Launcher-only SFX files are related to a split archive, but are not
+    # archive input volumes. Keep them outside input_paths so the archive
+    # descriptor and backend never receive the PE carrier as data.
+    companion_paths: List[str] = None
+    carrier_path: str = ""
+    carrier_size: int | None = None
 
     @property
     def kind(self) -> str:
@@ -63,11 +69,9 @@ class CandidateGroup:
         return self.head_path
 
     @property
-    def all_paths(self) -> List[str]:
-        if self.split_volumes:
-            return [volume.path for volume in self.split_volumes]
-        return [self.head_path] + list(self.member_paths)
-
+    def owned_paths(self) -> List[str]:
+        """Return data inputs plus non-input companions owned by this group."""
+        return list(dict.fromkeys([*self.input_paths, *(self.companion_paths or [])]))
 
 @dataclass
 class DirectoryFileIndex:

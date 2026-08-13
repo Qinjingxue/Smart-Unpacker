@@ -11,12 +11,15 @@ from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensu
 def write_filesystem_task(task: ArchiveTask) -> None:
     knowledge = ensure_knowledge(task)
     main_path = str(task.main_path or "")
-    stat = _stat_payload(main_path)
+    carrier_path = str(task.carrier_path or main_path)
+    stat = _stat_payload(carrier_path)
     payload: dict[str, Any] = {
-        "path": main_path,
-        "absolute_path": os.path.abspath(main_path) if main_path else "",
+        "path": carrier_path,
+        "absolute_path": os.path.abspath(carrier_path) if carrier_path else "",
+        "carrier_path": carrier_path,
         "detected_ext": str(task.detected_ext or task.fact_bag.get("file.detected_ext") or ""),
         "split_members": list(task.all_parts or []),
+        "cleanup_paths": list(task.cleanup_parts or []),
         **stat,
     }
     write_payload(knowledge, "filesystem", payload, source_layer="filesystem", source_module="task")

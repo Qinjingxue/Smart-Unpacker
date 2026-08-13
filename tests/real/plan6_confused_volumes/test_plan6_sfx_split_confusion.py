@@ -42,10 +42,16 @@ def test_plan6_encrypted_sfx_split_confused_volumes_extract(
     )
     renamed = apply_volume_confusion(case, scenario)
 
+    expected_input_volume_count = len(renamed)
+    if archive_format in {"7z", "zip"}:
+        # The PE launcher is owned by the candidate for cleanup, but is not an
+        # archive input volume.  RAR part1.exe remains a real data volume.
+        expected_input_volume_count -= 1
+
     assert_plan6_success(
         case,
         scenario,
-        volume_count=len(renamed),
+        volume_count=expected_input_volume_count,
         expected_container="pe",
         passwords=encrypted_password_list(password),
         error_info=plan6_error,

@@ -18,6 +18,9 @@ def write_relation_task(task: ArchiveTask) -> None:
         "split_group_complete": task.fact_bag.get("relation.split_group_complete"),
         "split_missing_indices": list(task.fact_bag.get("relation.split_missing_indices") or []),
         "split_missing_reason": str(task.fact_bag.get("relation.split_missing_reason") or ""),
+        "carrier_path": str(task.carrier_path or ""),
+        "companion_paths": list(task.fact_bag.get("candidate.companion_paths") or []),
+        "cleanup_paths": list(task.cleanup_parts or []),
     }
     write_payload(knowledge, "relations", relation_payload, source_layer="relations", source_module="task")
     source_derivation = _source_derivation_payload(task, relation_payload)
@@ -44,4 +47,7 @@ def _source_derivation_payload(task: ArchiveTask, relation_payload: dict[str, An
         "source": relation_payload.get("source") or "",
         "zip_container_tags": tags,
         "parts": list(task.all_parts or []),
+        "cleanup_parts": list(task.cleanup_parts or []),
+        "carrier_path": str(task.carrier_path or ""),
+        "companion_paths": list(task.fact_bag.get("candidate.companion_paths") or []),
     }

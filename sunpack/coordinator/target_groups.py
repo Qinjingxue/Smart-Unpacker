@@ -11,14 +11,19 @@ from sunpack.filesystem.directory_scanner import DirectoryScanner
 def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag = FactBag()
     relation = group.relation
-    all_paths = group.all_paths
-    member_paths = [path for path in all_paths if path != group.head_path]
-    bag.set("file.path", group.head_path)
+    input_paths = group.input_paths
+    member_paths = [path for path in input_paths if path != group.head_path]
+    carrier_path = group.carrier_path or group.head_path
+    cleanup_paths = group.owned_paths
+    bag.set("file.path", carrier_path)
     bag.set("file.logical_name", group.logical_name)
     bag.set("candidate.kind", group.kind)
     bag.set("candidate.entry_path", group.entry_path)
-    bag.set("candidate.member_paths", all_paths)
+    bag.set("candidate.member_paths", input_paths)
     bag.set("candidate.logical_name", group.logical_name)
+    bag.set("candidate.carrier_path", carrier_path)
+    bag.set("candidate.companion_paths", list(group.companion_paths or []))
+    bag.set("candidate.cleanup_paths", cleanup_paths)
     single_incomplete_volume = group.split_group_complete is False and len(group.split_volumes) == 1
     if group.split_volumes and not single_incomplete_volume:
         format_hint = _split_format_hint(
@@ -63,14 +68,15 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("archive.source", state.source.to_dict())
     bag.set("archive.patch_stack", [])
     bag.set("archive.patch_digest", state.effective_patch_digest())
-    if isinstance(group.head_size, int):
-        bag.set("file.size", group.head_size)
+    file_size = group.carrier_size if group.carrier_path and isinstance(group.carrier_size, int) else group.head_size
+    if isinstance(file_size, int):
+        bag.set("file.size", file_size)
     bag.set("file.split_members", list(member_paths))
     bag.set("file.split_role", relation.split_role)
     bag.set("file.is_split_candidate", group.is_split_candidate or relation.is_split_related)
     bag.set("relation.is_split_related", group.is_split_candidate or relation.is_split_related)
     bag.set("relation.is_split_member", relation.is_split_member)
-    bag.set("relation.has_split_companions", relation.has_split_companions)
+    bag.set("relation.has_split_companions", relation.has_split_companions or bool(group.companion_paths))
     bag.set("relation.is_split_exe_companion", relation.is_split_exe_companion)
     bag.set("relation.is_disguised_split_exe_companion", relation.is_disguised_split_exe_companion)
     bag.set("relation.has_generic_001_head", relation.has_generic_001_head)
@@ -79,7 +85,7 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.match_rar_head", relation.match_rar_head)
     bag.set("relation.match_001_head", relation.match_001_head)
     bag.set("relation.split_entry_path", group.head_path)
-    bag.set("relation.split_member_count", len(all_paths) if group.is_split_candidate else 0)
+    bag.set("relation.split_member_count", len(input_paths) if group.is_split_candidate else 0)
     if group.split_group_complete is not None:
         bag.set("relation.split_group_complete", bool(group.split_group_complete))
     bag.set(

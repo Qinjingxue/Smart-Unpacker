@@ -75,7 +75,7 @@ def plan_watch_dispatches(
                 deferred.append(DeferredWatch(candidate=candidate, group=snapshot))
             continue
         seen_groups.add(snapshot.group_id)
-        if any(path_key(member) in active_paths for member in snapshot.member_paths):
+        if any(path_key(member) in active_paths for member in snapshot.owned_paths):
             deferred_groups.add(snapshot.group_id)
             deferred.append(DeferredWatch(candidate=candidate, group=snapshot))
             continue
@@ -89,7 +89,7 @@ def plan_watch_dispatches(
         if previous is None:
             member_entries = [
                 entry
-                for path in snapshot.member_paths
+                for path in snapshot.input_paths
                 if (entry := state.latest_entry_for_path(path)) is not None
             ]
             inherited = set().union(*(_entry_blockers(entry) for entry in member_entries)) if member_entries else set()

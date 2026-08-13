@@ -32,6 +32,8 @@ class ArchiveTask:
     key: str = ""
     main_path: str = ""
     all_parts: Optional[List[str]] = None
+    carrier_path: str = ""
+    cleanup_parts: Optional[List[str]] = None
     logical_name: str = ""
     split_info: SplitArchiveInfo = field(default_factory=SplitArchiveInfo)
     decision: str = "archive"
@@ -48,6 +50,19 @@ class ArchiveTask:
         self.all_parts = list(self.all_parts or [])
         if not self.main_path:
             raise ValueError("ArchiveTask.main_path is required")
+        self.carrier_path = str(
+            self.carrier_path
+            or self.fact_bag.get("candidate.carrier_path")
+            or self.fact_bag.get("file.path")
+            or self.main_path
+        )
+        if self.cleanup_parts is None:
+            self.cleanup_parts = list(self.fact_bag.get("candidate.cleanup_paths") or [])
+        self.cleanup_parts = list(dedupe_values([
+            *self.all_parts,
+            *self.cleanup_parts,
+            self.carrier_path,
+        ]))
         if not self.key:
             self.key = self.logical_name or self.main_path
         if self.split_info is None:
@@ -55,6 +70,11 @@ class ArchiveTask:
         if self.split_info.archive_input is not None:
             self.all_parts = self.split_info.archive_input.part_paths()
             self.main_path = self.split_info.archive_input.entry_path
+            self.cleanup_parts = list(dedupe_values([
+                *self.all_parts,
+                *(self.cleanup_parts or []),
+                self.carrier_path,
+            ]))
             self.split_info.is_split = self.split_info.archive_input.open_mode in {"native_volumes", "sfx_with_volumes"}
         if not isinstance(self.fact_bag.get("archive.knowledge"), dict):
             self._write_detection_boundary_knowledge()
@@ -63,6 +83,9 @@ class ArchiveTask:
     def from_fact_bag(cls, fact_bag: FactBag, score: int, decision=None) -> "ArchiveTask":
         main_path = fact_bag.get("candidate.entry_path") or ""
         all_parts = list(fact_bag.get("candidate.member_paths") or [])
+        carrier_path = str(fact_bag.get("candidate.carrier_path") or fact_bag.get("file.path") or main_path)
+        cleanup_parts = list(fact_bag.get("candidate.cleanup_paths") or [])
+        cleanup_parts = list(dedupe_values([*all_parts, *cleanup_parts, carrier_path]))
         logical_name = fact_bag.get("candidate.logical_name") or ""
         is_split = bool(
             fact_bag.get("relation.is_split_related")
@@ -71,8 +94,10 @@ class ArchiveTask:
         )
         key = logical_name if is_split else main_path
         is_sfx_stub = bool(
-            fact_bag.get("relation.is_split_exe_companion")
+            fact_bag.get("relation.has_split_companions")
+            or fact_bag.get("relation.is_split_exe_companion")
             or fact_bag.get("relation.is_disguised_split_exe_companion")
+            or fact_bag.get("candidate.companion_paths")
         )
         state = ArchiveState.from_any(
             fact_bag.get("archive.state"),
@@ -93,6 +118,8 @@ class ArchiveTask:
             key=key,
             main_path=main_path,
             all_parts=all_parts,
+            carrier_path=carrier_path,
+            cleanup_parts=cleanup_parts,
             logical_name=logical_name,
             split_info=split_info,
             decision=getattr(decision, "decision", "archive"),
@@ -117,11 +144,15 @@ class ArchiveTask:
 
         self.main_path = mapped(self.main_path)
         self.all_parts = [mapped(path) for path in self.all_parts]
+        self.carrier_path = mapped(self.carrier_path or self.main_path)
+        self.cleanup_parts = [mapped(path) for path in (self.cleanup_parts or [])]
         if self.split_info.archive_input is not None:
             self.split_info.archive_input = self.split_info.archive_input.with_path_mapping(mapped)
-        self.fact_bag.set("file.path", self.main_path)
+        self.fact_bag.set("file.path", self.carrier_path or self.main_path)
         self.fact_bag.set("candidate.entry_path", self.main_path)
         self.fact_bag.set("candidate.member_paths", list(self.all_parts))
+        self.fact_bag.set("candidate.carrier_path", self.carrier_path or self.main_path)
+        self.fact_bag.set("candidate.cleanup_paths", list(self.cleanup_parts))
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])
         try:
             self.set_archive_state(self.archive_state().with_path_mapping(mapped))
@@ -135,6 +166,8 @@ class ArchiveTask:
         self.key = replacement.key
         self.main_path = replacement.main_path
         self.all_parts = list(replacement.all_parts or [])
+        self.carrier_path = replacement.carrier_path
+        self.cleanup_parts = list(replacement.cleanup_parts or [])
         self.logical_name = replacement.logical_name
         self.split_info = replacement.split_info
         self.decision = replacement.decision
@@ -265,9 +298,19 @@ class ArchiveTask:
         with _phase(phase_timer, f"{phase_prefix}_source_input"):
             source_descriptor = state.to_archive_input_descriptor()
             source_input = source_descriptor.to_dict()
+            self.cleanup_parts = list(dedupe_values([
+                *(self.cleanup_parts or []),
+                *source_descriptor.part_paths(),
+                self.carrier_path,
+            ]))
             self.split_info.archive_input = source_descriptor
             self.split_info.is_split = source_descriptor.open_mode in {"native_volumes", "sfx_with_volumes"}
-            self.split_info.is_sfx_stub = source_descriptor.open_mode == "sfx_with_volumes"
+            self.split_info.is_sfx_stub = bool(
+                source_descriptor.open_mode == "sfx_with_volumes"
+                or self.split_info.is_sfx_stub
+                or self.fact_bag.get("relation.has_split_companions")
+                or self.fact_bag.get("candidate.companion_paths")
+            )
         with _phase(phase_timer, f"{phase_prefix}_merge_knowledge"):
             state_snapshot_for_knowledge = _archive_state_snapshot(state)
             knowledge = self._merged_state_knowledge(state, source_input, state_snapshot_for_knowledge)
@@ -374,7 +417,8 @@ class ArchiveTask:
         source_input = source_descriptor.to_dict()
         knowledge.merge({
             "filesystem": {
-                "path": self.main_path,
+                "path": self.carrier_path or self.main_path,
+                "carrier_path": self.carrier_path or self.main_path,
                 "detected_ext": self.detected_ext,
             },
             "source": {
@@ -383,6 +427,8 @@ class ArchiveTask:
                     "kind": str(self.fact_bag.get("candidate.kind") or ("split_archive" if self.split_info.is_split else "file")),
                     "candidate_entry_path": self.main_path,
                     "candidate_member_paths": list(self.all_parts or []),
+                    "candidate_carrier_path": self.carrier_path or self.main_path,
+                    "candidate_cleanup_paths": list(self.cleanup_parts or []),
                     "candidate_logical_name": self.logical_name,
                     "split_group_complete": self.fact_bag.get("relation.split_group_complete"),
                     "split_missing_indices": list(self.fact_bag.get("relation.split_missing_indices") or []),

@@ -55,7 +55,118 @@ class RelationsGroupBuilder:
             if discovered:
                 path_passwords = discovered
                 groups = self.build_candidate_groups_without_discovery(snapshot, discovered)
-        return self._merge_structure_resolved_groups(groups, path_passwords=path_passwords)
+        groups = self._merge_structure_resolved_groups(groups, path_passwords=path_passwords)
+        return self._attach_launcher_companions(groups)
+
+    @staticmethod
+    def _attach_launcher_companions(groups: List[CandidateGroup]) -> List[CandidateGroup]:
+        """Associate a real 7z/ZIP SFX launcher with its data-volume group.
+
+        The native relation engine deliberately keeps a naked executable
+        independent when it cannot prove that it is a split member.  For SFX
+        archives that is the right input boundary, but it leaves target scans
+        unable to discover the archive when the user selects the launcher.
+        Attach only an exact logical-name match, or a strongly anchored
+        decorated-volume-name match, to one structurally grouped 7z/ZIP
+        family.  Ambiguous families and filename-only camouflage stay
+        separate, and RAR ``part1.exe`` remains a real data volume.
+        """
+        launcher_groups = [
+            group
+            for group in groups
+            if RelationsGroupBuilder._is_launcher_only_group(group)
+        ]
+        if not launcher_groups:
+            return groups
+
+        data_groups = [
+            group
+            for group in groups
+            if RelationsGroupBuilder._is_launcher_data_group(group)
+        ]
+        attachments: dict[str, list[CandidateGroup]] = {}
+        claimed_launchers: set[str] = set()
+        for launcher in launcher_groups:
+            matches = [
+                target
+                for target in data_groups
+                if RelationsGroupBuilder._launcher_matches_data_group(launcher, target)
+            ]
+            if len(matches) != 1:
+                continue
+            target = matches[0]
+            target_key = path_key(target.head_path)
+            launcher_key = path_key(launcher.head_path)
+            if launcher_key in claimed_launchers:
+                continue
+            attachments.setdefault(target_key, []).append(launcher)
+            claimed_launchers.add(launcher_key)
+
+        if not attachments:
+            return groups
+
+        merged: list[CandidateGroup] = []
+        for group in groups:
+            group_key = path_key(group.head_path)
+            companions = attachments.get(group_key)
+            if not companions:
+                if path_key(group.head_path) not in claimed_launchers:
+                    merged.append(group)
+                continue
+            group.companion_paths = list(dict.fromkeys([
+                *(group.companion_paths or []),
+                *(companion.head_path for companion in companions),
+            ]))
+            carrier = companions[0]
+            group.carrier_path = carrier.head_path
+            group.carrier_size = carrier.head_size
+            group.relation.has_split_companions = True
+            group.relation.is_split_related = True
+            merged.append(group)
+        return merged
+
+    @staticmethod
+    def _is_launcher_only_group(group: CandidateGroup) -> bool:
+        relation = group.relation
+        return bool(
+            not group.split_volumes
+            and not group.is_split_candidate
+            and not relation.is_split_related
+            and not relation.is_split_member
+            and os.path.splitext(group.head_path)[1].casefold() == ".exe"
+        )
+
+    @staticmethod
+    def _is_launcher_data_group(group: CandidateGroup) -> bool:
+        if not group.split_volumes or not (group.is_split_candidate or group.relation.is_split_related):
+            return False
+        metadata = group.head_metadata if isinstance(group.head_metadata, dict) else {}
+        values = [
+            str(group.relation.split_family or ""),
+            str(group.split_volumes[0].style or ""),
+            str(metadata.get("format") or ""),
+        ]
+        family = " ".join(values).casefold()
+        return "7z" in family or "zip" in family
+
+    @staticmethod
+    def _launcher_matches_data_group(launcher: CandidateGroup, target: CandidateGroup) -> bool:
+        """Match decorated volume names without treating arbitrary names as SFX."""
+        if target.logical_name.casefold() == launcher.logical_name.casefold():
+            return True
+        launcher_stem = Path(launcher.head_path).stem.casefold()
+        if not launcher_stem:
+            return False
+        for volume in target.split_volumes or []:
+            name = Path(volume.path).name.casefold()
+            for marker in (".7z.", ".zip."):
+                marker_index = name.find(marker)
+                if marker_index <= 0:
+                    continue
+                base = name[:marker_index]
+                if base == launcher_stem or base.endswith(f".{launcher_stem}"):
+                    return True
+        return False
 
     def _discover_directory_passwords(
         self,
@@ -74,7 +185,7 @@ class RelationsGroupBuilder:
             if not getattr(group, "encrypted_unresolved", False):
                 continue
             encrypted_paths.add(os.path.abspath(str(group.head_path or "")))
-            for member in group.all_paths:
+            for member in group.input_paths:
                 encrypted_paths.add(os.path.abspath(str(member)))
         encrypted_paths.discard("")
         if not encrypted_paths:
@@ -120,7 +231,7 @@ class RelationsGroupBuilder:
         candidate_paths = list(dict.fromkeys(
             path
             for group in groups
-            for path in [group.head_path, *group.all_paths]
+            for path in [group.head_path, *group.input_paths]
         ))
         replacements: list[tuple[set[str], CandidateGroup]] = []
         claimed: set[str] = set()
@@ -128,7 +239,7 @@ class RelationsGroupBuilder:
             anchor = group.head_metadata if isinstance(group.head_metadata, dict) else {}
             roles = {str(value).lower() for value in (anchor.get("anchor_roles") or [])}
             evidence = {str(value).lower() for value in (anchor.get("evidence") or [])}
-            group_keys = {path_key(path) for path in group.all_paths}
+            group_keys = {path_key(path) for path in group.input_paths}
             head_missing_from_contract = path_key(group.head_path) not in group_keys
             if not bool(
                 anchor.get("confidence") == "strong"
@@ -149,13 +260,21 @@ class RelationsGroupBuilder:
                     or "rar5:encryption_header" in evidence
                 )
                 and anchor.get("format")
-                and (head_missing_from_contract or group.split_group_complete is not True)
+                and (
+                    head_missing_from_contract
+                    or group.split_group_complete is not True
+                    # A strong SFX/volume anchor can be emitted as a
+                    # one-volume provisional group.  Give the existing
+                    # directory resolver a chance to expand it before the
+                    # candidate reaches detection.
+                    or len(group.input_paths) <= 1
+                )
             ):
                 continue
             current_paths = (
                 [group.head_path]
                 if head_missing_from_contract
-                else list(dict.fromkeys([group.head_path, *group.all_paths]))
+                else list(dict.fromkeys([group.head_path, *group.input_paths]))
             )
             resolved = self.resolve_volume_once(
                 current_paths,
@@ -163,9 +282,9 @@ class RelationsGroupBuilder:
                 format_hint=str(anchor["format"]),
                 path_passwords=path_passwords,
             )
-            if resolved is None or len(resolved.all_paths) <= 1:
+            if resolved is None or len(resolved.input_paths) <= 1:
                 continue
-            keys = {path_key(path) for path in resolved.all_paths}
+            keys = {path_key(path) for path in resolved.input_paths}
             if keys & claimed:
                 continue
             claimed.update(keys)
@@ -176,7 +295,7 @@ class RelationsGroupBuilder:
         merged: List[CandidateGroup] = []
         emitted: set[int] = set()
         for group in groups:
-            group_keys = {path_key(path) for path in group.all_paths}
+            group_keys = {path_key(path) for path in group.input_paths}
             replacement_index = next(
                 (index for index, (keys, _resolved) in enumerate(replacements) if keys & group_keys),
                 None,
@@ -371,7 +490,7 @@ class RelationsGroupBuilder:
                 head_path=head_path,
                 logical_name=str(raw.get("logical_name") or relation.logical_name),
                 relation=relation,
-                member_paths=[path for path in all_parts if path_key(path) != path_key(head_path)],
+                input_paths=all_parts,
                 is_split_candidate=bool(raw.get("is_split_candidate")),
                 head_size=raw.get("head_size"),
                 split_volumes=split_volumes,
@@ -389,6 +508,9 @@ class RelationsGroupBuilder:
                 split_completeness_basis=[str(value) for value in (raw.get("split_completeness_basis") or [])],
                 head_metadata=dict(raw.get("head_metadata") or {}),
                 encrypted_unresolved=self._group_encrypted_unresolved(raw),
+                companion_paths=[str(path) for path in (raw.get("companion_paths") or [])],
+                carrier_path=str(raw.get("carrier_path") or ""),
+                carrier_size=raw.get("carrier_size"),
             )
         except (TypeError, ValueError):
             return None

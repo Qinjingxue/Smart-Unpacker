@@ -95,8 +95,10 @@ class ExtractionExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             archive_path = Path(tmp) / "sample.7z.001"
             candidate_path = Path(tmp) / "sample"
+            launcher_path = Path(tmp) / "sample.exe"
             archive_path.write_bytes(b"7z")
             candidate_path.write_bytes(b"candidate")
+            launcher_path.write_bytes(b"MZ")
             out_dir = Path(tmp) / "sample_out"
 
             class CandidateStager:
@@ -116,14 +118,21 @@ class ExtractionExecutionTests(unittest.TestCase):
             extractor.rename_scheduler = CandidateStager()
 
             bag = FactBag()
-            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
+            task = ArchiveTask(
+                fact_bag=bag,
+                score=10,
+                main_path=str(archive_path),
+                all_parts=[str(archive_path)],
+                carrier_path=str(launcher_path),
+                cleanup_parts=[str(archive_path), str(launcher_path)],
+            )
 
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
             extractor.sevenzip_runner.run_extract = lambda **_kwargs: succeeded
             result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
-            self.assertEqual(result.all_parts, [str(archive_path)])
+            self.assertEqual(result.all_parts, [str(archive_path), str(launcher_path)])
 
     def test_extractor_retries_after_disk_space_error(self):
         with tempfile.TemporaryDirectory() as tmp:

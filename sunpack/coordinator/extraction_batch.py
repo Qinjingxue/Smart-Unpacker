@@ -1532,7 +1532,11 @@ class ExtractionBatchRunner:
             if outcome.outcome_kind == OutcomeKind.COMPLETE_SUCCESS:
                 self.context.success_count += 1
                 self.context.processed_keys.add(task.key)
-                self.context.unpacked_archives.append(res.all_parts or task.all_parts)
+                cleanup_parts = list(dict.fromkeys([
+                    *(res.all_parts or []),
+                    *(task.cleanup_parts or task.all_parts or []),
+                ]))
+                self.context.unpacked_archives.append(cleanup_parts)
                 self.context.flatten_candidates.add(out_dir)
                 self.context.target_results.append(TargetRunResult(
                     input_path=task.main_path,

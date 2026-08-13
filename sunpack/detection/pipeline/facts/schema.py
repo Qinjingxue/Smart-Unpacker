@@ -50,12 +50,27 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     "candidate.entry_path": {
         "type": "str",
         "producer": "relations.group_builder",
-        "description": "Entry path used for detection and extraction of the logical candidate.",
+        "description": "Actual archive input entry used for detection structure analysis and extraction; may differ from a PE SFX carrier.",
     },
     "candidate.member_paths": {
         "type": "list[str]",
         "producer": "relations.group_builder",
-        "description": "All filesystem paths belonging to the logical candidate.",
+        "description": "Actual archive data-volume paths belonging to the logical candidate; excludes launcher-only SFX carriers.",
+    },
+    "candidate.carrier_path": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Filesystem path used as the detection carrier, such as a PE SFX launcher.",
+    },
+    "candidate.companion_paths": {
+        "type": "list[str]",
+        "producer": "relations.group_builder",
+        "description": "Launcher or other owned companion paths related to the candidate but excluded from archive input volumes.",
+    },
+    "candidate.cleanup_paths": {
+        "type": "list[str]",
+        "producer": "relations.group_builder",
+        "description": "Data and companion paths to remove after a successful extraction.",
     },
     "candidate.logical_name": {
         "type": "str",
