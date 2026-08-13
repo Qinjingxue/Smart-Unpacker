@@ -80,5 +80,8 @@ repair_training/latest_runs.json
 # Codebase memory generated metadata
 .codebase-memory/
 .codewhale/
+
+# Local reference corpus (upstream source trees and format specifications)
+/reference/
 tests/测试改造.txt
 tests/real/error_records
