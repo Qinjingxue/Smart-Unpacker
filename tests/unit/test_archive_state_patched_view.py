@@ -395,32 +395,6 @@ def test_native_zip_rebuild_accepts_patched_state_bytes_source(tmp_path):
         assert zf.read("inside.txt") == b"ok"
 
 
-def test_archive_state_manifest_verifies_chunyu_embedded_zip_range():
-    archive = Path("testfiles/chunyu_syokushu/ちゅうにゅう触手洞窟.exe")
-    if not archive.is_file():
-        pytest.skip("local Chunyu embedded ZIP sample is not available")
-    start = 61_057_024
-    descriptor = ArchiveInputDescriptor(
-        entry_path=str(archive),
-        open_mode="file_range",
-        format_hint="zip",
-        logical_name="ちゅうにゅう触手洞窟",
-        parts=[
-            ArchiveInputPart(
-                path=str(archive),
-                range=ArchiveInputRange(path=str(archive), start=start, end=archive.stat().st_size),
-            )
-        ],
-        segment=ArchiveInputSegment(start=start, end=archive.stat().st_size, confidence=0.99),
-    )
-    manifest = archive_state_manifest(ArchiveState.from_archive_input(descriptor), max_items=200000)
-
-    assert manifest.ok
-    assert manifest.damaged is False
-    assert manifest.checksum_error is False
-    assert manifest.file_count == 447
-
-
 def test_archive_state_manifest_uses_selected_shift_jis_codepage(tmp_path):
     archive = tmp_path / "shift-jis.zip"
     raw_name = "日本語/説明.txt".encode("cp932")

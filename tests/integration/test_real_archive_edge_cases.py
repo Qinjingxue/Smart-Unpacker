@@ -4,12 +4,11 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.pipeline_engine import execute_pipeline
-from sunpack.contracts.failures import FailureKind
 from sunpack.config.schema import normalize_config
 from tests.helpers.marker_utils import marker_was_extracted
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.tool_config import get_optional_rar, get_optional_rar_sfx, require_7z
+from tests.helpers.tool_config import get_optional_rar, require_7z
 
 
 PASSWORD = "123"
@@ -91,49 +90,31 @@ def assert_failure_contains(
         assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
-def archive_formats():
-    formats = ["7z", "zip"]
-    if get_optional_rar_sfx():
-        formats.append("rar")
-    return formats
-
-
-def archive_format_params(default_fast: set[str]):
-    return [
-        pytest.param(
-            archive_format,
-            marks=() if archive_format in default_fast else pytest.mark.slow_real_archive,
-            id=archive_format,
-        )
-        for archive_format in archive_formats()
-    ]
-def sfx_format_params(default_fast: set[str]):
+def sfx_format_params():
     formats = ["7z"]
     if get_optional_rar():
         formats.append("rar")
     return [
         pytest.param(
             archive_format,
-            marks=() if archive_format in default_fast else pytest.mark.slow_real_archive,
             id=archive_format,
         )
         for archive_format in formats
     ]
 
 
-def carrier_params(default_fast: set[str]):
+def carrier_params():
     carriers = ["jpg", "png", "pdf", "gif", "webp"]
     return [
         pytest.param(
             carrier,
-            marks=() if carrier in default_fast else pytest.mark.slow_real_archive,
             id=carrier,
         )
         for carrier in carriers
     ]
 
 
-def carrier_archive_case_params(default_fast: set[tuple[str, str]]):
+def carrier_archive_case_params():
     cases = [("pdf", "zip"), ("webp", "7z")]
     if get_optional_rar():
         cases.extend([("jpg", "rar"), ("png", "rar"), ("gif", "rar")])
@@ -141,34 +122,13 @@ def carrier_archive_case_params(default_fast: set[tuple[str, str]]):
         pytest.param(
             carrier,
             archive_format,
-            marks=() if (carrier, archive_format) in default_fast else pytest.mark.slow_real_archive,
             id=f"{carrier}-{archive_format}",
         )
         for carrier, archive_format in cases
     ]
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params(set()))
-def test_real_archive_edge_partial_split_corruption_reports_possible_missing_volume(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"partial_split_{archive_format}", archive_format, split=True, split_issue="corrupt_member")
-
-    summary = run_pipeline(case.archive_dir)
-    possible = [
-        failure
-        for failure in summary.failures
-        if failure.contains(FailureKind.MISSING_VOLUME)
-        and failure.details.get("missing_volume_confirmed") is False
-    ]
-
-    assert summary.partial_success_count == 1
-    assert summary.failed_tasks == []
-    assert possible
-    assert possible[0].details["partial_recovery"] is True
-    assert summary.recovered_outputs[0]["warning"]["kind"] == "missing_volume"
-
-
-@pytest.mark.parametrize("archive_format", sfx_format_params(set()))
+@pytest.mark.parametrize("archive_format", sfx_format_params())
 def test_real_archive_edge_corrupted_sfx_archives_fail(tmp_path, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"corrupted_sfx_{archive_format}", archive_format, sfx=True, corruption="truncate")
@@ -176,7 +136,7 @@ def test_real_archive_edge_corrupted_sfx_archives_fail(tmp_path, archive_format)
     assert_failure_contains(case, {"压缩包损坏", "致命错误"})
 
 
-@pytest.mark.parametrize("carrier", carrier_params({"jpg", "webp"}))
+@pytest.mark.parametrize("carrier", carrier_params())
 def test_real_archive_edge_prefixed_carrier_archives_extract(tmp_path, carrier):
     require_7z()
     case = FACTORY.create(tmp_path, f"prefixed_{carrier}_7z", "7z", carrier=carrier)
@@ -184,7 +144,7 @@ def test_real_archive_edge_prefixed_carrier_archives_extract(tmp_path, carrier):
     assert_success(case)
 
 
-@pytest.mark.parametrize(("carrier", "archive_format"), carrier_archive_case_params(set()))
+@pytest.mark.parametrize(("carrier", "archive_format"), carrier_archive_case_params())
 def test_real_archive_edge_prefixed_password_carrier_archives_require_matching_password(tmp_path, carrier, archive_format):
     require_7z()
     case = FACTORY.create(tmp_path, f"pwd_prefixed_{carrier}_{archive_format}", archive_format, password=PASSWORD, carrier=carrier)

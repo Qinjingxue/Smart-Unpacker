@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -81,7 +81,11 @@ def _write_error_record(item, report) -> None:
     _RECORD_COUNTER["n"] += 1
     counter = _RECORD_COUNTER["n"]
     ERROR_RECORDS_DIR.mkdir(parents=True, exist_ok=True)
-    record_path = ERROR_RECORDS_DIR / f"{counter:03d}_{_safe_name(nodeid)}.txt"
+    run_stamp = time.strftime("%Y%m%d_%H%M%S")
+    unique_id = uuid.uuid4().hex[:12]
+    record_path = ERROR_RECORDS_DIR / (
+        f"{run_stamp}_{unique_id}_{counter:03d}_{_safe_name(nodeid)}.txt"
+    )
     stdout = getattr(report, "capstdout", None) or ""
     stderr = getattr(report, "capstderr", None) or ""
     lines = [
@@ -116,14 +120,13 @@ def pytest_runtest_makereport(item, call):
 
 
 def pytest_sessionstart(session):
-    # 每次运行开始时清空旧记录；只清理本目录下的 error_records。
-    root = Path(__file__).resolve().parent
-    if ERROR_RECORDS_DIR.resolve().is_relative_to(root):
-        shutil.rmtree(ERROR_RECORDS_DIR, ignore_errors=True)
+    # 记录目录采用追加模式，重跑测试不得清空或覆盖之前的失败证据。
     ERROR_RECORDS_DIR.mkdir(parents=True, exist_ok=True)
-    (ERROR_RECORDS_DIR / "README.md").write_text(
-        "# error_records\n\n"
-        "本目录由 tests/real/conftest.py 自动管理：每次运行开始时清空，\n"
-        "失败的用例会把详细错误写入这里（含断言、捕获输出和用例上下文），用于后续统一修复。\n",
-        encoding="utf-8",
-    )
+    readme_path = ERROR_RECORDS_DIR / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text(
+            "# error_records\n\n"
+            "本目录由 tests/real/conftest.py 自动管理：失败的用例会把详细错误追加写入这里，\n"
+            "每条记录使用唯一文件名，重跑测试不会删除或覆盖之前的记录。可按需手动归档或清理。\n",
+            encoding="utf-8",
+        )

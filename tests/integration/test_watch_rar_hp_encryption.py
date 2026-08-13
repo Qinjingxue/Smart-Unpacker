@@ -91,7 +91,6 @@ def _extracted(output_root: Path, case: ArchiveCase) -> bool:
     return bool(list(output_root.rglob(case.marker_name)))
 
 
-@pytest.mark.slow_real_archive
 def test_watch_single_hp_rar_extracts_with_correct_password(tmp_path):
     """Single header-encrypted RAR with the right password must extract."""
     case = _create_case(tmp_path / "fixtures", "watch_hp_single_ok", split=False, password="single-hp-ok")
@@ -125,7 +124,6 @@ def test_watch_single_hp_rar_extracts_with_correct_password(tmp_path):
         delegate.close()
 
 
-@pytest.mark.slow_real_archive
 def test_watch_single_hp_rar_reports_wrong_password_without_hanging(tmp_path):
     """Single header-encrypted RAR without the right password must fail fast."""
     case = _create_case(tmp_path / "fixtures", "watch_hp_single_wrong", split=False, password="single-hp-right")
@@ -167,7 +165,6 @@ def test_watch_single_hp_rar_reports_wrong_password_without_hanging(tmp_path):
         delegate.close()
 
 
-@pytest.mark.slow_real_archive
 def test_watch_split_hp_rar_extracts_with_correct_password(tmp_path):
     """Split header-encrypted RAR with the right password must extract once."""
     case = _create_case(tmp_path / "fixtures", "watch_hp_split_ok", split=True, password="split-hp-ok")
@@ -204,7 +201,6 @@ def test_watch_split_hp_rar_extracts_with_correct_password(tmp_path):
         delegate.close()
 
 
-@pytest.mark.slow_real_archive
 def test_watch_split_hp_rar_recovers_after_wrong_then_correct_password(tmp_path):
     """Split header-encrypted RAR: wrong password blocks, correction succeeds."""
     correct = "split-hp-right"

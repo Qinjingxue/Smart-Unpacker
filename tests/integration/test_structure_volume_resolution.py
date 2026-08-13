@@ -421,7 +421,6 @@ def test_raw_split_rar_sfx_with_opaque_camouflaged_members_runs_full_pipeline(tm
     assert extracted.read_bytes() == payload.read_bytes()
 
 
-@pytest.mark.slow_real_archive
 def test_encrypted_plain_and_sfx_volume_matrix_with_shared_stem_and_noisy_suffixes(tmp_path):
     """Real tools, one directory, one primary stem, mixed wrong/right passwords."""
 

@@ -57,15 +57,7 @@ RARLAB WinRAR 6.22，以保留 Plan 7 所需的 RAR4 生成能力；zstd 固定�
 
 完整真实归档/watch 场景统一从 `tests/real/` 运行；`tests/integration/` 只保留真实场景中仍有独立价值的底层关系解析、原生桥接、错误分类、性能和密码源更新契约，避免同一行为在两套端到端矩阵中重复维护。
 
-## 慢速真实归档测试
-
-`tests/integration/test_real_archive_edge_cases.py` 默认保留一组快速真实归档 smoke 测试。完整格式矩阵标记为 `slow_real_archive`，默认跳过；需要时显式开启：
-
-```powershell
-pytest tests/integration/test_real_archive_edge_cases.py --run-slow-real-archives
-```
-
-真实归档计划的完整入口示例：
+真实归档测试默认运行。真实归档计划的完整入口示例：
 
 ```powershell
 pytest tests/real -q
