@@ -13,6 +13,7 @@ from sunpack.contracts.verification import VerificationResult
 from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
+from tests.helpers.edition import is_lite_edition
 
 
 @pytest.mark.parametrize("with_zero_file", [False, True])
@@ -137,6 +138,9 @@ def test_collect_result_applies_main_pipeline_cleanup_after_diagnostics(tmp_path
 
 
 def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, pipeline_resource_scheduler):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     archive = tmp_path / "repairable.zip"
     archive.write_bytes(b"broken")
     output = tmp_path / "repairable"

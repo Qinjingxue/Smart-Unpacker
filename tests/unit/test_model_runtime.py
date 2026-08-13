@@ -1,6 +1,9 @@
+import pytest
+
 from sunpack.repair.job import RepairJob
 from sunpack.repair.model import ModelAssetRegistry, RepairModelRuntime
 from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphNode
+from tests.helpers.edition import is_lite_edition
 
 
 def test_model_registry_starts_without_packaged_models():
@@ -15,6 +18,9 @@ def test_model_registry_starts_without_packaged_models():
 
 
 def test_model_registry_reports_training_required_without_assets():
+    if is_lite_edition():
+        pytest.skip("repair model runtime is disabled in Lite edition")
+
     status = ModelAssetRegistry().status(load=True, device="cpu")
 
     assert status["ok"] is False

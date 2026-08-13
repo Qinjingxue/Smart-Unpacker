@@ -1,14 +1,20 @@
 from pathlib import Path
 
+import pytest
+
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair.stage import ArchiveRepairStage
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult
+from tests.helpers.edition import is_lite_edition
 
 
 def test_repair_stage_builds_job_from_verification_decision(tmp_path):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     source = tmp_path / "broken.zip"
     repaired = tmp_path / "fixed.zip"
     source.write_bytes(b"broken")
@@ -57,6 +63,9 @@ def test_repair_stage_builds_job_from_verification_decision(tmp_path):
 
 
 def test_repair_stage_passes_verification_progress_to_repair_job(tmp_path):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     source = tmp_path / "payload_bad.zip"
     repaired = tmp_path / "partial.zip"
     source.write_bytes(b"broken")

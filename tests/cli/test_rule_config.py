@@ -1,9 +1,12 @@
+import pytest
+
 from sunpack.cli.cli_runtime import (
     apply_runtime_config_overrides,
     build_effective_config,
 )
 from sunpack.config.config_validator import validate_config_payload
 from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.edition import is_lite_edition
 
 
 def _payload():
@@ -34,6 +37,9 @@ def test_config_validate_rejects_obsolete_cumulative_deep_scan_ratio():
 
 
 def test_config_validate_rejects_obsolete_scoring_weight_fields():
+    if is_lite_edition():
+        pytest.skip("scoring rules are disabled in Lite edition")
+
     payload = with_detection_pipeline(
         scoring=[
             {

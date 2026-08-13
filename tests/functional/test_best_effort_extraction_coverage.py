@@ -39,6 +39,7 @@ from sunpack.contracts.verification import (
     VerificationStepResult,
 )
 from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.edition import is_lite_edition
 from tests.helpers.tool_config import require_7z
 
 
@@ -868,6 +869,9 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_r
 
 
 def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path, pipeline_resource_scheduler):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     archive = tmp_path / "missing-tail.7z.001"
     archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
     out_dir = tmp_path / "out"
@@ -1088,6 +1092,9 @@ def test_main_flow_outer_partial_and_inner_tar_gz_partial_keep_coverage_separate
 
 
 def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp_path):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     _require_worker_or_skip()
     _require_7z_dll_or_skip()
     input_root = tmp_path / "input"
@@ -1164,6 +1171,9 @@ def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
 
 
 def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path, pipeline_resource_scheduler):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     _require_worker_or_skip()
     _require_7z_dll_or_skip()
     input_root = tmp_path / "input"

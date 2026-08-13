@@ -10,6 +10,7 @@ from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.edition import is_lite_edition
 
 
 SCAN_CONFIG = normalize_config(with_detection_pipeline({
@@ -119,12 +120,18 @@ def _scan_parts(root: Path) -> dict[str, list[str]]:
     ids=lambda value: value if isinstance(value, str) else None,
 )
 def test_relationship_grouping_scenarios(tmp_path, name, files, expected):
+    if is_lite_edition() and expected:
+        pytest.skip("relationship grouping cases require the full detection/repair pipeline")
+
     _write_files(tmp_path / name, files)
 
     assert _scan_parts(tmp_path / name) == expected
 
 
 def test_naked_executable_does_not_attach_disguised_parts(tmp_path):
+    if is_lite_edition():
+        pytest.skip("relationship grouping cases require the full detection/repair pipeline")
+
     root = tmp_path / "disguised_exe_companion_with_regular_exe"
     _write_files(
         root,

@@ -13,6 +13,7 @@ from sunpack.repair.search.recovery import PolicyRecoverySnapshot
 from sunpack.repair.search.proposals import ModuleMaterializationResult, PolicyModuleProposal
 from sunpack.repair.search.types import PolicyGraphAction
 from sunpack.repair.scheduler import RepairScheduler
+from tests.helpers.edition import is_lite_edition
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +53,9 @@ def test_model_runtime_uses_paired_diagnosis_and_graph_models(tmp_path, monkeypa
 
 
 def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatch):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     models = _GraphModels([PolicyGraphAction(action_type="module", module_name="patch_one", score=0.9)])
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -77,6 +81,9 @@ def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatc
 
 
 def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatch):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     models = _GraphModels([PolicyGraphAction(action_type="module", module_name="bad_lazy", score=0.9)])
     bad = RepairCandidate(
         module_name="bad_lazy",
@@ -101,6 +108,9 @@ def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatc
 
 
 def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monkeypatch):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     module_models = _GraphModels([PolicyGraphAction(action_type="module", module_name="patch_one", score=0.9)])
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -128,6 +138,9 @@ def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monke
 
 
 def test_policy_step_stop_returns_best_state_and_sets_stop_signal(tmp_path, monkeypatch):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     models = _GraphModels([PolicyGraphAction(action_type="stop", action_id="stop", score=1.0, reason="model_stop")])
     scheduler = _scheduler(tmp_path)
     _install_models(scheduler, models)
@@ -144,6 +157,9 @@ def test_policy_step_stop_returns_best_state_and_sets_stop_signal(tmp_path, monk
 
 
 def test_stale_best_forces_stop_before_policy_scorer(tmp_path, monkeypatch):
+    if is_lite_edition():
+        pytest.skip("repair system is disabled in Lite edition")
+
     models = _GraphModels([PolicyGraphAction(action_type="module", action_id="patch_one", module_name="patch_one", score=1.0)], raise_on_score=True)
     job = _job(tmp_path)
     graph = _root_graph(job)

@@ -3,6 +3,7 @@ import pytest
 from sunpack.contracts.detection import FactBag
 from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.edition import is_lite_edition
 
 
 @pytest.mark.parametrize(
@@ -13,6 +14,9 @@ from tests.helpers.detection_config import with_detection_pipeline
     ],
 )
 def test_alternative_format_hypotheses_use_best_score_instead_of_sum(rule_names):
+    if is_lite_edition():
+        pytest.skip("scoring rules are disabled in Lite edition")
+
     config = with_detection_pipeline(
         {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
         precheck=[],
