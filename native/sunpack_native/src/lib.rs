@@ -262,6 +262,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         io::archive_state::archive_state_zip_manifest_native,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        io::archive_state::archive_state_tar_manifest_native,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(zip_deep_partial_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(zip_scan_source, m)?)?;
     m.add_function(wrap_pyfunction!(zip_rebuild_from_local_headers, m)?)?;
