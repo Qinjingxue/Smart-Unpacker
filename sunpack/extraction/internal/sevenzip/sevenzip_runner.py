@@ -167,6 +167,7 @@ class SevenZipRunner:
         part_paths: list[str],
         out_dir: str,
         password: str | None,
+        password_candidates: list[str] | tuple[str, ...] | None = None,
         selected_codepage: str | None,
         decoded_names: list[str],
         startupinfo,
@@ -182,6 +183,7 @@ class SevenZipRunner:
                     part_paths=part_paths,
                     out_dir=out_dir,
                     password=password,
+                    password_candidates=password_candidates,
                     selected_codepage=selected_codepage,
                     decoded_names=decoded_names,
                     task=task,
@@ -310,6 +312,7 @@ class SevenZipRunner:
         part_paths: list[str],
         out_dir: str,
         password: str | None,
+        password_candidates: list[str] | tuple[str, ...] | None,
         selected_codepage: str | None,
         decoded_names: list[str],
         task: ArchiveTask,
@@ -324,6 +327,9 @@ class SevenZipRunner:
             "output_dir": out_dir,
             "password": password or "",
         }
+        candidates = tuple(dict.fromkeys(str(item) for item in (password_candidates or ()) if item is not None))
+        if candidates:
+            job["password_candidates"] = list(candidates)
         if selected_codepage:
             job["codepage"] = selected_codepage
             job["decoded_names"] = list(decoded_names)

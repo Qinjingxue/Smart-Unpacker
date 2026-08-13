@@ -10,7 +10,7 @@ from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
-from sunpack.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics
+from sunpack.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics, worker_result_payload
 from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
 from sunpack.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
 from sunpack.contracts.extraction import ExtractionResult
@@ -124,9 +124,6 @@ class SingleArchiveExtractor:
         # The initial preflight already checked the same requirement.  Recheck
         # only after an extraction attempt, when disk usage may have changed.
         space_checked = True
-        password_candidate_rejections = 0
-        password_candidate_inconclusive: FailureInfo | None = None
-        password_candidates_inconclusive = 0
         while retry_count < self.retry_policy.max_retries:
             with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
                 has_space = space_checked or self.ensure_space(5)
@@ -224,6 +221,7 @@ class SingleArchiveExtractor:
                             part_paths=run_parts,
                             out_dir=out_dir,
                             password=correct_pwd,
+                            password_candidates=list(resolution.candidate_passwords),
                             selected_codepage=selected_codepage,
                             decoded_names=filename_encoding.decoded_names,
                             startupinfo=startupinfo,
@@ -234,14 +232,24 @@ class SingleArchiveExtractor:
                         )
 
                     if run_result.returncode == 0:
+                        selected_password = self._worker_selected_password(resolution, run_result)
+                        if selected_password is not None:
+                            correct_pwd = selected_password
                         if resolution.requires_extraction_confirmation:
-                            self.password_resolver.confirm_extraction(resolution)
+                            self.password_resolver.confirm_extraction(resolution, password=correct_pwd)
                         with _phase(phase_timer, f"{phase_prefix}_diagnostics_success"):
                             diagnostics = self._diagnostics_from(run_result)
                             if resolution.requires_extraction_confirmation:
-                                diagnostics["password_verification"] = "extraction_transaction"
-                                diagnostics["password_candidates_rejected"] = password_candidate_rejections
-                                diagnostics["password_candidates_inconclusive"] = password_candidates_inconclusive
+                                worker_result = worker_result_payload(run_result)
+                                diagnostics["password_verification"] = (
+                                    "sevenzip_worker_candidate_batch"
+                                    if resolution.candidate_passwords
+                                    else "extraction_transaction"
+                                )
+                                diagnostics["password_candidates_rejected"] = int(
+                                    worker_result.get("password_attempts") or 0
+                                ) if worker_result.get("password_candidates_all_rejected") else 0
+                                diagnostics["password_candidates_inconclusive"] = 0
                         with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
                             worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
                             output_inventory = collect_output_inventory(out_dir, worker_result)
@@ -308,6 +316,10 @@ class SingleArchiveExtractor:
                 pass
 
             if resolution.requires_extraction_confirmation and run_result is not None:
+                worker_result = worker_result_payload(run_result)
+                selected_password = self._worker_selected_password(resolution, run_result)
+                if selected_password is not None:
+                    correct_pwd = selected_password
                 candidate_failure = classify_extract_failure(
                     run_result,
                     err,
@@ -321,24 +333,9 @@ class SingleArchiveExtractor:
                     is_split=is_split,
                 )
                 if candidate_failure.details.get("evidence") == "zipcrypto_entry_crc_proven_before_failure":
-                    self.password_resolver.confirm_extraction(resolution)
-                elif candidate_failure.kind == FailureKind.PASSWORD_INCONCLUSIVE:
-                    password_candidates_inconclusive += 1
-                    if password_candidate_inconclusive is None:
-                        password_candidate_inconclusive = candidate_failure
-                    if self.password_resolver.has_pending_candidates(resolution.archive_key):
-                        self._cleanup_output(out_dir, OutputCleanupEvent.PASSWORD_CANDIDATE_RETRY)
-                        continue
-                elif candidate_failure.is_password_failure:
-                    self.password_resolver.reject_extraction_candidate(resolution)
-                    password_candidate_rejections += 1
-                    if self.password_resolver.has_pending_candidates(resolution.archive_key):
-                        self._cleanup_output(out_dir, OutputCleanupEvent.PASSWORD_CANDIDATE_RETRY)
-                        if password_candidate_rejections == 1 or password_candidate_rejections % 50 == 0:
-                            self._log(
-                                self.i18n.t("extract.log.password_rejections", count=password_candidate_rejections, archive=archive)
-                            )
-                        continue
+                    self.password_resolver.confirm_extraction(resolution, password=correct_pwd)
+                elif worker_result.get("password_candidates_all_rejected"):
+                    self.password_resolver.reject_extraction_candidates(resolution)
 
             if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
                 retry_count += 1
@@ -366,15 +363,25 @@ class SingleArchiveExtractor:
                     is_split_archive=is_split,
                     password_evidence=resolution.candidate_evidence,
                 )
-                if password_candidate_inconclusive is not None and failure.is_password_failure:
-                    failure = password_candidate_inconclusive
                 error_msg = self._append_retry_count(self._localized_failure(failure), retry_count)
             self._log(self.i18n.t("extract.log.failed", archive=archive, error=error_msg))
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result or test_result)
                 if resolution.requires_extraction_confirmation:
-                    diagnostics["password_candidates_rejected"] = password_candidate_rejections
-                    diagnostics["password_candidates_inconclusive"] = password_candidates_inconclusive
+                    worker_result = worker_result_payload(run_result or test_result)
+                    diagnostics["password_verification"] = (
+                        "sevenzip_worker_candidate_batch"
+                        if resolution.candidate_passwords
+                        else "extraction_transaction"
+                    )
+                    diagnostics["password_candidates_rejected"] = int(
+                        worker_result.get("password_attempts") or 0
+                    ) if worker_result.get("password_candidates_all_rejected") else 0
+                    diagnostics["password_candidates_inconclusive"] = (
+                        len(resolution.candidate_passwords)
+                        if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE
+                        else 0
+                    )
             with _phase(phase_timer, f"{phase_prefix}_recoverable_partial_check"):
                 recoverable_partial = (
                     failure.kind != FailureKind.PASSWORD_INCONCLUSIVE
@@ -399,7 +406,7 @@ class SingleArchiveExtractor:
                     run_parts,
                     error_msg,
                     failure=failure,
-                    password_used=(None if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE else correct_pwd),
+                    password_used=(None if failure.kind in {FailureKind.WRONG_PASSWORD, FailureKind.PASSWORD_INCONCLUSIVE} else correct_pwd),
                     selected_codepage=selected_codepage,
                     diagnostics=diagnostics,
                     partial_outputs=True,
@@ -413,7 +420,7 @@ class SingleArchiveExtractor:
                 run_parts,
                 error_msg,
                 failure=failure,
-                password_used=(None if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE else correct_pwd),
+                password_used=(None if failure.kind in {FailureKind.WRONG_PASSWORD, FailureKind.PASSWORD_INCONCLUSIVE} else correct_pwd),
                 selected_codepage=selected_codepage,
                 diagnostics=diagnostics,
             )
@@ -565,6 +572,20 @@ class SingleArchiveExtractor:
     def _diagnostics_from(result: object) -> dict:
         diagnostics = getattr(result, "worker_diagnostics", None)
         return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+    @staticmethod
+    def _worker_selected_password(resolution: PasswordResolution, run_result: object) -> str | None:
+        candidates = tuple(resolution.candidate_passwords or ())
+        if not candidates:
+            return resolution.password
+        result = worker_result_payload(run_result)
+        try:
+            index = int(result.get("matched_index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if 0 <= index < len(candidates):
+            return candidates[index]
+        return resolution.password
 
     def _password_resolution_failure(self, resolution: PasswordResolution) -> FailureInfo | None:
         if resolution.password is not None:

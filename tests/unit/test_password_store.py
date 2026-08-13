@@ -243,7 +243,7 @@ def test_password_resolver_reuses_session_password_without_retesting():
     assert result.password == "secret"
 
 
-def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confirmation():
+def test_password_resolver_submits_all_inconclusive_candidates_as_one_batch():
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(
         cli_passwords=["user-password"],
@@ -255,24 +255,21 @@ def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confir
     resolver = PasswordResolver(tester, session, scheduler)
 
     first = resolver.resolve("large.rar", archive_key="archive-key")
-    resolver.reject_extraction_candidate(first)
-    second = resolver.resolve("large.rar", archive_key="archive-key")
 
     assert scheduler.planned == ["user-password", "builtin-password"]
     assert first.password == "user-password"
-    assert second.password == "builtin-password"
+    assert first.candidate_passwords == ("user-password", "builtin-password")
     assert first.requires_extraction_confirmation is True
-    assert second.requires_extraction_confirmation is True
     assert tester.test_without_password_calls == 0
     assert session.has_resolved("archive-key") is False
 
-    resolver.confirm_extraction(second)
+    resolver.confirm_extraction(first, password="builtin-password")
 
     assert session.get_resolved("archive-key") == "builtin-password"
     assert tester.password_store.recent_passwords == ["builtin-password"]
 
 
-def test_password_resolver_preserves_candidate_evidence_across_pending_confirmations():
+def test_password_resolver_preserves_candidate_evidence_across_batch_confirmation():
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(
         cli_passwords=["first", "second"],
@@ -285,11 +282,8 @@ def test_password_resolver_preserves_candidate_evidence_across_pending_confirmat
     )
 
     first = resolver.resolve("payload.zip", archive_key="archive-key")
-    resolver.reject_extraction_candidate(first)
-    second = resolver.resolve("payload.zip", archive_key="archive-key")
-
     assert first.candidate_evidence == "zipcrypto_header_byte"
-    assert second.candidate_evidence == "zipcrypto_header_byte"
+    assert first.candidate_passwords == ("first", "second")
 
 
 def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
@@ -322,38 +316,25 @@ def test_confirmed_password_is_promoted_across_already_planned_archives():
     resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
     archive_a = resolver.resolve("first.unknown", archive_key="first")
     archive_b = resolver.resolve("second.unknown", archive_key="second")
-    resolver.reject_extraction_candidate(archive_a)
-    archive_a = resolver.resolve("first.unknown", archive_key="first")
-    resolver.reject_extraction_candidate(archive_a)
-    archive_a = resolver.resolve("first.unknown", archive_key="first")
 
-    resolver.confirm_extraction(archive_a)
-    resolver.reject_extraction_candidate(archive_b)
+    resolver.confirm_extraction(archive_a, password="shared-secret")
     promoted_b = resolver.resolve("second.unknown", archive_key="second")
 
-    assert archive_a.password == "shared-secret"
+    assert archive_a.candidate_passwords == ("wrong-a", "wrong-b", "shared-secret")
     assert promoted_b.password == "shared-secret"
 
 
-def test_hundreds_of_archives_reuse_batch_success_instead_of_rewalking_password_matrix():
+def test_hundreds_of_archives_reuse_confirmed_password_after_one_candidate_batch():
     passwords = [f"wrong-{index}" for index in range(499)] + ["shared-secret"]
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(cli_passwords=passwords, builtin_passwords=[])
 
     resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
-    attempts = 0
     resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
-    while resolution.password != "shared-secret":
-        attempts += 1
-        resolver.reject_extraction_candidate(resolution)
-        resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
-    attempts += 1
-    resolver.confirm_extraction(resolution)
+    assert resolution.candidate_passwords == tuple(passwords)
+    resolver.confirm_extraction(resolution, password="shared-secret")
 
     for index in range(1, 100):
         resolution = resolver.resolve(f"archive-{index}.mixed", archive_key=f"archive-{index}")
-        attempts += 1
         assert resolution.password == "shared-secret"
         resolver.confirm_extraction(resolution)
-
-    assert attempts == 599

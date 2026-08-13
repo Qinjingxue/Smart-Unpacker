@@ -70,12 +70,12 @@ def get_7z_path() -> str:
 
 def get_sevenzip_bridge_worker_path() -> str:
     relatives = (
-        *tuple(tool_dir / "sunpack_sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
-        Path("sunpack_sevenzip_worker.exe"),
         Path("native") / "sevenzip_bridge" / "build-x64" / "Release" / "sunpack_sevenzip_worker.exe",
         Path("native") / "sevenzip_bridge" / "build-arm64" / "Release" / "sunpack_sevenzip_worker.exe",
         Path("native") / "sevenzip_bridge" / "build" / "Release" / "sunpack_sevenzip_worker.exe",
         Path("native") / "sevenzip_bridge" / "build" / "Debug" / "sunpack_sevenzip_worker.exe",
+        *tuple(tool_dir / "sunpack_sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
+        Path("sunpack_sevenzip_worker.exe"),
     )
     for root in candidate_resource_roots():
         for relative in relatives:

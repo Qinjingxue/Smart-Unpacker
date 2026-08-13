@@ -150,9 +150,10 @@ class PasswordScheduler:
     def plan_for_extraction(self, job: PasswordJob) -> PasswordSearchResult:
         """Resolve cheap proofs and return inconclusive candidates for real extraction.
 
-        This path never invokes the full-payload final verifier.  A candidate that
-        cannot be proven from bounded archive metadata is confirmed by the actual
-        extraction transaction, avoiding test-then-extract double I/O.
+        This path never invokes the full-payload final verifier.  Candidates that
+        cannot be proven from bounded archive metadata are handed to the generic
+        SevenZip extraction worker as one batch; the worker performs its bounded
+        backend probe and then the actual extraction transaction.
         """
         started_at = time.monotonic()
         self._emit_progress(job, PasswordProgressEvent(stage="started"))

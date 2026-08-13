@@ -83,6 +83,8 @@ def classify_extract_failure(
                 "failure.missing_volume",
                 details=_missing_volume_details(worker_result, confirmed=True),
             )
+        if worker_result.get("password_candidates_all_rejected"):
+            return _failure(FailureKind.WRONG_PASSWORD, "failure.wrong_password", user_action="request_password")
         if password_evidence == "zipcrypto_header_byte":
             operation_result_name = str(worker_result.get("operation_result_name") or "").lower()
             failure_kind = str(worker_result.get("failure_kind") or "").lower()

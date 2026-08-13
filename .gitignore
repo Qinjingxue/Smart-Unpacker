@@ -81,3 +81,4 @@ repair_training/latest_runs.json
 .codebase-memory/
 .codewhale/
 tests/测试改造.txt
+tests/real/error_records

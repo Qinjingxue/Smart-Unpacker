@@ -75,12 +75,8 @@ def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damag
                 candidate_evidence="zipcrypto_header_byte",
             )
 
-        def confirm_extraction(self, resolution):
+        def confirm_extraction(self, resolution, password=None):
             confirmed.append(resolution.password)
-
-        @staticmethod
-        def has_pending_candidates(_archive_key):
-            return False
 
     extractor = SingleArchiveExtractor(
         seven_z_path="",

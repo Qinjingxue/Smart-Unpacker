@@ -41,6 +41,7 @@ class PasswordResolution:
     archive_key: str = ""
     encrypted: bool | None = None
     requires_extraction_confirmation: bool = False
+    candidate_passwords: tuple[str, ...] = ()
     fingerprint_key: str = ""
     candidate_evidence: str = ""
 

@@ -18,7 +18,6 @@ class OutputCleanupEvent(str, Enum):
 
     EXTRACTION_ABORT = "extraction_abort"
     EXTRACT_RETRY = "extract_retry"
-    PASSWORD_CANDIDATE_RETRY = "password_candidate_retry"
     VERIFICATION_RETRY = "verification_retry"
     UNRECOVERABLE_FAILURE = "unrecoverable_failure"
     RETRY_EXHAUSTED = "retry_exhausted"

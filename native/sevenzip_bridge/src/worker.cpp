@@ -346,6 +346,85 @@ struct WorkerArchiveInput {
     std::vector<sunpack::sevenzip::ExtractPatchOperation> patches;
 };
 
+sunpack::sevenzip::PasswordTestResult run_password_candidate_probe(
+    const std::wstring& dll_path,
+    const WorkerArchiveInput& archive_input,
+    const std::vector<std::wstring>& candidates
+) {
+    using namespace sunpack::sevenzip;
+    std::vector<const wchar_t*> password_ptrs;
+    password_ptrs.reserve(candidates.size());
+    for (const auto& password : candidates) {
+        password_ptrs.push_back(password.c_str());
+    }
+    if (!archive_input.ranges.empty()) {
+        return test_passwords_with_ranges(
+            dll_path,
+            archive_input.archive_path,
+            archive_input.ranges,
+            archive_input.format_hint,
+            password_ptrs.data(),
+            static_cast<int>(password_ptrs.size()));
+    }
+    return test_passwords_with_parts(
+        dll_path,
+        archive_input.archive_path,
+        archive_input.part_paths,
+        password_ptrs.data(),
+        static_cast<int>(password_ptrs.size()),
+        archive_input.canonical_names);
+}
+
+sunpack::sevenzip::ExtractArchiveResult password_candidate_failure(
+    const WorkerArchiveInput& archive_input,
+    const sunpack::sevenzip::PasswordTestResult& probe,
+    std::size_t candidate_count
+) {
+    using namespace sunpack::sevenzip;
+    ExtractArchiveResult result;
+    result.status = probe.status;
+    result.backend_available = probe.backend_available;
+    result.archive_type = probe.archive_type.empty()
+        ? archive_type_for_path(archive_input.archive_path)
+        : probe.archive_type;
+    result.password_candidate_batch = true;
+    result.password_candidate_count = static_cast<unsigned int>(candidate_count);
+    result.password_attempts = probe.attempts;
+    result.matched_index = probe.matched_index;
+    result.password_candidates_all_rejected = probe.status == PasswordTestStatus::WrongPassword;
+    result.encrypted = probe.status == PasswordTestStatus::WrongPassword;
+    result.wrong_password = probe.status == PasswordTestStatus::WrongPassword;
+    result.password_rejected = result.wrong_password;
+    result.damaged = probe.status == PasswordTestStatus::Damaged;
+    result.missing_volume = probe.status == PasswordTestStatus::NeedsVolumeOrTailDamaged;
+    result.unsupported_method = probe.status == PasswordTestStatus::Unsupported;
+    result.failure_stage = "password_probe";
+    switch (probe.status) {
+    case PasswordTestStatus::WrongPassword:
+        result.failure_kind = "wrong_password";
+        result.operation_result = kOpWrongPassword;
+        break;
+    case PasswordTestStatus::Damaged:
+        result.failure_kind = "data_error";
+        result.operation_result = kOpDataError;
+        break;
+    case PasswordTestStatus::NeedsVolumeOrTailDamaged:
+        result.failure_kind = "missing_volume_or_tail";
+        break;
+    case PasswordTestStatus::Unsupported:
+        result.failure_kind = "unsupported_method";
+        break;
+    case PasswordTestStatus::BackendUnavailable:
+        result.failure_kind = "backend_unavailable";
+        break;
+    default:
+        result.failure_kind = "password_probe";
+        break;
+    }
+    result.message = probe.message;
+    return result;
+}
+
 std::vector<unsigned char> base64_decode(const std::string& text) {
     static const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::vector<unsigned char> out;
@@ -759,7 +838,12 @@ std::string diagnostics_json(const sunpack::sevenzip::ExtractArchiveResult& resu
         "\",\"missing_volume_suspected\":" + std::string(result.missing_volume_suspected ? "true" : "false") +
         ",\"missing_volume_evidence\":\"" + json_escape(result.missing_volume_evidence) +
         "\",\"missing_volume_name\":\"" + json_escape(wide_to_utf8(result.missing_volume_name)) +
-        "\",\"handler_attempts\":" + handler_attempts_json(result.handler_attempts) +
+        "\",\"password_candidate_batch\":" + std::string(result.password_candidate_batch ? "true" : "false") +
+        ",\"password_candidates_all_rejected\":" + std::string(result.password_candidates_all_rejected ? "true" : "false") +
+        ",\"password_candidate_count\":" + std::to_string(result.password_candidate_count) +
+        ",\"password_attempts\":" + std::to_string(result.password_attempts) +
+        ",\"matched_index\":" + std::to_string(result.matched_index) +
+        ",\"handler_attempts\":" + handler_attempts_json(result.handler_attempts) +
         ",\"input_trace\":" + input_trace_json(result.input_trace) +
         ",\"output_trace\":" + output_trace_json(result.output_trace) +
         ",\"failed_item\":" + failed_item_json(result) +
@@ -787,6 +871,11 @@ int run_request(const std::string& request) {
     const std::wstring format_hint = utf8_to_wide(json_string_field(request, "format_hint", ""));
     const std::wstring codepage = utf8_to_wide(json_string_field(request, "codepage", ""));
     const bool dry_run = json_bool_field(request, "dry_run", false);
+
+    std::vector<std::wstring> password_candidates;
+    for (const auto& candidate : json_string_array_field(request, "password_candidates")) {
+        password_candidates.push_back(utf8_to_wide(candidate));
+    }
 
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
@@ -845,11 +934,36 @@ int run_request(const std::string& request) {
             json_escape(archive_input.validation_error) + "\"}");
         return 2;
     }
-    ExtractArchiveResult result = !archive_input.patches.empty()
-        ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)
-        : archive_input.ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run, archive_input.canonical_names)
-        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run);
+    auto extract_with_password = [&](const std::wstring& selected_password) {
+        return !archive_input.patches.empty()
+            ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run)
+            : archive_input.ranges.empty()
+            ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run, archive_input.canonical_names)
+            : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run);
+    };
+
+    ExtractArchiveResult result;
+    if (password_candidates.empty()) {
+        result = extract_with_password(password);
+    } else if (!archive_input.patches.empty()) {
+        result.status = PasswordTestStatus::Error;
+        result.failure_stage = "password_probe";
+        result.failure_kind = "patched_input_candidates_unsupported";
+        result.message = "password candidate batches are not supported for patched input";
+    } else {
+        const auto probe = run_password_candidate_probe(dll_path, archive_input, password_candidates);
+        if (probe.status != PasswordTestStatus::Ok ||
+            probe.matched_index < 0 ||
+            static_cast<std::size_t>(probe.matched_index) >= password_candidates.size()) {
+            result = password_candidate_failure(archive_input, probe, password_candidates.size());
+        } else {
+            result = extract_with_password(password_candidates[probe.matched_index]);
+            result.password_candidate_batch = true;
+            result.password_candidate_count = static_cast<unsigned int>(password_candidates.size());
+            result.password_attempts = probe.attempts;
+            result.matched_index = probe.matched_index;
+        }
+    }
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
     const std::string failure_fields = ok ? "" :
@@ -877,6 +991,11 @@ int run_request(const std::string& request) {
         ",\"password_rejected\":" + std::string(result.password_rejected ? "true" : "false") +
         ",\"password_crc_proven\":" + std::string(result.password_crc_proven ? "true" : "false") +
         ",\"password_crc_proven_items\":" + std::to_string(result.password_crc_proven_items) +
+        ",\"password_candidate_batch\":" + std::string(result.password_candidate_batch ? "true" : "false") +
+        ",\"password_candidates_all_rejected\":" + std::string(result.password_candidates_all_rejected ? "true" : "false") +
+        ",\"password_candidate_count\":" + std::to_string(result.password_candidate_count) +
+        ",\"password_attempts\":" + std::to_string(result.password_attempts) +
+        ",\"matched_index\":" + std::to_string(result.matched_index) +
         ",\"unsupported_method\":" + std::string(result.unsupported_method ? "true" : "false") +
         ",\"item_count\":" + std::to_string(result.item_count) +
         ",\"files_written\":" + std::to_string(result.files_written) +

@@ -73,6 +73,31 @@ def _create_7z_with_nested_file(tmp_path):
     return archive
 
 
+def _create_encrypted_zip(tmp_path, password: str = "secret"):
+    seven_zip = _require_7z_or_skip()
+    source = tmp_path / "encrypted-source.txt"
+    source.write_text("encrypted worker payload", encoding="utf-8")
+    archive = tmp_path / "encrypted.zip"
+    result = subprocess.run(
+        [
+            str(seven_zip),
+            "a",
+            str(archive),
+            str(source),
+            "-tzip",
+            "-mx=0",
+            "-y",
+            f"-p{password}",
+        ],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"7z failed:\n{result.stdout}\n{result.stderr}")
+    return archive, source.name
+
+
 def _create_zip_with_bad_eocd_count(tmp_path):
     archive = tmp_path / "bad_count.zip"
     with zipfile.ZipFile(archive, "w") as zf:
@@ -170,6 +195,90 @@ def test_worker_does_not_classify_unencrypted_open_failure_as_wrong_password(tmp
     assert worker_result["wrong_password"] is False
     assert worker_result["encrypted"] is False
     assert worker_result["failure_kind"] != "encrypted_or_wrong_password"
+
+
+def test_worker_candidate_batch_probes_then_extracts_with_selected_password(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, filename = _create_encrypted_zip(tmp_path)
+    from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
+
+    weak_candidates = [f"weak-collision-{index}" for index in range(1024)]
+    weak_match = ZipFastVerifier().verify_batch(str(archive), [*weak_candidates, "secret"])
+    collision = next(
+        (
+            weak_candidates[index]
+            for index in weak_match.matched_indices
+            if index < len(weak_candidates)
+        ),
+        None,
+    )
+    if collision is None:
+        pytest.skip("the generated ZipCrypto header had no weak false-positive candidate")
+    out_dir = tmp_path / "out"
+    payload = {
+        "job_id": "candidate-batch-success",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+        "format_hint": "zip",
+        "password": "weak-header-placeholder",
+        "password_candidates": [collision, "secret"],
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["status"] == "ok"
+    assert worker_result["password_candidate_batch"] is True
+    assert worker_result["password_candidates_all_rejected"] is False
+    assert worker_result["password_candidate_count"] == 2
+    assert worker_result["password_attempts"] == 2
+    assert worker_result["matched_index"] == 1
+    assert (out_dir / filename).read_text(encoding="utf-8") == "encrypted worker payload"
+
+
+def test_worker_candidate_batch_rejects_all_candidates_without_full_extraction(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, filename = _create_encrypted_zip(tmp_path)
+    out_dir = tmp_path / "out"
+    payload = {
+        "job_id": "candidate-batch-rejected",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+        "format_hint": "zip",
+        "password": "weak-header-placeholder",
+        "password_candidates": ["wrong-password-1", "wrong-password-2"],
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode != 0
+    assert worker_result["status"] == "failed"
+    assert worker_result["native_status"] == "wrong_password"
+    assert worker_result["failure_stage"] == "password_probe"
+    assert worker_result["password_candidate_batch"] is True
+    assert worker_result["password_candidates_all_rejected"] is True
+    assert worker_result["password_candidate_count"] == 2
+    assert worker_result["password_attempts"] == 2
+    assert worker_result["matched_index"] == -1
+    assert not (out_dir / filename).exists()
 
 
 def test_persistent_worker_result_escapes_control_characters(tmp_path):

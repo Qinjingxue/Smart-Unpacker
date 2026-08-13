@@ -109,6 +109,8 @@ struct ExtractArchiveResult {
     bool wrong_password = false;
     bool password_rejected = false;
     bool password_crc_proven = false;
+    bool password_candidate_batch = false;
+    bool password_candidates_all_rejected = false;
     bool unsupported_method = false;
     bool output_inventory_complete = false;
     int operation_result = 0;
@@ -116,10 +118,13 @@ struct ExtractArchiveResult {
     unsigned int files_written = 0;
     unsigned int dirs_written = 0;
     unsigned int password_crc_proven_items = 0;
+    unsigned int password_candidate_count = 0;
     unsigned long long bytes_written = 0;
     unsigned int failed_item_index = 0;
     unsigned long long failed_item_bytes_written = 0;
     int hresult = 0;
+    int matched_index = -1;
+    int password_attempts = 0;
     std::wstring archive_type;
     std::wstring failed_item;
     std::wstring missing_volume_name;

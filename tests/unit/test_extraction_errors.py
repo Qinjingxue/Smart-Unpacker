@@ -231,6 +231,27 @@ def test_zipcrypto_backend_password_rejection_after_weak_header_match_is_inconcl
     assert failure.is_password_failure is False
 
 
+def test_worker_candidate_batch_rejection_overrides_weak_zipcrypto_evidence():
+    completed = _worker_completed({
+        "wrong_password": True,
+        "password_rejected": True,
+        "password_candidates_all_rejected": True,
+        "native_status": "wrong_password",
+        "operation_result_name": "wrong_password",
+        "failure_kind": "wrong_password",
+    })
+
+    failure = classify_extract_failure(
+        completed,
+        "",
+        archive="payload.zip",
+        password_evidence="zipcrypto_header_byte",
+    )
+
+    assert failure.kind is FailureKind.WRONG_PASSWORD
+    assert failure.is_password_failure is True
+
+
 def test_zipcrypto_damage_after_encrypted_entry_crc_proof_is_damaged():
     completed = _worker_completed({
         "wrong_password": False,
