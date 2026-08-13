@@ -43,6 +43,7 @@ impl TargetFormat {
 struct ArchiveCandidate {
     format: TargetFormat,
     offset: usize,
+    #[cfg(test)]
     archive_end: usize,
     start_crc_ok: bool,
     next_header_crc_ok: bool,

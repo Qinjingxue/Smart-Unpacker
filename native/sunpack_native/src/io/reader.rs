@@ -1,5 +1,4 @@
 use crate::io::read_fault::{FieldLocation, ReadFault};
-use memmap2::{Mmap, MmapOptions};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -88,8 +87,10 @@ pub(crate) trait ByteSource: Send + Sync {
         buffer[..data.len()].copy_from_slice(&data);
         Ok(data.len())
     }
-    fn map_read_only(&self) -> io::Result<Option<Mmap>> {
-        Ok(None)
+
+    #[cfg(windows)]
+    fn iocp_path(&self) -> Option<&Path> {
+        None
     }
 }
 
@@ -187,6 +188,11 @@ impl ManagedReader {
 
     pub(crate) fn len(&self) -> u64 {
         self.source.len()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn iocp_path(&self) -> Option<&Path> {
+        self.source.iocp_path()
     }
 
     /// Reads a range and shortens it at EOF, matching `Read`/positional-read semantics.
@@ -413,23 +419,6 @@ impl ManagedReader {
         }
     }
 
-    /// Maps a single immutable file for a high-throughput full-stream scan.
-    /// Multi-volume and non-file sources return `None` and keep using the
-    /// ordinary Reader streaming path.
-    pub(crate) fn map_read_only(&self) -> io::Result<Option<Mmap>> {
-        if self.uses_request_state() {
-            return Ok(None);
-        }
-        let _permit = self.state.gate.acquire()?;
-        let mapped = self.source.map_read_only()?;
-        if let Some(ref data) = mapped {
-            self.state
-                .uncached_read_bytes
-                .fetch_add(data.len() as u64, Ordering::Relaxed);
-        }
-        Ok(mapped)
-    }
-
     pub(crate) fn read_direct_into_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
         let _permit = self.state.gate.acquire()?;
         self.source
@@ -558,8 +547,21 @@ impl NativeArchiveSession {
         crate::password::rar::rar_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
-    fn scan_embedded_archives(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        crate::scan::embedded::scan_embedded_archives_with_reader(py, &self.reader)
+    #[pyo3(signature = (iocp_chunk_bytes=2097152, iocp_buffers=8, iocp_workers=2))]
+    fn scan_embedded_archives(
+        &self,
+        py: Python<'_>,
+        iocp_chunk_bytes: usize,
+        iocp_buffers: usize,
+        iocp_workers: usize,
+    ) -> PyResult<Py<PyDict>> {
+        crate::scan::embedded::scan_embedded_archives_with_reader(
+            py,
+            &self.reader,
+            iocp_chunk_bytes,
+            iocp_buffers,
+            iocp_workers,
+        )
     }
 }
 
@@ -666,6 +668,11 @@ struct FileSource {
 impl ByteSource for FileSource {
     fn len(&self) -> u64 {
         self.identity.len
+    }
+
+    #[cfg(windows)]
+    fn iocp_path(&self) -> Option<&Path> {
+        Some(&self.identity.path)
     }
 
     fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -835,22 +842,6 @@ impl ByteSource for FileSource {
         Ok(count)
     }
 
-    fn map_read_only(&self) -> io::Result<Option<Mmap>> {
-        if self.len() == 0 {
-            return Ok(None);
-        }
-        // SAFETY: FileSource keeps the file handle alive, the pipeline treats
-        // archive bytes as immutable, and Mmap owns the mapping until drop.
-        let mapped = match unsafe { MmapOptions::new().map(&self.file) } {
-            Ok(mapped) => mapped,
-            Err(_) => return Ok(None),
-        };
-        manager()
-            .metrics
-            .logical_bytes
-            .fetch_add(mapped.len() as u64, Ordering::Relaxed);
-        Ok(Some(mapped))
-    }
 }
 
 struct Volume {

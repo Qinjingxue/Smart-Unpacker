@@ -1,5 +1,6 @@
-use crate::io::reader::{ManagedReader, SourceCursor};
-use crate::io::util::STREAM_CHUNK_SIZE;
+#[cfg(windows)]
+use crate::io::iocp;
+use crate::io::reader::ManagedReader;
 use aho_corasick::{packed, AhoCorasick};
 use bzip2::{Decompress as Bzip2Decompress, Status as Bzip2Status};
 use crc32fast::{hash as crc32, Hasher};
@@ -7,7 +8,7 @@ use flate2::read::DeflateDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::io::{self, Read};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use xz2::stream::{Action as XzAction, Status as XzStatus, Stream as XzStream};
 
 use rayon::prelude::*;
@@ -43,13 +44,13 @@ const ZSTD_PATTERN_INDEX: usize = 8;
 static EMBEDDED_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
 static EMBEDDED_PACKED_MATCHER: OnceLock<Option<packed::Searcher>> = OnceLock::new();
 
-// More workers reduce throughput once their simultaneous scans compete for
-// memory bandwidth. Keep this local to embedded scanning: candidate
-// validation and unrelated Rayon users retain the full global pool.
-const MAX_SCAN_WORKERS: usize = 8;
-const EMBEDDED_CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+const DEFAULT_IOCP_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const DEFAULT_IOCP_BUFFERS: usize = 8;
+const DEFAULT_IOCP_WORKERS: usize = 2;
 const MAX_ARCHIVE_METADATA_RECORDS: usize = 1_000_000;
 const MAX_VALIDATION_RAW_HITS: usize = 1_000_000;
+#[cfg(test)]
+const TEST_IOCP_CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 struct EmbeddedCandidate {
@@ -73,15 +74,10 @@ struct RawHit {
     offset: u64,
 }
 
-struct ScanChunk {
-    buffer: Vec<u8>,
-    sample_len: usize,
-    carry_len: usize,
-    base_offset: u64,
-}
-
 struct NativeScanResult {
     file_size: u64,
+    scan_read_bytes: u64,
+    scan_read_operations: u64,
     raw_hits: Vec<RawHit>,
     candidates: Vec<EmbeddedCandidate>,
     logical_resolution_complete: bool,
@@ -98,15 +94,31 @@ struct NativeScanResult {
 pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
     let owned_path = path.to_owned();
     let reader = py.detach(move || ManagedReader::open(&owned_path))?;
-    scan_embedded_archives_with_reader(py, &reader)
+    scan_embedded_archives_with_reader(
+        py,
+        &reader,
+        DEFAULT_IOCP_CHUNK_SIZE,
+        DEFAULT_IOCP_BUFFERS,
+        DEFAULT_IOCP_WORKERS,
+    )
 }
 
 pub(crate) fn scan_embedded_archives_with_reader(
     py: Python<'_>,
     reader: &ManagedReader,
+    iocp_chunk_bytes: usize,
+    iocp_buffers: usize,
+    iocp_workers: usize,
 ) -> PyResult<Py<PyDict>> {
     let reader = reader.clone();
-    let scan = py.detach(move || scan_embedded_archives_native(reader))?;
+    let scan = py.detach(move || {
+        scan_embedded_archives_native_with_iocp(
+            reader,
+            iocp_chunk_bytes,
+            iocp_buffers,
+            iocp_workers,
+        )
+    })?;
 
     let result = PyDict::new(py);
     result.set_item("complete", !scan.budget_exhausted)?;
@@ -117,6 +129,8 @@ pub(crate) fn scan_embedded_archives_with_reader(
     )?;
     result.set_item("file_size", scan.file_size)?;
     result.set_item("read_bytes", scan.file_size)?;
+    result.set_item("scan_read_bytes", scan.scan_read_bytes)?;
+    result.set_item("scan_read_operations", scan.scan_read_operations)?;
     result.set_item("raw_hit_count", scan.raw_hit_count)?;
     result.set_item("budget_exhausted", scan.budget_exhausted)?;
     let hit_rows = PyList::empty(py);
@@ -168,13 +182,51 @@ fn embedded_packed_matcher() -> Option<&'static packed::Searcher> {
         .as_ref()
 }
 
+#[cfg(test)]
 fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScanResult> {
+    scan_embedded_archives_native_with_iocp(
+        reader,
+        DEFAULT_IOCP_CHUNK_SIZE,
+        DEFAULT_IOCP_BUFFERS,
+        DEFAULT_IOCP_WORKERS,
+    )
+}
+
+fn scan_embedded_archives_native_with_iocp(
+    reader: ManagedReader,
+    iocp_chunk_bytes: usize,
+    iocp_buffers: usize,
+    iocp_workers: usize,
+) -> io::Result<NativeScanResult> {
     let file_size = reader.len();
-    let mut raw_hits = if let Some(mapped) = reader.map_read_only()? {
-        scan_raw_hits_mapped(&mapped)
-    } else {
-        let mut scan_file = reader.stream_cursor();
-        scan_raw_hits(&mut scan_file)?
+    let (mut raw_hits, scan_read_bytes, scan_read_operations) = {
+        #[cfg(windows)]
+        {
+            let path = reader.iocp_path().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "IOCP embedded scanning requires a single regular file",
+                )
+            })?;
+            let output = iocp::scan_file(
+                path,
+                file_size,
+                iocp_chunk_bytes,
+                iocp_buffers,
+                iocp_workers,
+                embedded_overlap(),
+                scan_sample,
+            )?;
+            (output.results, output.read_bytes, output.read_operations)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (reader, file_size, iocp_chunk_bytes, iocp_buffers, iocp_workers);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "IOCP embedded scanning requires Windows",
+            ));
+        }
     };
     raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
     let raw_hit_count = raw_hits.len();
@@ -186,6 +238,8 @@ fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScan
             logical_resolution_complete: false,
             raw_hit_count,
             budget_exhausted: true,
+            scan_read_bytes,
+            scan_read_operations,
         });
     }
 
@@ -205,12 +259,23 @@ fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScan
 
     Ok(NativeScanResult {
         file_size,
+        scan_read_bytes,
+        scan_read_operations,
         raw_hits,
         candidates,
         logical_resolution_complete,
         raw_hit_count,
         budget_exhausted: false,
     })
+}
+
+fn embedded_overlap() -> usize {
+    PATTERNS
+        .iter()
+        .map(|(magic, _, _)| magic.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1)
 }
 
 fn validate_raw_hits(
@@ -416,212 +481,6 @@ fn candidates_contained_anchor_count(
                 && item.offset < end
         })
         .count()
-}
-
-fn scan_raw_hits_mapped(data: &[u8]) -> Vec<RawHit> {
-    if data.is_empty() {
-        return Vec::new();
-    }
-    let overlap = PATTERNS
-        .iter()
-        .map(|(magic, _, _)| magic.len())
-        .max()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let chunk_count = data.len().div_ceil(EMBEDDED_CHUNK_SIZE);
-    let worker_count = rayon::current_num_threads()
-        .clamp(1, MAX_SCAN_WORKERS)
-        .min(chunk_count);
-    if worker_count == 1 {
-        return scan_mapped_worker(data, overlap, 0, 1, chunk_count);
-    }
-
-    std::thread::scope(|scope| {
-        let workers = (0..worker_count)
-            .map(|worker| {
-                scope.spawn(move || {
-                    scan_mapped_worker(data, overlap, worker, worker_count, chunk_count)
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut hits = Vec::new();
-        for worker in workers {
-            hits.extend(worker.join().expect("embedded mmap worker did not panic"));
-        }
-        hits
-    })
-}
-
-fn scan_mapped_worker(
-    data: &[u8],
-    overlap: usize,
-    first_chunk: usize,
-    stride: usize,
-    chunk_count: usize,
-) -> Vec<RawHit> {
-    let mut hits = Vec::new();
-    for chunk in (first_chunk..chunk_count).step_by(stride) {
-        let start = chunk * EMBEDDED_CHUNK_SIZE;
-        let end = (start + EMBEDDED_CHUNK_SIZE).min(data.len());
-        let sample_start = start.saturating_sub(overlap);
-        hits.extend(scan_sample(
-            &data[sample_start..end],
-            start - sample_start,
-            sample_start as u64,
-        ));
-    }
-    hits
-}
-
-fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
-    let overlap = PATTERNS
-        .iter()
-        .map(|(magic, _, _)| magic.len())
-        .max()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let worker_count = rayon::current_num_threads().clamp(1, MAX_SCAN_WORKERS);
-    if worker_count == 1 {
-        return scan_raw_hits_sequential(file, overlap);
-    }
-    let buffer_count = (worker_count * 2).clamp(2, 64);
-    let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(buffer_count);
-    let (job_tx, job_rx) = mpsc::sync_channel::<ScanChunk>(buffer_count);
-    let (hits_tx, hits_rx) = mpsc::channel::<Vec<RawHit>>();
-    let job_rx = Arc::new(Mutex::new(job_rx));
-
-    for _ in 0..buffer_count {
-        free_tx
-            .send(vec![0u8; EMBEDDED_CHUNK_SIZE + overlap])
-            .expect("embedded scan buffer receiver is alive");
-    }
-
-    let read_error = rayon::scope(move |scope| {
-        let mut carry = vec![0u8; overlap];
-        let mut carry_len = 0usize;
-        let mut current_offset = 0u64;
-        let mut read_error = None;
-        for _ in 0..worker_count {
-            let job_rx = Arc::clone(&job_rx);
-            let free_tx = free_tx.clone();
-            let hits_tx = hits_tx.clone();
-            scope.spawn(move |_| loop {
-                let job = {
-                    let receiver = job_rx
-                        .lock()
-                        .expect("embedded scan job receiver lock is not poisoned");
-                    receiver.recv()
-                };
-                let Ok(mut job) = job else {
-                    break;
-                };
-                let hits = scan_chunk(&job);
-                let _ = hits_tx.send(hits);
-                job.buffer.clear();
-                // The producer drops free_rx as soon as it reaches EOF. A
-                // failed buffer recycle must not stop this worker: jobs that
-                // were already queued still need to be scanned exactly once.
-                let _ = free_tx.send(job.buffer);
-            });
-        }
-
-        loop {
-            let Ok(mut buffer) = free_rx.recv() else {
-                break;
-            };
-            buffer.resize(EMBEDDED_CHUNK_SIZE + overlap, 0);
-            if carry_len > 0 {
-                buffer[..carry_len].copy_from_slice(&carry[..carry_len]);
-            }
-
-            let mut bytes_read = 0usize;
-            while bytes_read < EMBEDDED_CHUNK_SIZE {
-                match file
-                    .read(&mut buffer[carry_len + bytes_read..carry_len + EMBEDDED_CHUNK_SIZE])
-                {
-                    Ok(0) => break,
-                    Ok(count) => bytes_read += count,
-                    Err(error) => {
-                        read_error = Some(error);
-                        break;
-                    }
-                }
-            }
-            if read_error.is_some() || bytes_read == 0 {
-                break;
-            }
-
-            let sample_len = carry_len + bytes_read;
-            let next_carry_len = overlap.min(sample_len);
-            carry[..next_carry_len]
-                .copy_from_slice(&buffer[sample_len - next_carry_len..sample_len]);
-            let job = ScanChunk {
-                buffer,
-                sample_len,
-                carry_len,
-                base_offset: current_offset.saturating_sub(carry_len as u64),
-            };
-            if job_tx.send(job).is_err() {
-                break;
-            }
-            carry_len = next_carry_len;
-            current_offset += bytes_read as u64;
-        }
-        drop(job_tx);
-        read_error
-    });
-
-    if let Some(error) = read_error {
-        return Err(error);
-    }
-    let mut raw_hits = Vec::new();
-    for mut hits in hits_rx {
-        raw_hits.append(&mut hits);
-    }
-    Ok(raw_hits)
-}
-
-fn scan_raw_hits_sequential(file: &mut SourceCursor, overlap: usize) -> io::Result<Vec<RawHit>> {
-    let mut buffer = vec![0u8; EMBEDDED_CHUNK_SIZE + overlap];
-    let mut carry = vec![0u8; overlap];
-    let mut carry_len = 0usize;
-    let mut current_offset = 0u64;
-    let mut raw_hits = Vec::new();
-
-    loop {
-        if carry_len > 0 {
-            buffer[..carry_len].copy_from_slice(&carry[..carry_len]);
-        }
-        let mut bytes_read = 0usize;
-        while bytes_read < EMBEDDED_CHUNK_SIZE {
-            let target = &mut buffer[carry_len + bytes_read..carry_len + EMBEDDED_CHUNK_SIZE];
-            match file.read(target)? {
-                0 => break,
-                count => bytes_read += count,
-            }
-        }
-        if bytes_read == 0 {
-            break;
-        }
-
-        let sample_len = carry_len + bytes_read;
-        raw_hits.extend(scan_sample(
-            &buffer[..sample_len],
-            carry_len,
-            current_offset.saturating_sub(carry_len as u64),
-        ));
-
-        let next_carry_len = overlap.min(sample_len);
-        carry[..next_carry_len].copy_from_slice(&buffer[sample_len - next_carry_len..sample_len]);
-        carry_len = next_carry_len;
-        current_offset += bytes_read as u64;
-    }
-    Ok(raw_hits)
-}
-
-fn scan_chunk(job: &ScanChunk) -> Vec<RawHit> {
-    let sample = &job.buffer[..job.sample_len];
-    scan_sample(sample, job.carry_len, job.base_offset)
 }
 
 fn scan_sample(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<RawHit> {
@@ -2310,7 +2169,7 @@ mod tests {
         let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
         gzip.write_all(b"cross-boundary payload").unwrap();
         let gzip_bytes = gzip.finish().unwrap();
-        let gzip_offset = EMBEDDED_CHUNK_SIZE - 2;
+        let gzip_offset = TEST_IOCP_CHUNK_SIZE - 2;
         let mut data = vec![b'x'; gzip_offset];
         data.extend_from_slice(&gzip_bytes);
         let path = temp_file("embedded_cross_boundary", &data);
@@ -2338,50 +2197,29 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn parallel_chunks_match_one_contiguous_overlapping_scan_exactly() {
-        let mut data = vec![0x11; EMBEDDED_CHUNK_SIZE * (PATTERNS.len() + 2)];
-        for (index, (magic, _, _)) in PATTERNS.iter().enumerate() {
-            let boundary = EMBEDDED_CHUNK_SIZE * (index + 1);
-            let start = boundary - magic.len().saturating_sub(1);
-            data[start..start + magic.len()].copy_from_slice(magic);
-        }
-        // This short signature is wholly contained in the next chunk's carry
-        // and used to be observed twice before HashSet de-duplication.
-        let duplicate_prone = EMBEDDED_CHUNK_SIZE * (PATTERNS.len() + 1) - 6;
-        data[duplicate_prone..duplicate_prone + GZIP.len()].copy_from_slice(GZIP);
-
-        let expected = reference_raw_hits(&data);
-        let path = temp_file("embedded_parallel_equivalence", &data);
+    fn iocp_matches_reference_scan_across_chunk_boundaries() {
+        let mut data = vec![0x11; TEST_IOCP_CHUNK_SIZE * 3 + 123];
+        let first = TEST_IOCP_CHUNK_SIZE - 2;
+        data[first..first + GZIP.len()].copy_from_slice(GZIP);
+        let second = TEST_IOCP_CHUNK_SIZE * 2 + 7;
+        data[second..second + SEVEN_ZIP.len()].copy_from_slice(SEVEN_ZIP);
+        let path = temp_file("embedded_iocp", &data);
         let reader = ManagedReader::open(&path).unwrap();
-        let mut file = reader.stream_cursor();
-        let mut actual = scan_raw_hits(&mut file).unwrap();
-        actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
 
-        assert_eq!(actual, expected);
+        let mut expected = reference_raw_hits(&data);
+        expected.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        let iocp = scan_embedded_archives_native_with_iocp(
+            reader,
+            TEST_IOCP_CHUNK_SIZE,
+            4,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(iocp.raw_hits, expected);
         let _ = fs::remove_file(path);
     }
 
-    #[test]
-    fn one_thread_pool_uses_non_blocking_sequential_scan() {
-        let mut data = vec![0x11; EMBEDDED_CHUNK_SIZE * 3];
-        let start = EMBEDDED_CHUNK_SIZE - 2;
-        data[start..start + SEVEN_ZIP.len()].copy_from_slice(SEVEN_ZIP);
-        let expected = reference_raw_hits(&data);
-        let path = temp_file("embedded_single_thread", &data);
-        let actual = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap()
-            .install(|| {
-                let reader = ManagedReader::open(&path).unwrap();
-                let mut file = reader.stream_cursor();
-                let mut hits = scan_raw_hits(&mut file).unwrap();
-                hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
-                hits
-            });
-
-        assert_eq!(actual, expected);
-        let _ = fs::remove_file(path);
-    }
 }

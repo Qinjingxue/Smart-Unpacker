@@ -10,6 +10,7 @@ fn scan_archive_signatures(
             output.push(ArchiveCandidate {
                 format: TargetFormat::SevenZip,
                 offset: candidate.offset,
+                #[cfg(test)]
                 archive_end: candidate.archive_end,
                 start_crc_ok: candidate.start_crc_ok,
                 next_header_crc_ok: candidate.next_header_crc_ok,
@@ -80,21 +81,30 @@ fn rar4_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
     if (crc32(&header[2..]) & 0xffff) != stored_crc {
         return None;
     }
-    let mut archive_end = data.len();
     if flags & 0x8000 != 0 {
         if header_size < 11 {
             return None;
         }
         let add_size = u32_le(header, 7) as usize;
-        archive_end = first.checked_add(header_size)?.checked_add(add_size)?;
+        let archive_end = first.checked_add(header_size)?.checked_add(add_size)?;
         if archive_end > data.len() {
             return None;
         }
+        return Some(ArchiveCandidate {
+            format: TargetFormat::Rar,
+            offset,
+            #[cfg(test)]
+            archive_end,
+            start_crc_ok: true,
+            next_header_crc_ok: true,
+            warnings: Vec::new(),
+        });
     }
     Some(ArchiveCandidate {
         format: TargetFormat::Rar,
         offset,
-        archive_end,
+        #[cfg(test)]
+        archive_end: data.len(),
         start_crc_ok: true,
         next_header_crc_ok: true,
         warnings: Vec::new(),
@@ -125,6 +135,7 @@ fn zip_carrier_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate>
     Some(ArchiveCandidate {
         format: TargetFormat::Zip,
         offset,
+        #[cfg(test)]
         archive_end,
         start_crc_ok: true,
         next_header_crc_ok: true,
@@ -171,6 +182,7 @@ fn rar5_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
     Some(ArchiveCandidate {
         format: TargetFormat::Rar,
         offset,
+        #[cfg(test)]
         archive_end: data.len(),
         start_crc_ok: true,
         next_header_crc_ok: true,

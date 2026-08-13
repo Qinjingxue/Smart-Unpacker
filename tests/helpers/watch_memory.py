@@ -63,7 +63,7 @@ def create_small_zip(
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         info = zipfile.ZipInfo(member_name)
         info.compress_type = zipfile.ZIP_STORED
-        with archive.open(info, "w") as writer:
+        with archive.open(info, "w", force_zip64=payload_size > 0xFFFFFFFF) as writer:
             remaining = payload_size
             while remaining:
                 chunk_size = min(remaining, len(block))

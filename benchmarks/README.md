@@ -13,6 +13,8 @@ Run a scenario by group and name. Arguments after the scenario are passed to tha
 ```powershell
 python -m benchmarks reader password-fast-path --rounds 5
 python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 5
+python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cli `
+  --iocp-chunk-mib 2 --iocp-buffers 8 --iocp-workers 2
 python -m benchmarks scan hotspots . --mode full --json-out build/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out build/extraction-benchmark.json
 python -m benchmarks extraction split-pressure --profile acceptance --strict
@@ -54,9 +56,23 @@ runtime profiler and writes phase medians and per-format aggregates into the rep
 set `--phase-profile-warmups 1 --phase-profile-runs 3`.
 
 The reusable harness in `benchmarks/harness` defines the common wall/CPU clocks,
-process-tree memory sampling, real-archive workspace lifecycle, and versioned JSON report
-envelope. New scenarios must use those components instead of adding another local timer,
-RSS sampler, or temporary-directory policy.
+RSS/Private Bytes process-tree memory sampling, real-archive workspace lifecycle, and
+versioned JSON report envelope. New scenarios must use those components instead of
+adding another local timer, memory sampler, or temporary-directory policy.
+
+`reader embedded-scan --generate-gib 10 --rounds 1 --skip-cli` creates a streamed
+ZIP64 fixture under the benchmark workspace, measures native embedded-scan wall/CPU
+time and process memory peaks, and writes the report to the durable benchmark-results
+directory. The generated archive is removed automatically unless `--keep-workdir` is
+supplied. The 10 GiB member is stored (not highly compressed), so generation is not
+part of the measured scan operation and the run exercises a large-file scan directly.
+The embedded scanner uses the bounded `ReadFile(OVERLAPPED)`/IOCP pipeline by
+default. IOCP uses a separate scan-local handle and reports `scan_read_bytes` and
+`scan_read_operations`; tune it
+with `--iocp-chunk-mib`, `--iocp-buffers`, and `--iocp-workers` without changing
+the normal reader cache or `read_at()` behavior. `iocp-buffers` controls the
+bounded in-flight read depth; `iocp-workers` controls parallel signature
+scanning independently.
 
 The following obsolete probes were intentionally removed during consolidation:
 

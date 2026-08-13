@@ -26,8 +26,11 @@ def scan_embedded_archives(
         with lock:
             payload = GLOBAL_CACHE.get(_CACHE_NAMESPACE, cache_key)
             if payload is None:
+                session = get_archive_session(path)
+                native_result = session.scan_embedded_archives()
                 payload = _normalize_native_result(
-                    get_archive_session(path).scan_embedded_archives(), expected_size
+                    native_result,
+                    expected_size,
                 ).to_dict()
                 GLOBAL_CACHE.set(_CACHE_NAMESPACE, cache_key, payload)
     return embedded_result_from_dict(payload)

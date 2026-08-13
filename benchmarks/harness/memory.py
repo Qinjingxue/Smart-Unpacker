@@ -18,6 +18,9 @@ class ProcessSample:
     rss_mib: float
     children_rss_mib: float
     child_count: int
+    private_mib: float = 0.0
+    threads: int = 0
+    handles: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -44,11 +47,29 @@ class ProcessSampler:
                 children_rss += child.memory_info().rss
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
+        try:
+            info = self._process.memory_info()
+            rss = info.rss
+            private = int(getattr(info, "private", 0) or 0)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            rss = 0
+            private = 0
+        try:
+            threads = self._process.num_threads()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            threads = 0
+        try:
+            handles = self._process.num_handles()
+        except (AttributeError, psutil.NoSuchProcess, psutil.AccessDenied):
+            handles = 0
         sample = ProcessSample(
             elapsed_ms=(time.perf_counter() - self._started) * 1000 if self._started else 0.0,
-            rss_mib=bytes_to_mib(self._process.memory_info().rss),
+            rss_mib=bytes_to_mib(rss),
             children_rss_mib=bytes_to_mib(children_rss),
             child_count=len(children),
+            private_mib=bytes_to_mib(private),
+            threads=int(threads),
+            handles=int(handles),
         )
         self.samples.append(sample)
         return sample
