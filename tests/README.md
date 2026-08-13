@@ -4,8 +4,6 @@
 
 ## 目录说明
 
-- `cases/`：数据驱动 JSON 用例。普通 CLI、检测、后处理和归档扫描场景优先放这里。
-- `runners/`：`cases/` 的通用 pytest runner。一般不需要频繁修改。
 - `helpers/`：共享构造器、断言、测试配置、归档 fixture 和 CLI 辅助工具。
 - `unit/`：聚焦公开模块或契约的测试，不覆盖黑箱模块内部算法。
 - `functional/`：跨模块行为测试，尽量避免真实外部解压。
@@ -15,19 +13,6 @@
 
 性能测量、profile 和压力脚本统一放在仓库根目录的 `benchmarks/`，不参与
 pytest 收集。pytest 中只保留行为断言；资源或时序稳定性断言使用 opt-in marker。
-
-## 数据驱动用例
-
-如果一个场景能用 arrange/act/assert 数据描述，优先新增 JSON case，而不是新增 Python 测试文件。
-
-当前用例类型：
-
-- `cases/cli/*.json`：通过 `tests.helpers.cli_runner` 运行 `sunpack.py`，检查 JSON 或文本命令契约。
-- `cases/detection/*.json`：构造文件和 facts，评估单个 detection 目标，检查 decision 和 fact 输出。
-- `cases/postprocess/*.json`：在临时工作区测试 cleanup、flatten 和 failed-log 动作。
-- `cases/archive_scan/*/case.json`：复制 `files/` 目录，用 `DetectionScheduler` 扫描，并检查每个文件是否应判定为归档。完整 manifest 格式见 `tests/cases/archive_scan/README.md`。
-
-共享断言路径使用点号写法，并支持包含点号的字典 key，例如 `facts.file.detected_ext`。
 
 ## 运行测试
 
@@ -44,12 +29,6 @@ python -m pytest
 python -m benchmarks --list
 ```
 
-只运行数据驱动用例：
-
-```powershell
-pytest tests/runners -q
-```
-
 运行项目验收脚本：
 
 ```powershell
@@ -62,7 +41,7 @@ pytest tests/runners -q
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、数据驱动 case runner 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
+`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、真实归档 acceptance 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、混合分卷 acceptance 和 CLI smoke checks。
 
 ## 慢速真实归档测试
 
@@ -76,17 +55,15 @@ pytest tests/integration/test_real_archive_edge_cases.py --run-slow-real-archive
 
 测试默认不直接导入 `*/internal/*`、`detection.pipeline.*`，也不调用下划线私有方法或 monkeypatch 私有实现。黑箱模块只通过公开入口测试行为，例如 `DetectionScheduler`、`ExtractionScheduler`、`PostProcessActions`、`DirectoryScanner`、`RelationsScheduler`、`RenameScheduler`、CLI 和 coordinator 编排入口。
 
-确实需要覆盖新规则或检测场景时，优先使用 `cases/detection/`、`cases/archive_scan/` 或 functional 测试，并从 `DetectionScheduler` 进入，而不是直接测试 rule、processor、collector 的内部方法。
+确实需要覆盖新规则或检测场景时，优先使用 functional 或 integration 测试，并从 `DetectionScheduler` 等公开入口进入，而不是直接测试 rule、processor、collector 的内部方法。
 
 ## 新增测试建议
 
-场景能匹配现有 runner 时，新增 JSON case。只有需要新 runner、新 helper、新 fixture 或确实存在新的交互方式时，再新增 Python 测试。
-
 常用位置：
 
-- 新增 CLI 输出或命令形状：优先 `cases/cli/`；如果 parser 或命令公共契约需要直接覆盖，再加到 `cli/`。
-- 新增规则行为：优先用 `cases/detection/` 从公开调度入口评估；如果文件系统扫描和候选构建也重要，用 `cases/archive_scan/`。
-- 新增清理或扁平化行为：`cases/postprocess/`。
+- 新增 CLI 输出或命令形状：放到 `cli/`。
+- 新增规则行为：放到 `functional/`；如果文件系统扫描和候选构建也重要，放到 `integration/`。
+- 新增清理或扁平化行为：放到 `unit/` 或 `functional/`。
 - 新增共享测试配置：`tests/helpers/config_factory.py`。
 - 新增可复用文件系统构造：`tests/helpers/fs_builder.py` 或 `tests/helpers/generated_fixtures.py`。
 

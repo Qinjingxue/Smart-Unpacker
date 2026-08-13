@@ -52,11 +52,6 @@ def repo_root() -> Path:
 
 
 @pytest.fixture
-def case_workspace(tmp_path: Path) -> Path:
-    return tmp_path / "workspace"
-
-
-@pytest.fixture
 def pipeline_resource_scheduler():
     scheduler = ConcurrencyScheduler({}, current_limit=8, max_workers=8)
     scheduler.start()

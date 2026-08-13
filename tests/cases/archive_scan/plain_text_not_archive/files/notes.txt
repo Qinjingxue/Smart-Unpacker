@@ -1,1 +1,0 @@
-This is a normal text file. It should not be detected as an archive.

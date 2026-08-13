@@ -63,7 +63,6 @@ test_targz/
 AGENTS.md
 native/sunpack_native/target/
 native/sevenzip_bridge/build-*/
-tests/cases/archive_scan/r3961_jpg_carrier_encrypted_rar
 .sunpack/
 .sunpack_watch_validation/
 datasets/

@@ -4,22 +4,6 @@ from pathlib import Path
 from typing import Any
 
 
-def build_files(root: Path, arrange: dict[str, Any] | None) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    if not arrange:
-        return root
-
-    for directory in arrange.get("dirs", []):
-        (root / directory).mkdir(parents=True, exist_ok=True)
-
-    for file_spec in arrange.get("files", []):
-        path = root / file_spec["path"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = file_spec.get("content", "")
-        path.write_bytes(render_content(content))
-    return root
-
-
 def render_content(content: Any) -> bytes:
     if isinstance(content, str):
         return content.encode("utf-8")
