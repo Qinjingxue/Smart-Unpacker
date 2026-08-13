@@ -80,6 +80,35 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(result.fact_bag.get("file.embedded_archive_found"))
             self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
+    def test_embedded_scan_precedes_scoring_for_nonzero_offset_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carrier = Path(tmp) / "carrier.bin"
+            carrier.write_bytes(b"carrier-prefix" + zip_bytes())
+            config = with_detection_pipeline(
+                {
+                    "thresholds": {
+                        "archive_score_threshold": 5,
+                        "maybe_archive_threshold": 3,
+                    },
+                },
+                precheck=[{
+                    "name": "embedded_payload_identity",
+                    "enabled": True,
+                    "deep_scan_single_candidate_ratio": 1.0,
+                }],
+                scoring=[{"name": "zip_structure_identity", "enabled": True}],
+            )
+
+            results = ArchiveTaskProvider(config).detect_targets([str(carrier)])
+
+            self.assertEqual(len(results), 1)
+            result = results[0]
+            self.assertTrue(result.decision.should_extract)
+            self.assertEqual(result.decision.decision_stage, "precheck")
+            self.assertEqual(result.decision.deciding_rule, "embedded_payload_identity")
+            self.assertTrue(result.fact_bag.get("candidate.embedded_payload_precheck_enabled"))
+            self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
+
     def test_relations_volume_anchor_is_opaque_to_detection(self):
         bag = FactBag()
         bag.set("file.path", "payload.part5.zip.hidden-5")

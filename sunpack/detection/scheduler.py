@@ -75,6 +75,19 @@ class DetectionScheduler:
         finally:
             self._active_scan_session = None
 
+    def evaluate_precheck_pool(
+        self,
+        fact_bags: list[FactBag],
+        scan_session: Any = None,
+    ) -> tuple[dict[FactBag, RuleDecision], list[FactBag]]:
+        """Evaluate strict prechecks without allowing candidates into scoring."""
+        self._active_scan_session = scan_session
+        self.rule_manager.ensure_pool_facts = self._ensure_pool_facts
+        try:
+            return self.rule_manager.evaluate_precheck_pool(fact_bags)
+        finally:
+            self._active_scan_session = None
+
     def evaluate_bags(
         self,
         fact_bags: list[FactBag],

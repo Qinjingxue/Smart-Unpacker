@@ -28,7 +28,7 @@ def test_shared_embedded_scanner_is_single_flight_per_file_identity(monkeypatch)
                 "file_size": 1024,
             }
 
-    clear_cache_namespace("embedded_archive_scan_v1")
+    clear_cache_namespace("embedded_archive_scan_v3")
     monkeypatch.setattr("sunpack.analysis.embedded.scanner.get_archive_session", lambda path: Session())
     identity = ("same-file", 1024, 1)
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -39,3 +39,34 @@ def test_shared_embedded_scanner_is_single_flight_per_file_identity(monkeypatch)
 
     assert calls == 1
     assert all(result.candidates[0].offset == 128 for result in results)
+
+
+def test_embedded_scanner_preserves_native_budget_exhaustion(monkeypatch):
+    class Session:
+        def scan_embedded_archives(self):
+            return {
+                "complete": False,
+                "signature_scan_complete": False,
+                "logical_resolution_complete": False,
+                "budget_exhausted": True,
+                "raw_hit_count": 1_000_001,
+                "candidates": [],
+                "hits": [],
+                "read_bytes": 4096,
+                "file_size": 4096,
+            }
+
+    clear_cache_namespace("embedded_archive_scan_v3")
+    monkeypatch.setattr("sunpack.analysis.embedded.scanner.get_archive_session", lambda path: Session())
+
+    result = scan_embedded_archives(
+        "dense-signatures.bin",
+        expected_size=4096,
+        identity=("dense-signatures", 4096, 1),
+    )
+
+    assert result.complete is False
+    assert result.logical_resolution_complete is False
+    assert result.budget_exhausted is True
+    assert result.raw_hit_count == 1_000_001
+    assert result.candidates == ()

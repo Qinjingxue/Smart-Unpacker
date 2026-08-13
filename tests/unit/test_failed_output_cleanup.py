@@ -6,6 +6,7 @@ import pytest
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.verification import VerificationResult
@@ -78,6 +79,26 @@ def test_cleanup_preserves_failed_output_with_nonzero_payload(tmp_path):
     assert result.reason == "nonempty_payload"
     assert result.payload_bytes == 1
     assert output.is_dir()
+
+
+def test_complete_embedded_children_are_not_policy_rejected_with_failed_siblings():
+    child = ExtractionResult(True, "carrier.bin", "child", ["carrier.bin"])
+    failure = FailureInfo(
+        kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
+        stage="embedded_segments",
+        message="one encrypted child failed",
+    )
+    outer = ExtractionResult(
+        success=False,
+        archive="carrier.bin",
+        out_dir="output",
+        all_parts=["carrier.bin"],
+        failure=failure,
+        partial_outputs=True,
+        embedded_results=[({"segment_id": "plain"}, child)],
+    )
+
+    assert BatchExtractionOutcome(result=outer).policy_rejected_partial_output is False
 
 
 def test_collect_result_applies_main_pipeline_cleanup_after_diagnostics(tmp_path):

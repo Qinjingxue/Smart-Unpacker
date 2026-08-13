@@ -79,6 +79,28 @@ class PasswordResolver:
             # password instead of performing a complete preflight test pass.
             return self._confirmation_resolution(archive_key, "", fingerprint.key, fact_bag)
 
+        archive_input = self._archive_input_for_password_probe(fact_bag) or {}
+        embedded_unknown = (
+            not self._facts_require_password(fact_bag)
+            and str(archive_input.get("open_mode") or archive_input.get("kind") or "")
+            in {"file_range", "concat_ranges"}
+        )
+        if embedded_unknown:
+            # A carrier-level encryption result cannot classify each logical
+            # archive.  Let the real bounded extraction prove the empty
+            # password first, then retry the supplied candidates only when the
+            # segment actually needs one.  This avoids a duplicate preflight
+            # read and keeps plain segments independent from encrypted peers.
+            extraction_candidates = tuple(dict.fromkeys(["", *candidates]))
+            return self._confirmation_resolution(
+                archive_key,
+                extraction_candidates[0],
+                fingerprint.key,
+                fact_bag,
+                candidate_evidence="embedded_unknown_encryption",
+                candidate_passwords=extraction_candidates,
+            )
+
         search = self._plan_password_search(
             archive_path,
             fact_bag=fact_bag,

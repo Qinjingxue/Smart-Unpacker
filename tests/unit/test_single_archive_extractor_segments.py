@@ -5,6 +5,8 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 from sunpack.verification.scheduler import VerificationScheduler
 from sunpack.contracts.verification import (
@@ -23,6 +25,28 @@ class _FakePasswordStore:
 
 class _FakePasswordResolver:
     password_tester = SimpleNamespace(passwords=[])
+
+
+class _CandidatePasswordStore:
+    def has_candidates(self, **_kwargs):
+        return True
+
+
+class _RecordingPasswordResolver:
+    password_tester = SimpleNamespace(passwords=[])
+
+    def __init__(self):
+        self.calls = []
+
+    def resolve(self, _archive_path, fact_bag, *, archive_key, **_kwargs):
+        knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+        self.calls.append((archive_key, dict(knowledge.get("source.password_probe_input") or {})))
+        return PasswordResolution(
+            password="",
+            status=PasswordResolutionStatus.UNENCRYPTED,
+            archive_key=archive_key,
+            encrypted=False,
+        )
 
 
 class _FakeRenameScheduler:
@@ -165,6 +189,47 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
     assert (tmp_path / "out" / "embedded_02_rar" / "rar.txt").exists()
     assert len(result.diagnostics["embedded_segments"]) == 2
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
+
+
+def test_embedded_password_probe_and_session_key_follow_active_segment(tmp_path):
+    carrier = tmp_path / "carrier.bin"
+    carrier.write_bytes(b"prefix-first-gap-second-tail")
+    task = _task(carrier)
+    segments = []
+    for index, (name, start, end) in enumerate((("first", 7, 12), ("second", 17, 23)), start=1):
+        segments.append({
+            "segment_id": f"embedded_{index:02d}_zip",
+            "format": "zip",
+            "logical_name": name,
+            "archive_input": {
+                "kind": "archive_input",
+                "entry_path": str(carrier),
+                "open_mode": "file_range",
+                "format_hint": "zip",
+                "logical_name": name,
+                "parts": [{"path": str(carrier), "role": "main", "start": start, "end": end}],
+            },
+        })
+    write_source_extractable_segments(task, segments)
+    resolver = _RecordingPasswordResolver()
+    extractor = SingleArchiveExtractor(
+        seven_z_path="7z",
+        password_store=_CandidatePasswordStore(),
+        password_resolver=resolver,
+        metadata_scanner=ArchiveMetadataScanner(),
+        rename_scheduler=_FakeRenameScheduler(),
+        ensure_space=lambda _gb: True,
+        retry_policy=_FakeRetryPolicy(),
+        split_entry_resolver=_FakeSplitEntryResolver(),
+        sevenzip_runner=_FakeSevenZipRunner(),
+        best_effort=True,
+    )
+
+    result = extractor.extract(task, str(tmp_path / "out"))
+
+    assert result.success is True
+    assert [key for key, _ in resolver.calls] == [f"{task.key}#first", f"{task.key}#second"]
+    assert [call[1]["parts"][0]["start"] for call in resolver.calls] == [7, 17]
 
 
 def test_verifier_accepts_carrier_when_every_embedded_payload_is_complete(tmp_path):

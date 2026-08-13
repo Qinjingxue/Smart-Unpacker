@@ -13,10 +13,43 @@ class RarAnalysisModule:
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
         hits = [hit for hit in prepass.get("hits", []) if str(hit.get("name", "")).startswith("rar")]
-        if not hits:
+        embedded = [
+            item for item in prepass.get("embedded_candidates", [])
+            if item.get("format") == "rar"
+            and item.get("candidate_kind", "logical_archive") == "logical_archive"
+        ]
+        if not hits and not embedded:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
         candidates = []
-        for start in sorted({int(hit["offset"]) for hit in hits}):
+        exact_starts = set()
+        for item in embedded:
+            start = int(item.get("offset") or 0)
+            end = item.get("end_offset")
+            if end is None or item.get("boundary_kind", "exact") != "exact":
+                continue
+            exact_starts.add(start)
+            confidence = float(item.get("confidence") or 0.0)
+            candidates.append(ArchiveFormatEvidence(
+                format="rar",
+                confidence=confidence,
+                status="extractable",
+                segments=[ArchiveSegment(
+                    start_offset=start,
+                    end_offset=int(end),
+                    confidence=confidence,
+                    evidence=[f"rar:{item.get('validation') or 'complete_block_walk'}"],
+                )],
+                details={
+                    "source": "embedded_scan",
+                    "candidate": item,
+                    "boundary_kind": "exact",
+                    "boundary_confidence": "high",
+                },
+            ))
+        starts = {
+            int(item.get("offset") or 0) for item in embedded
+        } or {int(hit["offset"]) for hit in hits}
+        for start in sorted(starts - exact_starts):
             observation = probe_rar_view(
                 view,
                 RarProbeOptions(

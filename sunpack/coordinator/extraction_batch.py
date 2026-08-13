@@ -104,6 +104,18 @@ class BatchExtractionOutcome:
 
     @property
     def policy_rejected_partial_output(self) -> bool:
+        # Embedded payloads are independent logical archives.  A failed
+        # encrypted sibling does not make already verified/plain child outputs
+        # disposable partial files.
+        if (
+            self.result.failure is not None
+            and self.result.failure.contains(FailureKind.EMBEDDED_SEGMENTS_FAILED)
+            and any(
+                bool(child.success)
+                for _segment, child in (self.result.embedded_results or [])
+            )
+        ):
+            return False
         if self.content_requirement != CONTENT_REQUIREMENT_COMPLETE:
             return False
         verification = self.verification

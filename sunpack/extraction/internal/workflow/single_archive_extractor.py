@@ -17,6 +17,7 @@ from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.passwords.internal.local_files import directory_password_context_from_task
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.archive_input_projection import write_source_password_probe_input
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
 from sunpack.i18n import I18nContext
 from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent
@@ -440,13 +441,14 @@ class SingleArchiveExtractor:
         )
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
+        archive_key = self._password_archive_key(task)
         directory_passwords = directory_password_context_from_task(task)
         known_password = knowledge_view.archive_password(task)
         if known_password is not None:
             return PasswordResolution(
                 password=str(known_password),
                 status=PasswordResolutionStatus.RESOLVED,
-                archive_key=task.key,
+                archive_key=archive_key,
             )
         archive_state = task.archive_state() if hasattr(task, "archive_state") else None
         if archive_state is not None and archive_state.patches:
@@ -454,13 +456,13 @@ class SingleArchiveExtractor:
                 return PasswordResolution(
                     password="",
                     status=PasswordResolutionStatus.UNENCRYPTED,
-                    archive_key=task.key,
+                    archive_key=archive_key,
                     encrypted=False,
                 )
             return PasswordResolution(
                 password=None,
                 status=PasswordResolutionStatus.PASSWORD_REQUIRED,
-                archive_key=task.key,
+                archive_key=archive_key,
                 encrypted=True,
                 error_text="password verification is unsupported for patched archive state without a resolved password",
             )
@@ -468,14 +470,14 @@ class SingleArchiveExtractor:
             return PasswordResolution(
                 password="",
                 status=PasswordResolutionStatus.UNENCRYPTED,
-                archive_key=task.key,
+                archive_key=archive_key,
                 encrypted=False,
             )
         return self.password_resolver.resolve(
             archive_path,
             task.fact_bag,
             part_paths=part_paths,
-            archive_key=task.key,
+            archive_key=archive_key,
             directory_passwords=directory_passwords,
         )
 
@@ -504,6 +506,28 @@ class SingleArchiveExtractor:
             event=event,
             planned_output_dir=out_dir,
         )
+
+    @staticmethod
+    def _password_archive_key(task: ArchiveTask) -> str:
+        """Keep password resolution state local to the active logical input.
+
+        Ordinary tasks retain their historical key.  Carved/concatenated
+        inputs include the planner-assigned logical name, which is stable and
+        unique per embedded segment.
+        """
+        try:
+            descriptor = task.archive_input()
+        except Exception:
+            return task.key
+        if descriptor.open_mode not in {"file_range", "concat_ranges"}:
+            return task.key
+        logical_name = str(descriptor.logical_name or "").strip()
+        if logical_name:
+            return f"{task.key}#{logical_name}"
+        segment = descriptor.segment
+        if segment is not None:
+            return f"{task.key}#range:{int(segment.start)}:{segment.end}"
+        return f"{task.key}#{descriptor.open_mode}:{descriptor.entry_path}"
 
     def _failed(
         self,
@@ -765,7 +789,7 @@ class SingleArchiveExtractor:
             saved_archive_facts = {
                 key: value
                 for key, value in task.fact_bag.to_dict().items()
-                if key.startswith("archive.")
+                if key.startswith("archive.") or key == "resource.health"
             }
         segment_results: list[dict[str, Any]] = []
         embedded_results: list[tuple[dict[str, Any], ExtractionResult]] = []
@@ -797,7 +821,17 @@ class SingleArchiveExtractor:
                 )
             try:
                 with _phase(phase_timer, f"{phase_prefix}_segment_set_archive_state"):
+                    # Carrier-level archive knowledge (notably encryption and
+                    # a resolved password) is not valid for each independent
+                    # logical archive.  Start the segment with a fresh archive
+                    # namespace; non-archive task facts such as directory
+                    # password context remain available.
+                    self._restore_archive_facts(task, {})
                     task.set_archive_state(ArchiveState.from_archive_input(descriptor))
+                    # The planner stores a task-level probe for compatibility,
+                    # but extraction must always bind password verification to
+                    # the currently active logical segment.
+                    write_source_password_probe_input(task, descriptor.to_dict())
                 result = self.extract(
                     task,
                     segment_dir,
@@ -879,6 +913,23 @@ class SingleArchiveExtractor:
             },
             "embedded_segments": segment_results,
         }
+        aggregate_failure = None
+        if segment_failures:
+            password_failure = any(failure.is_password_failure for failure in segment_failures)
+            message_key = "failure.embedded_wrong_password" if password_failure else "failure.embedded_extract_failed"
+            aggregate_failure = FailureInfo(
+                kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
+                stage="embedded_segments",
+                message=self.i18n.t(message_key),
+                message_key=message_key,
+                user_action="request_password" if password_failure else "",
+                repairable=all(failure.repairable for failure in segment_failures),
+                causes=tuple(segment_failures),
+                details={
+                    "segment_count": len(segment_results),
+                    "failed_segment_count": len(segment_failures),
+                },
+            )
         if any_success:
             manifest_path = ""
             manifest_payload = None
@@ -893,16 +944,25 @@ class SingleArchiveExtractor:
                     )
                 if manifest_path:
                     diagnostics["progress_manifest"] = manifest_path
-            self._log(self.i18n.t("extract.log.embedded_success", archive=archive))
+            self._log(self.i18n.t(
+                "extract.log.embedded_success" if all_success else "extract.log.embedded_failed",
+                archive=archive,
+            ))
             return ExtractionResult(
-                success=True,
+                success=all_success,
                 archive=archive,
                 out_dir=out_dir,
                 all_parts=all_parts,
+                error=aggregate_failure.message if aggregate_failure is not None else "",
+                failure=aggregate_failure,
                 password_used=password_used,
                 selected_codepage=selected_codepage,
                 diagnostics=diagnostics,
-                partial_outputs=not all_success,
+                # Each successful child is a complete independent archive;
+                # failed sibling segments are represented by `failure`, not as
+                # corrupt partial files.  This keeps terminal-failure cleanup
+                # from deleting the complete child outputs.
+                partial_outputs=False,
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
                 output_inventory=output_inventory,
@@ -911,18 +971,15 @@ class SingleArchiveExtractor:
                 embedded_results=embedded_results,
             )
         self._log(self.i18n.t("extract.log.embedded_failed", archive=archive))
-        password_failure = any(failure.is_password_failure for failure in segment_failures)
-        message_key = "failure.embedded_wrong_password" if password_failure else "failure.embedded_extract_failed"
-        aggregate_failure = FailureInfo(
-            kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
-            stage="embedded_segments",
-            message=self.i18n.t(message_key),
-            message_key=message_key,
-            user_action="request_password" if password_failure else "",
-            repairable=bool(segment_failures) and all(failure.repairable for failure in segment_failures),
-            causes=tuple(segment_failures),
-            details={"segment_count": len(segment_results)},
-        )
+        if aggregate_failure is None:
+            aggregate_failure = FailureInfo(
+                kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
+                stage="embedded_segments",
+                message=self.i18n.t("failure.embedded_extract_failed"),
+                message_key="failure.embedded_extract_failed",
+                repairable=False,
+                details={"segment_count": len(segment_results)},
+            )
         failed_result = self._failed(
             archive,
             out_dir,
@@ -949,7 +1006,10 @@ class SingleArchiveExtractor:
 
     @staticmethod
     def _restore_archive_facts(task: ArchiveTask, saved: dict[str, Any]) -> None:
-        current_keys = [key for key in task.fact_bag.to_dict() if key.startswith("archive.")]
+        current_keys = [
+            key for key in task.fact_bag.to_dict()
+            if key.startswith("archive.") or key == "resource.health"
+        ]
         for key in current_keys:
             task.fact_bag.unset(key)
         for key, value in saved.items():

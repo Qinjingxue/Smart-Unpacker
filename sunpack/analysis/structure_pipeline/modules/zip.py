@@ -19,7 +19,8 @@ class ZipAnalysisModule:
         if not hits and not embedded:
             return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
 
-        evidences = [self._from_embedded_candidate(view, item, embedded) for item in embedded]
+        logical = [item for item in embedded if item.get("candidate_kind", "logical_archive") == "logical_archive"]
+        evidences = [self._from_embedded_candidate(view, item, logical) for item in logical]
         if evidences:
             return combine_format_candidates("zip", evidences, preserve_multiple=True)
         max_entries = int(config.get("max_cd_entries_to_walk", 64) or 64)
@@ -57,31 +58,32 @@ class ZipAnalysisModule:
 
     def _from_embedded_candidate(self, view, item: dict, candidates: list[dict]) -> ArchiveFormatEvidence:
         start = int(item.get("offset") or 0)
+        del candidates
         explicit_end = item.get("end_offset")
-        later_starts = (
-            int(candidate.get("offset") or 0)
-            for candidate in candidates
-            if int(candidate.get("offset") or 0) > start
+        range_end = item.get("range_end_offset")
+        end = int(explicit_end) if explicit_end is not None else (
+            int(range_end) if range_end is not None else None
         )
-        next_start = min(later_starts, default=int(view.size))
-        end = int(explicit_end) if explicit_end is not None else next_start
         confidence = float(item.get("confidence") or 0.0)
         validation = str(item.get("validation") or "validated_structure")
-        status = "extractable" if confidence >= 0.85 and end > start else "damaged"
+        boundary_kind = str(item.get("boundary_kind") or ("exact" if explicit_end is not None else "unresolved"))
+        extractable = bool(item.get("extractable", explicit_end is not None)) and end is not None and end > start
+        status = "extractable" if confidence >= 0.85 and extractable else "damaged"
         return ArchiveFormatEvidence(
             format="zip",
             confidence=confidence,
             status=status,
             segments=[ArchiveSegment(
                 start_offset=start,
-                end_offset=end if end > start else None,
+                end_offset=end if end is not None and end > start else None,
                 confidence=confidence,
                 evidence=[f"zip:{validation}", "embedded_scan:validated_candidate"],
             )],
             details={
                 "source": "embedded_scan",
                 "validation": validation,
-                "boundary_confidence": "high" if explicit_end is not None else "inferred_to_next_candidate_or_eof",
+                "boundary_kind": boundary_kind,
+                "boundary_confidence": "high" if boundary_kind == "exact" else "bounded_or_unresolved",
             },
         )
 

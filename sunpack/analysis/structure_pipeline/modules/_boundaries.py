@@ -1,4 +1,4 @@
-ARCHIVE_SIGNATURE_HIT_NAMES = {"zip_local", "rar4", "rar5", "7z"}
+ARCHIVE_SIGNATURE_HIT_NAMES = {"rar4", "rar5", "7z", "gzip", "bzip2", "xz", "zstd", "tar_ustar"}
 
 
 def next_archive_boundary(prepass: dict, start_offset: int, file_size: int) -> int:
@@ -8,6 +8,14 @@ def next_archive_boundary(prepass: dict, start_offset: int, file_size: int) -> i
     are usually internal to a ZIP segment, not the beginning of the next archive.
     """
     start = int(start_offset)
+    offsets = [
+        int(item.get("offset") or 0)
+        for item in prepass.get("embedded_candidates", [])
+        if item.get("candidate_kind", "logical_archive") == "logical_archive"
+        and int(item.get("offset") or 0) > start
+    ]
+    if offsets:
+        return min(offsets)
     offsets = []
     for hit in prepass.get("hits", []):
         if hit.get("name") not in ARCHIVE_SIGNATURE_HIT_NAMES:

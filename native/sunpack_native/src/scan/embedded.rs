@@ -1,12 +1,14 @@
 use crate::io::reader::{ManagedReader, SourceCursor};
 use crate::io::util::STREAM_CHUNK_SIZE;
 use aho_corasick::{packed, AhoCorasick};
+use bzip2::{Decompress as Bzip2Decompress, Status as Bzip2Status};
 use crc32fast::{hash as crc32, Hasher};
 use flate2::read::DeflateDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::io::{self, Read};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use xz2::stream::{Action as XzAction, Status as XzStatus, Stream as XzStream};
 
 use rayon::prelude::*;
 
@@ -46,6 +48,8 @@ static EMBEDDED_PACKED_MATCHER: OnceLock<Option<packed::Searcher>> = OnceLock::n
 // validation and unrelated Rayon users retain the full global pool.
 const MAX_SCAN_WORKERS: usize = 8;
 const EMBEDDED_CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+const MAX_ARCHIVE_METADATA_RECORDS: usize = 1_000_000;
+const MAX_VALIDATION_RAW_HITS: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 struct EmbeddedCandidate {
@@ -55,6 +59,11 @@ struct EmbeddedCandidate {
     end_offset: Option<u64>,
     confidence: f64,
     validation: &'static str,
+    candidate_kind: &'static str,
+    boundary_kind: &'static str,
+    range_end_offset: Option<u64>,
+    extractable: bool,
+    contained_anchor_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +84,9 @@ struct NativeScanResult {
     file_size: u64,
     raw_hits: Vec<RawHit>,
     candidates: Vec<EmbeddedCandidate>,
+    logical_resolution_complete: bool,
+    raw_hit_count: usize,
+    budget_exhausted: bool,
 }
 
 /// Scan one physical byte stream once for every supported embedded format.
@@ -97,9 +109,16 @@ pub(crate) fn scan_embedded_archives_with_reader(
     let scan = py.detach(move || scan_embedded_archives_native(reader))?;
 
     let result = PyDict::new(py);
-    result.set_item("complete", true)?;
+    result.set_item("complete", !scan.budget_exhausted)?;
+    result.set_item("signature_scan_complete", !scan.budget_exhausted)?;
+    result.set_item(
+        "logical_resolution_complete",
+        scan.logical_resolution_complete,
+    )?;
     result.set_item("file_size", scan.file_size)?;
     result.set_item("read_bytes", scan.file_size)?;
+    result.set_item("raw_hit_count", scan.raw_hit_count)?;
+    result.set_item("budget_exhausted", scan.budget_exhausted)?;
     let hit_rows = PyList::empty(py);
     for hit in scan.raw_hits {
         let row = PyDict::new(py);
@@ -125,6 +144,11 @@ pub(crate) fn scan_embedded_archives_with_reader(
         row.set_item("end_offset", candidate.end_offset)?;
         row.set_item("confidence", candidate.confidence)?;
         row.set_item("validation", candidate.validation)?;
+        row.set_item("candidate_kind", candidate.candidate_kind)?;
+        row.set_item("boundary_kind", candidate.boundary_kind)?;
+        row.set_item("range_end_offset", candidate.range_end_offset)?;
+        row.set_item("extractable", candidate.extractable)?;
+        row.set_item("contained_anchor_count", candidate.contained_anchor_count)?;
         rows.append(row)?;
     }
     result.set_item("candidates", rows)?;
@@ -153,26 +177,226 @@ fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScan
         scan_raw_hits(&mut scan_file)?
     };
     raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
-
-    let validation_file = reader;
-    let validation_results: Vec<io::Result<Option<EmbeddedCandidate>>> = raw_hits
-        .par_iter()
-        .map(|hit| validate_candidate(&validation_file, file_size, hit.kind, hit.offset))
-        .collect();
-    let mut candidates = Vec::new();
-    for result in validation_results {
-        if let Some(candidate) = result? {
-            candidates.push(candidate);
-        }
+    let raw_hit_count = raw_hits.len();
+    if raw_hit_count > MAX_VALIDATION_RAW_HITS {
+        return Ok(NativeScanResult {
+            file_size,
+            raw_hits: Vec::new(),
+            candidates: Vec::new(),
+            logical_resolution_complete: false,
+            raw_hit_count,
+            budget_exhausted: true,
+        });
     }
-    candidates.sort_by_key(|candidate| (candidate.offset, candidate.format));
+
+    let mut candidates = validate_raw_hits(&reader, file_size, &raw_hits)?;
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.offset,
+            candidate.format,
+            std::cmp::Reverse(candidate_rank(candidate)),
+        )
+    });
     candidates.dedup_by_key(|candidate| (candidate.offset, candidate.format));
+    resolve_logical_candidates(&mut candidates, &raw_hits, file_size);
+    let logical_resolution_complete = candidates.iter().all(|candidate| {
+        candidate.candidate_kind == "logical_archive" && candidate.boundary_kind != "unresolved"
+    });
 
     Ok(NativeScanResult {
         file_size,
         raw_hits,
         candidates,
+        logical_resolution_complete,
+        raw_hit_count,
+        budget_exhausted: false,
     })
+}
+
+fn validate_raw_hits(
+    reader: &ManagedReader,
+    file_size: u64,
+    raw_hits: &[RawHit],
+) -> io::Result<Vec<EmbeddedCandidate>> {
+    let collect_parallel = |hits: Vec<&RawHit>| -> io::Result<Vec<EmbeddedCandidate>> {
+        hits.par_iter()
+            .map(|hit| validate_candidate(reader, file_size, hit.kind, hit.offset))
+            .collect::<io::Result<Vec<_>>>()
+            .map(|items| items.into_iter().flatten().collect())
+    };
+
+    // EOCD validation walks the central directory and links every member back
+    // to its local header.  Validate these logical roots first, then avoid
+    // repeating a local-header probe for every member they already cover.
+    let mut candidates = collect_parallel(
+        raw_hits
+            .iter()
+            .filter(|hit| hit.kind == "zip_eocd")
+            .collect(),
+    )?;
+    let zip_ranges = candidates
+        .iter()
+        .filter(|candidate| candidate.format == "zip" && candidate.boundary_kind == "exact")
+        .filter_map(|candidate| candidate.end_offset.map(|end| (candidate.offset, end)))
+        .collect::<Vec<_>>();
+
+    let mut ordinary = collect_parallel(
+        raw_hits
+            .iter()
+            .filter(|hit| !matches!(hit.kind, "zip_eocd" | "zip" | "tar"))
+            .collect(),
+    )?;
+    candidates.append(&mut ordinary);
+
+    let mut orphan_zip_anchors = collect_parallel(
+        raw_hits
+            .iter()
+            .filter(|hit| {
+                hit.kind == "zip"
+                    && !zip_ranges
+                        .iter()
+                        .any(|(start, end)| hit.offset >= *start && hit.offset < *end)
+            })
+            .collect(),
+    )?;
+    candidates.append(&mut orphan_zip_anchors);
+
+    // Each TAR member contains another valid ustar signature.  Walking every
+    // member to the same double-zero terminator is quadratic.  A successful
+    // walk from the earliest uncovered header proves all later member anchors
+    // inside that exact archive range.
+    let mut tar_ranges = Vec::<(u64, u64)>::new();
+    for hit in raw_hits.iter().filter(|hit| hit.kind == "tar") {
+        if tar_ranges
+            .iter()
+            .any(|(start, end)| hit.offset >= *start && hit.offset < *end)
+        {
+            continue;
+        }
+        if let Some(candidate) = validate_candidate(reader, file_size, hit.kind, hit.offset)? {
+            if let Some(end) = candidate.end_offset {
+                tar_ranges.push((candidate.offset, end));
+            }
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
+}
+
+fn candidate_rank(candidate: &EmbeddedCandidate) -> u8 {
+    match (candidate.candidate_kind, candidate.boundary_kind) {
+        ("logical_archive", "exact") => 3,
+        ("logical_archive", _) => 2,
+        _ => 1,
+    }
+}
+
+fn resolve_logical_candidates(
+    candidates: &mut Vec<EmbeddedCandidate>,
+    raw_hits: &[RawHit],
+    file_size: u64,
+) {
+    // TAR member headers independently validate from their own offset to the
+    // same end marker.  Only the earliest member is the logical archive start.
+    let mut tar_ends = std::collections::HashMap::<u64, u64>::new();
+    for item in candidates.iter().filter(|item| item.format == "tar") {
+        if let Some(end) = item.end_offset {
+            tar_ends
+                .entry(end)
+                .and_modify(|start| *start = (*start).min(item.offset))
+                .or_insert(item.offset);
+        }
+    }
+    candidates.retain(|item| {
+        item.format != "tar"
+            || item.end_offset.is_none()
+            || tar_ends.get(&item.end_offset.unwrap()).copied() == Some(item.offset)
+    });
+
+    let exact_ranges = candidates
+        .iter()
+        .filter_map(|item| item.end_offset.map(|end| (item.format, item.offset, end)))
+        .collect::<Vec<_>>();
+    let contained_counts = candidates
+        .iter()
+        .map(|item| {
+            item.end_offset.map(|end| {
+                candidates_contained_anchor_count(
+                    item.format,
+                    item.offset,
+                    end,
+                    candidates,
+                    raw_hits,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (item, count) in candidates.iter_mut().zip(contained_counts) {
+        if let Some(count) = count {
+            item.contained_anchor_count = count;
+        }
+    }
+    // Local ZIP headers referenced by an EOCD candidate are member anchors,
+    // not independent ZIP archives.
+    candidates.retain(|item| {
+        if item.format != "zip" || item.candidate_kind != "anchor" {
+            return true;
+        }
+        !exact_ranges.iter().any(|(format, start, end)| {
+            *format == "zip" && item.offset >= *start && item.offset < *end
+        })
+    });
+
+    let logical_starts = candidates
+        .iter()
+        .filter(|item| item.candidate_kind == "logical_archive")
+        .map(|item| item.offset)
+        .collect::<Vec<_>>();
+    for item in candidates
+        .iter_mut()
+        .filter(|item| item.end_offset.is_none())
+    {
+        if item.candidate_kind != "logical_archive" {
+            continue;
+        }
+        item.range_end_offset = logical_starts
+            .iter()
+            .copied()
+            .filter(|start| *start > item.offset)
+            .min()
+            .or(Some(file_size));
+        item.boundary_kind = "bounded";
+        item.extractable = item.range_end_offset.is_some_and(|end| end > item.offset);
+    }
+}
+
+fn candidates_contained_anchor_count(
+    format: &str,
+    start: u64,
+    end: u64,
+    candidates: &[EmbeddedCandidate],
+    raw_hits: &[RawHit],
+) -> usize {
+    let raw_kind = match format {
+        "zip" => Some("zip"),
+        "tar" => Some("tar"),
+        _ => None,
+    };
+    if let Some(kind) = raw_kind {
+        return raw_hits
+            .iter()
+            .filter(|hit| hit.kind == kind && hit.offset >= start && hit.offset < end)
+            .count();
+    }
+    candidates
+        .iter()
+        .filter(|item| {
+            item.format == format
+                && item.candidate_kind == "anchor"
+                && item.offset >= start
+                && item.offset < end
+        })
+        .count()
 }
 
 fn scan_raw_hits_mapped(data: &[u8]) -> Vec<RawHit> {
@@ -503,24 +727,47 @@ fn validate_zip_eocd(
     if disk != 0 || cd_disk != 0 {
         return Ok(None);
     }
-    let cd_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
-    let recorded_cd_offset = u32::from_le_bytes(header[16..20].try_into().unwrap()) as u64;
-    if cd_size == u32::MAX as u64 || recorded_cd_offset == u32::MAX as u64 || cd_size > eocd_offset
-    {
-        // ZIP64 is still represented by its validated local-header candidate;
-        // its locator/record are handed to analysis through the full hit map.
+    let classic_cd_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
+    let classic_cd_offset = u32::from_le_bytes(header[16..20].try_into().unwrap()) as u64;
+    let classic_entries_on_disk = u16::from_le_bytes(header[8..10].try_into().unwrap()) as u64;
+    let classic_entries_total = u16::from_le_bytes(header[10..12].try_into().unwrap()) as u64;
+    let needs_zip64 = classic_cd_size == u32::MAX as u64
+        || classic_cd_offset == u32::MAX as u64
+        || classic_entries_on_disk == u16::MAX as u64
+        || classic_entries_total == u16::MAX as u64;
+    let zip64 = parse_zip64_end_records(file, eocd_offset)?;
+    if needs_zip64 && zip64.is_none() {
         return Ok(None);
     }
-    let mut directory_end = eocd_offset;
-    if eocd_offset >= 76 {
-        let zip64_pair = read_at(file, eocd_offset - 76, 76)?;
-        if zip64_pair.len() == 76
-            && &zip64_pair[..4] == b"PK\x06\x06"
-            && u64::from_le_bytes(zip64_pair[4..12].try_into().unwrap()) == 44
-            && &zip64_pair[56..60] == b"PK\x06\x07"
-        {
-            directory_end = eocd_offset - 76;
-        }
+    let (directory_end, cd_size, recorded_cd_offset, entries_total, locator_archive_offset) =
+        if let Some(zip64) = zip64 {
+            if zip64.disk != 0 || zip64.cd_disk != 0 || zip64.entries_on_disk != zip64.entries_total
+            {
+                return Ok(None);
+            }
+            (
+                zip64.record_offset,
+                zip64.cd_size,
+                zip64.cd_offset,
+                zip64.entries_total,
+                zip64
+                    .record_offset
+                    .checked_sub(zip64.recorded_record_offset),
+            )
+        } else {
+            if classic_entries_on_disk != classic_entries_total {
+                return Ok(None);
+            }
+            (
+                eocd_offset,
+                classic_cd_size,
+                classic_cd_offset,
+                classic_entries_total,
+                None,
+            )
+        };
+    if entries_total > MAX_ARCHIVE_METADATA_RECORDS as u64 {
+        return Ok(None);
     }
     if cd_size > directory_end {
         return Ok(None);
@@ -529,11 +776,23 @@ fn validate_zip_eocd(
     let Some(archive_offset) = actual_cd_start.checked_sub(recorded_cd_offset) else {
         return Ok(None);
     };
+    if locator_archive_offset.is_some_and(|offset| offset != archive_offset) {
+        return Ok(None);
+    }
     if archive_offset == 0 {
         return Ok(None);
     }
     let cd_magic = read_at(file, actual_cd_start, 4)?;
     if cd_size > 0 && cd_magic.as_slice() != b"PK\x01\x02" {
+        return Ok(None);
+    }
+    if !validate_zip_central_directory(
+        file,
+        actual_cd_start,
+        directory_end,
+        archive_offset,
+        entries_total as usize,
+    )? {
         return Ok(None);
     }
     Ok(Some(candidate(
@@ -542,8 +801,169 @@ fn validate_zip_eocd(
         archive_offset,
         Some(end),
         1.0,
-        "eocd_and_central_directory",
+        if needs_zip64 {
+            "zip64_eocd_central_directory_and_local_links"
+        } else {
+            "eocd_central_directory_and_local_links"
+        },
     )))
+}
+
+struct Zip64EndRecords {
+    record_offset: u64,
+    recorded_record_offset: u64,
+    disk: u32,
+    cd_disk: u32,
+    entries_on_disk: u64,
+    entries_total: u64,
+    cd_size: u64,
+    cd_offset: u64,
+}
+
+fn parse_zip64_end_records(
+    file: &ManagedReader,
+    eocd_offset: u64,
+) -> io::Result<Option<Zip64EndRecords>> {
+    if eocd_offset < 20 {
+        return Ok(None);
+    }
+    let locator = read_at(file, eocd_offset - 20, 20)?;
+    if locator.len() != 20 || &locator[..4] != b"PK\x06\x07" {
+        return Ok(None);
+    }
+    let locator_disk = u32::from_le_bytes(locator[4..8].try_into().unwrap());
+    let recorded_record_offset = u64::from_le_bytes(locator[8..16].try_into().unwrap());
+    let disk_count = u32::from_le_bytes(locator[16..20].try_into().unwrap());
+    if locator_disk != 0 || disk_count != 1 || eocd_offset < 32 {
+        return Ok(None);
+    }
+
+    // The extensible ZIP64 EOCD record is immediately before the locator.
+    // Read its fixed tail backwards to obtain the declared record size without
+    // trusting the (SFX-relative) locator offset as a physical position.
+    let search_start = eocd_offset.saturating_sub(20 + 65_557);
+    let search = read_at(
+        file,
+        search_start,
+        (eocd_offset - 20 - search_start) as usize,
+    )?;
+    let Some(relative) = search.windows(4).rposition(|bytes| bytes == b"PK\x06\x06") else {
+        return Ok(None);
+    };
+    let record_offset = search_start + relative as u64;
+    let fixed = read_at(file, record_offset, 56)?;
+    if fixed.len() != 56 || &fixed[..4] != b"PK\x06\x06" {
+        return Ok(None);
+    }
+    let record_size = u64::from_le_bytes(fixed[4..12].try_into().unwrap());
+    if record_size < 44 || record_offset.checked_add(12 + record_size) != Some(eocd_offset - 20) {
+        return Ok(None);
+    }
+    Ok(Some(Zip64EndRecords {
+        record_offset,
+        recorded_record_offset,
+        disk: u32::from_le_bytes(fixed[16..20].try_into().unwrap()),
+        cd_disk: u32::from_le_bytes(fixed[20..24].try_into().unwrap()),
+        entries_on_disk: u64::from_le_bytes(fixed[24..32].try_into().unwrap()),
+        entries_total: u64::from_le_bytes(fixed[32..40].try_into().unwrap()),
+        cd_size: u64::from_le_bytes(fixed[40..48].try_into().unwrap()),
+        cd_offset: u64::from_le_bytes(fixed[48..56].try_into().unwrap()),
+    }))
+}
+
+fn validate_zip_central_directory(
+    file: &ManagedReader,
+    start: u64,
+    end: u64,
+    archive_offset: u64,
+    entries: usize,
+) -> io::Result<bool> {
+    let mut cursor = start;
+    for _ in 0..entries {
+        let fixed = read_at(file, cursor, 46)?;
+        if fixed.len() != 46 || &fixed[..4] != b"PK\x01\x02" {
+            return Ok(false);
+        }
+        let name_len = u16::from_le_bytes(fixed[28..30].try_into().unwrap()) as u64;
+        let extra_len = u16::from_le_bytes(fixed[30..32].try_into().unwrap()) as u64;
+        let comment_len = u16::from_le_bytes(fixed[32..34].try_into().unwrap()) as u64;
+        let variable_len = name_len
+            .checked_add(extra_len)
+            .and_then(|value| value.checked_add(comment_len));
+        let Some(next) = variable_len.and_then(|value| cursor.checked_add(46 + value)) else {
+            return Ok(false);
+        };
+        if next > end || extra_len > usize::MAX as u64 {
+            return Ok(false);
+        }
+        let compressed = u32::from_le_bytes(fixed[20..24].try_into().unwrap());
+        let uncompressed = u32::from_le_bytes(fixed[24..28].try_into().unwrap());
+        let disk_start = u16::from_le_bytes(fixed[34..36].try_into().unwrap());
+        let local_32 = u32::from_le_bytes(fixed[42..46].try_into().unwrap());
+        let local_offset = if local_32 == u32::MAX {
+            let extra = read_at(file, cursor + 46 + name_len, extra_len as usize)?;
+            let Some(value) = zip64_central_local_offset(
+                &extra,
+                uncompressed == u32::MAX,
+                compressed == u32::MAX,
+                disk_start == u16::MAX,
+            ) else {
+                return Ok(false);
+            };
+            value
+        } else {
+            u64::from(local_32)
+        };
+        let Some(absolute_local) = archive_offset.checked_add(local_offset) else {
+            return Ok(false);
+        };
+        if absolute_local >= start || read_at(file, absolute_local, 4)?.as_slice() != ZIP_LOCAL {
+            return Ok(false);
+        }
+        cursor = next;
+    }
+    if cursor == end {
+        return Ok(true);
+    }
+    // Optional central-directory digital signature.
+    let signature = read_at(file, cursor, 6)?;
+    if signature.len() != 6 || &signature[..4] != b"PK\x05\x05" {
+        return Ok(false);
+    }
+    let length = u16::from_le_bytes(signature[4..6].try_into().unwrap()) as u64;
+    Ok(cursor.checked_add(6 + length) == Some(end))
+}
+
+fn zip64_central_local_offset(
+    extra: &[u8],
+    has_uncompressed: bool,
+    has_compressed: bool,
+    has_disk: bool,
+) -> Option<u64> {
+    let mut field = 0usize;
+    while field + 4 <= extra.len() {
+        let id = u16::from_le_bytes(extra[field..field + 2].try_into().ok()?);
+        let len = u16::from_le_bytes(extra[field + 2..field + 4].try_into().ok()?) as usize;
+        field += 4;
+        let values = extra.get(field..field.checked_add(len)?)?;
+        if id == 0x0001 {
+            let mut cursor = 0usize;
+            if has_uncompressed {
+                cursor = cursor.checked_add(8)?;
+            }
+            if has_compressed {
+                cursor = cursor.checked_add(8)?;
+            }
+            let value = u64::from_le_bytes(values.get(cursor..cursor + 8)?.try_into().ok()?);
+            cursor += 8;
+            if has_disk && values.len() < cursor + 4 {
+                return None;
+            }
+            return Some(value);
+        }
+        field += len;
+    }
+    None
 }
 
 fn read_at(file: &ManagedReader, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
@@ -678,26 +1098,75 @@ fn validate_rar4(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let prefix = read_at(file, offset + RAR4.len() as u64, 11)?;
-    if prefix.len() < 7 {
-        return Ok(None);
+    let mut cursor = offset + RAR4.len() as u64;
+    for index in 0..MAX_ARCHIVE_METADATA_RECORDS {
+        let fixed = read_at(file, cursor, 7)?;
+        if fixed.len() != 7 {
+            return Ok(None);
+        }
+        let stored = u16::from_le_bytes(fixed[..2].try_into().unwrap()) as u32;
+        let header_type = fixed[2];
+        let flags = u16::from_le_bytes(fixed[3..5].try_into().unwrap());
+        let header_size = u16::from_le_bytes(fixed[5..7].try_into().unwrap()) as u64;
+        if !matches!(header_type, 0x73..=0x7b) || header_size < 7 {
+            return Ok(None);
+        }
+        let Some(header_end) = cursor.checked_add(header_size) else {
+            return Ok(None);
+        };
+        if header_end > size || header_size > usize::MAX as u64 {
+            return Ok(None);
+        }
+        let header = read_at(file, cursor, header_size as usize)?;
+        if header.len() != header_size as usize || crc32(&header[2..]) & 0xffff != stored {
+            return Ok(None);
+        }
+        if index == 0 && header_type != 0x73 {
+            return Ok(None);
+        }
+        if index == 0 && flags & 0x0080 != 0 {
+            return Ok(Some(logical_candidate(
+                "rar",
+                ".rar",
+                offset,
+                None,
+                1.0,
+                "rar4_header_encrypted_main_header_crc",
+            )));
+        }
+        let add_size = if flags & 0x8000 != 0 {
+            if header.len() < 11 {
+                return Ok(None);
+            }
+            u64::from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
+        } else {
+            0
+        };
+        let Some(next) = header_end.checked_add(add_size) else {
+            return Ok(None);
+        };
+        if next > size {
+            return Ok(None);
+        }
+        if header_type == 0x7b {
+            return Ok(Some(candidate(
+                "rar",
+                ".rar",
+                offset,
+                Some(next),
+                1.0,
+                "rar4_complete_block_walk",
+            )));
+        }
+        cursor = next;
     }
-    let header_size = u16::from_le_bytes([prefix[5], prefix[6]]) as usize;
-    if header_size < 7 || offset + RAR4.len() as u64 + header_size as u64 > size {
-        return Ok(None);
-    }
-    let header = read_at(file, offset + RAR4.len() as u64, header_size)?;
-    let stored = u16::from_le_bytes([header[0], header[1]]) as u32;
-    if !matches!(header[2], 0x73..=0x7b) || crc32(&header[2..]) & 0xffff != stored {
-        return Ok(None);
-    }
-    Ok(Some(candidate(
+    Ok(Some(logical_candidate(
         "rar",
         ".rar",
         offset,
         None,
-        1.0,
-        "rar4_header_crc",
+        0.90,
+        "rar4_block_walk_limit_reached",
     )))
 }
 
@@ -706,36 +1175,99 @@ fn validate_rar5(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let start = offset + RAR5.len() as u64;
-    let prefix = read_at(file, start, 32)?;
-    if prefix.len() < 7 {
-        return Ok(None);
+    let mut cursor = offset + RAR5.len() as u64;
+    for index in 0..MAX_ARCHIVE_METADATA_RECORDS {
+        let prefix = read_at(file, cursor, 16)?;
+        if prefix.len() < 6 {
+            return Ok(None);
+        }
+        let stored = u32::from_le_bytes(prefix[..4].try_into().unwrap());
+        let Some((header_size, size_len)) = read_vint(&prefix[4..]) else {
+            return Ok(None);
+        };
+        if size_len > 3 || header_size == 0 {
+            return Ok(None);
+        }
+        let Some(total) = 4u64
+            .checked_add(size_len as u64)
+            .and_then(|value| value.checked_add(header_size))
+        else {
+            return Ok(None);
+        };
+        let Some(header_end) = cursor.checked_add(total) else {
+            return Ok(None);
+        };
+        if header_end > size || total > usize::MAX as u64 {
+            return Ok(None);
+        }
+        let full = read_at(file, cursor, total as usize)?;
+        if full.len() != total as usize || crc32(&full[4..]) != stored {
+            return Ok(None);
+        }
+        let fields_start = 4 + size_len;
+        let Some((header_type, type_len)) = read_vint(&full[fields_start..]) else {
+            return Ok(None);
+        };
+        let flags_start = fields_start + type_len;
+        let Some((flags, flags_len)) = read_vint(&full[flags_start..]) else {
+            return Ok(None);
+        };
+        if !matches!(header_type, 1..=5) && flags & 0x0004 == 0 {
+            return Ok(None);
+        }
+        let mut field_cursor = flags_start + flags_len;
+        if flags & 0x0001 != 0 {
+            let Some((_, len)) = read_vint(&full[field_cursor..]) else {
+                return Ok(None);
+            };
+            field_cursor += len;
+        }
+        let data_size = if flags & 0x0002 != 0 {
+            let Some((value, _)) = read_vint(&full[field_cursor..]) else {
+                return Ok(None);
+            };
+            value
+        } else {
+            0
+        };
+        let Some(next) = header_end.checked_add(data_size) else {
+            return Ok(None);
+        };
+        if next > size {
+            return Ok(None);
+        }
+        if index == 0 && header_type == 4 {
+            return Ok(Some(logical_candidate(
+                "rar",
+                ".rar",
+                offset,
+                None,
+                1.0,
+                "rar5_encryption_header_crc",
+            )));
+        }
+        if index == 0 && header_type != 1 {
+            return Ok(None);
+        }
+        if header_type == 5 {
+            return Ok(Some(candidate(
+                "rar",
+                ".rar",
+                offset,
+                Some(next),
+                1.0,
+                "rar5_complete_block_walk",
+            )));
+        }
+        cursor = next;
     }
-    let stored = u32::from_le_bytes(prefix[..4].try_into().unwrap());
-    let Some((header_size, size_len)) = read_vint(&prefix[4..]) else {
-        return Ok(None);
-    };
-    let total = 4u64 + size_len as u64 + header_size;
-    if header_size == 0 || start + total > size || total > usize::MAX as u64 {
-        return Ok(None);
-    }
-    let header = read_at(file, start + 4, (size_len as u64 + header_size) as usize)?;
-    if crc32(&header) != stored {
-        return Ok(None);
-    }
-    let Some((header_type, _)) = read_vint(&header[size_len..]) else {
-        return Ok(None);
-    };
-    if !(1..=5).contains(&header_type) {
-        return Ok(None);
-    }
-    Ok(Some(candidate(
+    Ok(Some(logical_candidate(
         "rar",
         ".rar",
         offset,
         None,
-        1.0,
-        "rar5_header_crc",
+        0.90,
+        "rar5_block_walk_limit_reached",
     )))
 }
 
@@ -848,22 +1380,48 @@ fn validate_bzip2(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let header = read_at(file, offset, 10)?;
-    if header.len() < 10
-        || &header[..3] != BZIP2
-        || !(b'1'..=b'9').contains(&header[3])
-        || &header[4..10] != b"1AY&SY"
-        || offset + 14 > size
-    {
+    let header = read_at(file, offset, 4)?;
+    if header.len() < 4 || &header[..3] != BZIP2 || !(b'1'..=b'9').contains(&header[3]) {
+        return Ok(None);
+    }
+    let mut decoder = Bzip2Decompress::new(false);
+    let mut output = [0u8; 64 * 1024];
+    loop {
+        let consumed_before = decoder.total_in();
+        let produced_before = decoder.total_out();
+        let input_offset = match offset.checked_add(consumed_before) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let input = read_at(file, input_offset, 64 * 1024)?;
+        if input.is_empty() {
+            return Ok(None);
+        }
+        let status = match decoder.decompress(&input, &mut output) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        if status == Bzip2Status::StreamEnd {
+            break;
+        }
+        if decoder.total_in() == consumed_before && decoder.total_out() == produced_before {
+            return Ok(None);
+        }
+    }
+    let consumed = decoder.total_in();
+    let Some(end) = offset.checked_add(consumed) else {
+        return Ok(None);
+    };
+    if consumed < 14 || end > size {
         return Ok(None);
     }
     Ok(Some(candidate(
         "bzip2",
         ".bz2",
         offset,
-        None,
-        0.98,
-        "stream_and_block_header",
+        Some(end),
+        1.0,
+        "bzip2_stream_end_and_combined_crc",
     )))
 }
 
@@ -885,13 +1443,47 @@ fn validate_xz(
     if crc32(&header[6..8]) != stored {
         return Ok(None);
     }
+    let mut decoder = match XzStream::new_stream_decoder(u64::MAX, 0) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let mut output = [0u8; 64 * 1024];
+    loop {
+        let consumed_before = decoder.total_in();
+        let produced_before = decoder.total_out();
+        let input_offset = match offset.checked_add(consumed_before) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let input = read_at(file, input_offset, 64 * 1024)?;
+        if input.is_empty() {
+            return Ok(None);
+        }
+        let status = match decoder.process(&input, &mut output, XzAction::Run) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        if status == XzStatus::StreamEnd {
+            break;
+        }
+        if decoder.total_in() == consumed_before && decoder.total_out() == produced_before {
+            return Ok(None);
+        }
+    }
+    let consumed = decoder.total_in();
+    let Some(end) = offset.checked_add(consumed) else {
+        return Ok(None);
+    };
+    if consumed < 24 || end > size {
+        return Ok(None);
+    }
     Ok(Some(candidate(
         "xz",
         ".xz",
         offset,
-        None,
+        Some(end),
         1.0,
-        "stream_header_crc",
+        "xz_stream_header_index_footer_and_checks",
     )))
 }
 
@@ -904,28 +1496,58 @@ fn validate_zstd(
     // Read the following Block_Header as well so every legal layout can be
     // validated from one fixed-size prefix.
     let header = read_at(file, offset, 21)?;
-    let Some((frame_header_size, encoded_block_size, checksum_size)) = parse_zstd_prefix(&header)
-    else {
+    let Some((frame_header_size, _, _)) = parse_zstd_prefix(&header) else {
         return Ok(None);
     };
-    let Some(frame_prefix_end) = offset
-        .checked_add(frame_header_size as u64)
-        .and_then(|end| end.checked_add(3))
-        .and_then(|end| end.checked_add(encoded_block_size))
-        .and_then(|end| end.checked_add(checksum_size))
-    else {
-        return Ok(None);
-    };
-    if frame_prefix_end > size {
-        return Ok(None);
+    let checksum = header[4] & 0x04 != 0;
+    let mut cursor = offset + frame_header_size as u64;
+    for _ in 0..MAX_ARCHIVE_METADATA_RECORDS {
+        let block = read_at(file, cursor, 3)?;
+        if block.len() != 3 {
+            return Ok(None);
+        }
+        let value = u32::from(block[0]) | (u32::from(block[1]) << 8) | (u32::from(block[2]) << 16);
+        let last = value & 1 != 0;
+        let block_type = (value >> 1) & 0x03;
+        let block_size = u64::from(value >> 3);
+        if block_type == 3 || block_size > 128 * 1024 {
+            return Ok(None);
+        }
+        let encoded = if block_type == 1 { 1 } else { block_size };
+        let Some(next) = cursor
+            .checked_add(3)
+            .and_then(|value| value.checked_add(encoded))
+        else {
+            return Ok(None);
+        };
+        if next > size {
+            return Ok(None);
+        }
+        cursor = next;
+        if last {
+            if checksum {
+                cursor = match cursor.checked_add(4) {
+                    Some(value) if value <= size => value,
+                    _ => return Ok(None),
+                };
+            }
+            return Ok(Some(candidate(
+                "zstd",
+                ".zst",
+                offset,
+                Some(cursor),
+                0.99,
+                "rfc8878_complete_frame_block_walk",
+            )));
+        }
     }
-    Ok(Some(candidate(
+    Ok(Some(logical_candidate(
         "zstd",
         ".zst",
         offset,
         None,
-        0.98,
-        "rfc8878_frame_and_first_block_bounds",
+        0.90,
+        "zstd_block_walk_limit_reached",
     )))
 }
 
@@ -1022,28 +1644,93 @@ fn validate_tar(
     if header.len() < 512 || &header[257..262] != TAR_USTAR {
         return Ok(None);
     }
-    let Some(stored) = parse_octal(&header[148..156]) else {
+    if !valid_tar_header(&header) {
         return Ok(None);
-    };
-    let mut sum = 0u64;
-    for (index, byte) in header.iter().enumerate() {
-        sum += if (148..156).contains(&index) {
-            b' ' as u64
-        } else {
-            *byte as u64
+    }
+    let mut cursor = offset;
+    for _ in 0..MAX_ARCHIVE_METADATA_RECORDS {
+        let current = read_at(file, cursor, 512)?;
+        if current.len() != 512 {
+            return Ok(None);
+        }
+        if current.iter().all(|byte| *byte == 0) {
+            let second = read_at(file, cursor + 512, 512)?;
+            if second.len() != 512 || !second.iter().all(|byte| *byte == 0) {
+                return Ok(None);
+            }
+            return Ok(Some(candidate(
+                "tar",
+                ".tar",
+                offset,
+                Some(cursor + 1024),
+                1.0,
+                "member_walk_checksums_and_end_blocks",
+            )));
+        }
+        if !valid_tar_header(&current) {
+            return Ok(None);
+        }
+        let Some(payload_size) = parse_tar_number(&current[124..136]) else {
+            return Ok(None);
         };
+        let Some(padded) = payload_size.checked_add(511).map(|value| value & !511) else {
+            return Ok(None);
+        };
+        let Some(next) = cursor
+            .checked_add(512)
+            .and_then(|value| value.checked_add(padded))
+        else {
+            return Ok(None);
+        };
+        if next > size {
+            return Ok(None);
+        }
+        cursor = next;
     }
-    if stored != sum {
-        return Ok(None);
-    }
-    Ok(Some(candidate(
+    Ok(Some(logical_candidate(
         "tar",
         ".tar",
         offset,
         None,
-        1.0,
-        "ustar_checksum",
+        0.90,
+        "tar_member_walk_limit_reached",
     )))
+}
+
+fn valid_tar_header(header: &[u8]) -> bool {
+    if header.len() != 512 {
+        return false;
+    }
+    let Some(stored) = parse_tar_number(&header[148..156]) else {
+        return false;
+    };
+    let unsigned = header
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                u64::from(b' ')
+            } else {
+                u64::from(*byte)
+            }
+        })
+        .sum::<u64>();
+    stored == unsigned
+}
+
+fn parse_tar_number(data: &[u8]) -> Option<u64> {
+    if data.first().is_some_and(|byte| byte & 0x80 != 0) {
+        if data.first()? & 0x40 != 0 {
+            return None;
+        }
+        let mut value = u64::from(data.first()? & 0x7f);
+        for byte in &data[1..] {
+            value = value.checked_mul(256)?.checked_add(u64::from(*byte))?;
+        }
+        Some(value)
+    } else {
+        parse_octal(data)
+    }
 }
 
 fn candidate(
@@ -1054,6 +1741,7 @@ fn candidate(
     confidence: f64,
     validation: &'static str,
 ) -> EmbeddedCandidate {
+    let exact = end.is_some();
     EmbeddedCandidate {
         format,
         detected_ext: ext,
@@ -1061,7 +1749,25 @@ fn candidate(
         end_offset: end,
         confidence,
         validation,
+        candidate_kind: if exact { "logical_archive" } else { "anchor" },
+        boundary_kind: if exact { "exact" } else { "unresolved" },
+        range_end_offset: end,
+        extractable: exact,
+        contained_anchor_count: 0,
     }
+}
+
+fn logical_candidate(
+    format: &'static str,
+    ext: &'static str,
+    offset: u64,
+    end: Option<u64>,
+    confidence: f64,
+    validation: &'static str,
+) -> EmbeddedCandidate {
+    let mut item = candidate(format, ext, offset, end, confidence, validation);
+    item.candidate_kind = "logical_archive";
+    item
 }
 
 fn read_vint(data: &[u8]) -> Option<(u64, usize)> {
@@ -1124,6 +1830,140 @@ mod tests {
         let mut hits = scan_sample(data, 0, 0);
         hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
         hits
+    }
+
+    fn append_tar_member(data: &mut Vec<u8>, name: &str, payload: &[u8]) {
+        let member_start = data.len();
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size = format!("{:011o}\0", payload.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
+        let checksum = format!("{:06o}\0 ", checksum);
+        header[148..156].copy_from_slice(checksum.as_bytes());
+        data.extend_from_slice(&header);
+        data.extend_from_slice(payload);
+        data.resize(member_start + 512 + payload.len().next_multiple_of(512), 0);
+    }
+
+    fn append_zip64_archive(data: &mut Vec<u8>) -> (u64, u64) {
+        let archive_start = data.len() as u64;
+        let name = b"x";
+        data.extend_from_slice(ZIP_LOCAL);
+        data.extend_from_slice(&45u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&crc32(b"x").to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(name);
+        data.push(b'x');
+
+        let cd_offset = data.len() as u64 - archive_start;
+        let cd_start = data.len();
+        data.extend_from_slice(b"PK\x01\x02");
+        data.extend_from_slice(&45u16.to_le_bytes());
+        data.extend_from_slice(&45u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&crc32(b"x").to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(name);
+        let cd_size = (data.len() - cd_start) as u64;
+
+        let zip64_record_offset = data.len() as u64 - archive_start;
+        data.extend_from_slice(b"PK\x06\x06");
+        data.extend_from_slice(&44u64.to_le_bytes());
+        data.extend_from_slice(&45u16.to_le_bytes());
+        data.extend_from_slice(&45u16.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&cd_size.to_le_bytes());
+        data.extend_from_slice(&cd_offset.to_le_bytes());
+        data.extend_from_slice(b"PK\x06\x07");
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&zip64_record_offset.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(ZIP_EOCD);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        (archive_start, data.len() as u64)
+    }
+
+    #[test]
+    fn aggregates_embedded_zip64_from_locator_eocd_and_local_links() {
+        let mut data = b"sfx-prefix".to_vec();
+        let (start, end) = append_zip64_archive(&mut data);
+        let path = temp_file("embedded_zip64", &data);
+
+        let result = scan_embedded_archives_native(ManagedReader::open(&path).unwrap()).unwrap();
+        let zip = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.format == "zip")
+            .expect("ZIP64 must become one logical candidate");
+
+        assert_eq!(zip.offset, start);
+        assert_eq!(zip.end_offset, Some(end));
+        assert_eq!(
+            zip.validation,
+            "zip64_eocd_central_directory_and_local_links"
+        );
+        assert_eq!(zip.contained_anchor_count, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn aggregates_many_tar_member_anchors_into_one_logical_archive() {
+        let mut data = b"carrier-prefix".to_vec();
+        let start = data.len() as u64;
+        append_tar_member(&mut data, "one.txt", b"one");
+        append_tar_member(&mut data, "two.txt", b"two");
+        data.extend_from_slice(&[0u8; 1024]);
+        let end = data.len() as u64;
+        let path = temp_file("embedded_tar_members", &data);
+
+        let result = scan_embedded_archives_native(ManagedReader::open(&path).unwrap()).unwrap();
+        let tar = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.format == "tar")
+            .collect::<Vec<_>>();
+
+        assert_eq!(tar.len(), 1);
+        assert_eq!(tar[0].offset, start);
+        assert_eq!(tar[0].end_offset, Some(end));
+        assert_eq!(tar[0].contained_anchor_count, 2);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -1338,7 +2178,7 @@ mod tests {
         let candidate = validate_zstd(&reader, data.len() as u64, 0)
             .unwrap()
             .expect("the full 14-byte RFC frame header must be accepted");
-        assert_eq!(candidate.validation, "rfc8878_frame_and_first_block_bounds");
+        assert_eq!(candidate.validation, "rfc8878_complete_frame_block_walk");
         let _ = fs::remove_file(path);
     }
 

@@ -366,3 +366,15 @@ class RuleManager:
             )
 
         return decisions
+
+    def evaluate_precheck_pool(
+        self,
+        fact_bags: List[FactBag],
+    ) -> tuple[Dict[FactBag, RuleDecision], List[FactBag]]:
+        """Run only terminal precheck rules and return the surviving candidates.
+
+        The coordinator uses this boundary to authorize the optional embedded
+        scan before fuzzy scoring.  Full evaluation remains unchanged and is
+        run afterwards with the selected candidates marked in their fact bags.
+        """
+        return self._run_precheck(fact_bags)

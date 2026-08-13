@@ -114,33 +114,31 @@ class ArchiveTaskProvider:
         scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
-        initial = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
         if self.detection_options.deep_scan:
-            return initial
+            return self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+
+        # Establish strict precheck outcomes first.  Candidates that survive
+        # are eligible for the existing embedded-scan policy before fuzzy
+        # scoring gets a chance to accept one incidental archive signature.
+        _precheck_decisions, surviving = self.detector.evaluate_precheck_pool(
+            fact_bags,
+            scan_session=scan_session,
+        )
         ratio = self._embedded_deep_scan_single_candidate_ratio()
-        if ratio <= 0.0:
-            return initial
+        if ratio > 0.0:
+            selected = (
+                _select_single_candidate_ratio(surviving, ratio)
+                if is_recursive_scan
+                else surviving
+            )
+            for bag in selected:
+                bag.set("candidate.embedded_payload_precheck_enabled", True)
+                bag.unset("embedded_archive.analysis")
 
-        unresolved = [
-            result.fact_bag
-            for result in initial
-            if not result.decision.should_extract
-        ]
-        if is_recursive_scan:
-            selected = _select_single_candidate_ratio(unresolved, ratio)
-        else:
-            selected = unresolved
-        if not selected:
-            return initial
-
-        for bag in selected:
-            bag.set("candidate.embedded_payload_precheck_enabled", True)
-            bag.unset("embedded_archive.analysis")
-        rescanned = {
-            result.fact_bag: result
-            for result in self.detector.evaluate_bags(selected, scan_session=scan_session)
-        }
-        return [rescanned.get(result.fact_bag, result) for result in initial]
+        # Re-running precheck is cheap because its facts are already cached.
+        # Selected survivors now enter embedded_payload_identity first; a
+        # failed embedded scan passes through to the unchanged scoring layer.
+        return self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
 
     def _embedded_deep_scan_single_candidate_ratio(self) -> float:
         embedded_config = self.config.get("embedded_scan")

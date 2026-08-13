@@ -1,7 +1,6 @@
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
-from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
 from sunpack.analysis.probes.compression_stream import CompressionStreamProbeOptions, probe_compression_stream_view
 
 GZIP_MAGIC = b"\x1f\x8b\x08"
@@ -23,9 +22,15 @@ class _CompressionModule:
         embedded = [
             item for item in prepass.get("embedded_candidates", [])
             if item.get("format") == self.fmt
+            and item.get("candidate_kind", "logical_archive") == "logical_archive"
         ]
         if embedded:
-            complete = all(item.get("end_offset") is not None for item in embedded)
+            complete = all(
+                item.get("end_offset") is not None
+                and item.get("boundary_kind", "exact") == "exact"
+                and item.get("extractable", True)
+                for item in embedded
+            )
             confidence = min(float(max(item.get("confidence") or 0.0 for item in embedded)), 0.99)
             segments = []
             for item in embedded:
@@ -33,7 +38,7 @@ class _CompressionModule:
                 end = item.get("end_offset")
                 segments.append(ArchiveSegment(
                     start_offset=start,
-                    end_offset=int(end) if end is not None else next_archive_boundary(prepass, start, view.size),
+                    end_offset=int(end) if end is not None else None,
                     confidence=confidence if complete else min(confidence, 0.80),
                     damage_flags=[] if end is not None else ["stream_boundary_inferred"],
                     evidence=[f"{self.fmt}:{item.get('validation') or 'validated_header'}"],

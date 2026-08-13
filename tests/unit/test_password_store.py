@@ -269,6 +269,31 @@ def test_password_resolver_submits_all_inconclusive_candidates_as_one_batch():
     assert tester.password_store.recent_passwords == ["builtin-password"]
 
 
+def test_password_resolver_probes_empty_first_for_unknown_embedded_range():
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(
+        cli_passwords=["wrong-password"],
+        builtin_passwords=[],
+    )
+    scheduler = QueuePasswordScheduler()
+    resolver = PasswordResolver(tester, PasswordSession(), scheduler)
+    bag = FactBag()
+    bag.set("archive.knowledge", {
+        "source": {
+            "password_probe_input": {
+                "open_mode": "file_range",
+                "entry_path": "carrier.bin",
+                "parts": [{"path": "carrier.bin", "start": 100, "length": 200}],
+            },
+        },
+    })
+
+    result = resolver.resolve("carrier.bin", fact_bag=bag, archive_key="carrier#segment-1")
+
+    assert scheduler.planned == []
+    assert result.candidate_passwords == ("", "wrong-password")
+
+
 def test_password_resolver_preserves_candidate_evidence_across_batch_confirmation():
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(

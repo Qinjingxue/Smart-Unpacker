@@ -26,6 +26,11 @@ class EmbeddedCandidate:
     end_offset: int | None
     confidence: float
     validation: str
+    candidate_kind: str = "logical_archive"
+    boundary_kind: str = "unresolved"
+    range_end_offset: int | None = None
+    extractable: bool = False
+    contained_anchor_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +40,11 @@ class EmbeddedCandidate:
             "end_offset": self.end_offset,
             "confidence": self.confidence,
             "validation": self.validation,
+            "candidate_kind": self.candidate_kind,
+            "boundary_kind": self.boundary_kind,
+            "range_end_offset": self.range_end_offset,
+            "extractable": self.extractable,
+            "contained_anchor_count": self.contained_anchor_count,
         }
 
 
@@ -54,6 +64,9 @@ class EmbeddedScanResult:
     hits: tuple[SignatureHit, ...]
     read_bytes: int
     file_size: int
+    logical_resolution_complete: bool = False
+    raw_hit_count: int = 0
+    budget_exhausted: bool = False
 
     @property
     def found(self) -> bool:
@@ -61,7 +74,16 @@ class EmbeddedScanResult:
 
     @classmethod
     def empty(cls, *, complete: bool = False) -> "EmbeddedScanResult":
-        return cls(complete=complete, candidates=(), hits=(), read_bytes=0, file_size=0)
+        return cls(
+            complete=complete,
+            candidates=(),
+            hits=(),
+            read_bytes=0,
+            file_size=0,
+            logical_resolution_complete=complete,
+            raw_hit_count=0,
+            budget_exhausted=False,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +93,10 @@ class EmbeddedScanResult:
             "hits": [item.to_dict() for item in self.hits],
             "read_bytes": self.read_bytes,
             "file_size": self.file_size,
+            "signature_scan_complete": self.complete,
+            "logical_resolution_complete": self.logical_resolution_complete,
+            "raw_hit_count": self.raw_hit_count,
+            "budget_exhausted": self.budget_exhausted,
         }
 
     def to_prepass(self) -> dict[str, Any]:
@@ -85,6 +111,9 @@ class EmbeddedScanResult:
             "formats": sorted(validated_formats),
             "full_scan_bytes": self.read_bytes,
             "full_scan_complete": self.complete,
+            "logical_resolution_complete": self.logical_resolution_complete,
+            "raw_hit_count": self.raw_hit_count,
+            "embedded_scan_budget_exhausted": self.budget_exhausted,
             "source": "embedded_scan",
             "embedded_candidates": [item.to_dict() for item in self.candidates],
         }

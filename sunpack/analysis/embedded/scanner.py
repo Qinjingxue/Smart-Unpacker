@@ -8,7 +8,7 @@ from sunpack.support.archive_sessions import get_archive_session
 from sunpack.support.global_cache_manager import GLOBAL_CACHE, file_identity
 
 
-_CACHE_NAMESPACE = "embedded_archive_scan_v1"
+_CACHE_NAMESPACE = "embedded_archive_scan_v3"
 _SCAN_LOCKS = tuple(threading.Lock() for _ in range(32))
 
 
@@ -50,13 +50,23 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
         if not archive_format or not detected_ext or offset < 0:
             raise TypeError("Native scan_embedded_archives returned an invalid candidate")
         end_offset = row.get("end_offset")
+        range_end_offset = row.get("range_end_offset")
+        validation = str(row.get("validation") or "")
+        legacy_anchor = end_offset is None and (
+            "local_header" in validation or validation == "ustar_checksum"
+        )
         candidates.append(EmbeddedCandidate(
             format=archive_format,
             detected_ext=detected_ext,
             offset=offset,
             end_offset=None if end_offset is None else int(end_offset),
             confidence=float(row.get("confidence") or 0.0),
-            validation=str(row.get("validation") or ""),
+            validation=validation,
+            candidate_kind=str(row.get("candidate_kind") or ("anchor" if legacy_anchor else "logical_archive")),
+            boundary_kind=str(row.get("boundary_kind") or ("exact" if end_offset is not None else "unresolved")),
+            range_end_offset=None if range_end_offset is None else int(range_end_offset),
+            extractable=bool(row.get("extractable", end_offset is not None)),
+            contained_anchor_count=int(row.get("contained_anchor_count") or 0),
         ))
 
     raw_hits = value.get("hits")
@@ -83,6 +93,11 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
         hits=tuple(sorted(hits, key=lambda item: (item.offset, item.name))),
         read_bytes=int(value.get("read_bytes") or 0),
         file_size=int(value.get("file_size") or expected_size or 0),
+        logical_resolution_complete=bool(
+            value.get("logical_resolution_complete", value.get("complete"))
+        ),
+        raw_hit_count=int(value.get("raw_hit_count") or len(raw_hits)),
+        budget_exhausted=bool(value.get("budget_exhausted")),
     )
 
 
@@ -97,6 +112,18 @@ def embedded_result_from_dict(value: dict[str, Any]) -> EmbeddedScanResult:
                 end_offset=None if item.get("end_offset") is None else int(item["end_offset"]),
                 confidence=float(item.get("confidence") or 0.0),
                 validation=str(item.get("validation") or ""),
+                candidate_kind=str(item.get("candidate_kind") or (
+                    "anchor"
+                    if item.get("end_offset") is None and (
+                        "local_header" in str(item.get("validation") or "")
+                        or str(item.get("validation") or "") == "ustar_checksum"
+                    )
+                    else "logical_archive"
+                )),
+                boundary_kind=str(item.get("boundary_kind") or ("exact" if item.get("end_offset") is not None else "unresolved")),
+                range_end_offset=None if item.get("range_end_offset") is None else int(item["range_end_offset"]),
+                extractable=bool(item.get("extractable", item.get("end_offset") is not None)),
+                contained_anchor_count=int(item.get("contained_anchor_count") or 0),
             )
             for item in value.get("candidates", [])
         ),
@@ -106,4 +133,9 @@ def embedded_result_from_dict(value: dict[str, Any]) -> EmbeddedScanResult:
         ),
         read_bytes=int(value.get("read_bytes") or 0),
         file_size=int(value.get("file_size") or 0),
+        logical_resolution_complete=bool(
+            value.get("logical_resolution_complete", value.get("complete"))
+        ),
+        raw_hit_count=int(value.get("raw_hit_count") or len(value.get("hits", []))),
+        budget_exhausted=bool(value.get("budget_exhausted")),
     )

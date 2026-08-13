@@ -11,6 +11,40 @@ class TarAnalysisModule:
     spec = AnalysisModuleSpec(name="tar", formats=("tar",), signatures=(b"ustar",), io_profile="head_heavy")
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
+        embedded = [
+            item for item in prepass.get("embedded_candidates", [])
+            if item.get("format") == "tar"
+            and item.get("candidate_kind", "logical_archive") == "logical_archive"
+        ]
+        if embedded:
+            candidates = []
+            for item in embedded:
+                start = int(item.get("offset") or 0)
+                end = item.get("end_offset")
+                exact = (
+                    end is not None
+                    and item.get("boundary_kind", "exact") == "exact"
+                    and item.get("extractable", True)
+                )
+                confidence = float(item.get("confidence") or 0.0)
+                candidates.append(ArchiveFormatEvidence(
+                    format="tar",
+                    confidence=confidence if exact else min(confidence, 0.80),
+                    status="extractable" if exact else "damaged",
+                    segments=[ArchiveSegment(
+                        start_offset=start,
+                        end_offset=int(end) if end is not None else None,
+                        confidence=confidence if exact else min(confidence, 0.80),
+                        damage_flags=[] if exact else ["tar_boundary_unresolved"],
+                        evidence=[f"tar:{item.get('validation') or 'validated_structure'}"],
+                    )],
+                    details={
+                        "source": "embedded_scan",
+                        "candidate": item,
+                        "boundary_kind": item.get("boundary_kind") or "unresolved",
+                    },
+                ))
+            return combine_format_candidates("tar", candidates, preserve_multiple=True)
         max_entries = int(config.get("max_entries_to_walk", 64) or 64)
         hit_starts = sorted(set(
             max(0, int(hit.get("offset") or 0) - 257)
