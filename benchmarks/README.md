@@ -17,6 +17,7 @@ python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cl
   --iocp-chunk-mib 2 --iocp-buffers 8 --iocp-workers 2
 python -m benchmarks scan hotspots . --mode full --json-out build/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out build/extraction-benchmark.json
+python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out build/sevenzip-worker-baseline.json
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss
 ```
@@ -59,6 +60,13 @@ The reusable harness in `benchmarks/harness` defines the common wall/CPU clocks,
 RSS/Private Bytes process-tree memory sampling, real-archive workspace lifecycle, and
 versioned JSON report envelope. New scenarios must use those components instead of
 adding another local timer, memory sampler, or temporary-directory policy.
+
+`extraction sevenzip-worker-matrix` measures the native persistent
+`sunpack_sevenzip_worker.exe` directly. It reuses the format-matrix corpus builder,
+generates tiny/small/medium/large profiles by default, and records per-run worker wall time,
+worker CPU time, child-process RSS peak, output statistics, native status, and failures.
+Use repeated or comma-separated `--profile` values and repeated `--format` values to
+focus the matrix. Durable results contain both `report.json` and `results.csv`.
 
 `reader embedded-scan --generate-gib 10 --rounds 1 --skip-cli` creates a streamed
 ZIP64 fixture under the benchmark workspace, measures native embedded-scan wall/CPU
