@@ -15,7 +15,7 @@ def test_successful_first_attempt_checks_free_space_once(tmp_path):
     calls = []
     task = ArchiveTask(FactBag(), 1, main_path=str(archive), all_parts=[str(archive)], detected_ext=".7z")
     task.fact_bag.set("archive.encrypted", False)
-    runner = SimpleNamespace(run_extract=lambda **_kwargs: SimpleNamespace(
+    runner = SimpleNamespace(extract_attempt=lambda **_kwargs: SimpleNamespace(
         returncode=0, stdout="", stderr="", worker_diagnostics={"result": {"status": "ok"}}
     ))
     rename = SimpleNamespace(
@@ -95,7 +95,7 @@ def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damag
             append_retry_count=lambda error, *_args: error,
         ),
         split_entry_resolver=SimpleNamespace(resolve=lambda selected, parts, split: (selected, parts, split)),
-        sevenzip_runner=SimpleNamespace(run_extract=lambda **_kwargs: completed),
+        sevenzip_runner=SimpleNamespace(extract_attempt=lambda **_kwargs: completed),
     )
 
     result = extractor.extract(task, str(output))

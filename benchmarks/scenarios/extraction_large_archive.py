@@ -318,13 +318,9 @@ class RequestRuntimeProfiler:
         _wrap(metadata_scanner, "scan", timings, "filename_metadata")
         _wrap(metadata_scanner, "scan_for_task", timings, "filename_metadata_for_task")
         sevenzip = _child(extractor, "sevenzip_runner")
-        _wrap(sevenzip, "run_extract", timings, "sevenzip_worker")
-        _wrap(sevenzip, "_run_persistent_worker", timings, "worker_persistent_roundtrip")
-        _wrap(sevenzip, "_read_persistent_worker_result", timings, "worker_read_protocol")
+        _wrap(sevenzip, "extract_attempt", timings, "sevenzip_worker", phase_timer=phase)
         _wrap(sevenzip, "_json_line", timings, "worker_protocol_json_decode")
-        _wrap(sevenzip, "_drain_stdout", timings, "worker_protocol_drain_stdout")
         _wrap(sevenzip, "_drain_stderr", timings, "worker_protocol_drain_stderr")
-        _wrap(sevenzip, "_record_persistent_progress", timings, "worker_protocol_progress_sample")
         _wrap(sevenzip, "_emit_progress", timings, "worker_protocol_emit_progress")
         _wrap(batch.verifier, "verify", timings, "verify_total", phase_timer=phase)
 
@@ -458,7 +454,7 @@ def main() -> int:
 
     passwords = [f"sunpack-wrong-{index:04d}" for index in range(max(0, args.generated_wrong_passwords))]
     passwords.extend(args.password)
-    config = archive_pressure_config(passwords=passwords, scheduler_profile="single")
+    config = archive_pressure_config(passwords=passwords, worker_profile="auto")
     config.setdefault("cli", {}).update({"quiet": True, "verbose": False})
     config["recursive_extract"] = {"mode": "fixed", "max_rounds": max(1, args.recursive_rounds)}
     output_base = Path(args.output).resolve()

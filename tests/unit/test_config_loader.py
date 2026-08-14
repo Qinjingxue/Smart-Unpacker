@@ -40,7 +40,7 @@ def _advanced_payload(precheck=None):
         "recursive_extract": "*",
         "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
         "filesystem": {"directory_scan_mode": "*", "scan_filters_enabled": True, "scan_filters": []},
-        "performance": {"scheduler_profile": "auto", "max_extract_task_seconds": 1800},
+        "performance": {"worker": {"profile": "auto", "max_task_seconds": 1800}},
         "verification": _verification_config(),
         "detection": {
             "enabled": True,
@@ -63,14 +63,14 @@ def test_load_config_merges_simple_config_over_advanced_config(tmp_path, monkeyp
     _write_json(simple, {
         "cli": {"language": "zh"},
         "filesystem": {"scan_filters": [{"name": "size_range", "enabled": True, "range": "r >= 2 MB"}]},
-        "performance": {"scheduler_profile": "conservative"},
+        "performance": {"worker": {"profile": "conservative"}},
     })
     monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
     config = loader.load_config()
     assert config["cli"]["language"] == "zh"
     assert config["filesystem"]["directory_scan_mode"] == "recursive"
     assert config["filesystem"]["scan_filters"][0]["range"] == "r >= 2 MB"
-    assert config["performance"]["max_extract_task_seconds"] == 1800
+    assert config["performance"]["worker"]["max_task_seconds"] == 1800
 
 
 def test_load_config_requires_external_verification_config(tmp_path, monkeypatch):

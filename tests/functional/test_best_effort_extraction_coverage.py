@@ -261,7 +261,7 @@ def test_verification_coverage_merge_does_not_let_weak_sources_veto_worker_manif
 def test_worker_continues_after_middle_zip_payload_damage(tmp_path):
     archive = _zip_with_middle_bad_payload(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     items = {Path(item["path"]).name: item for item in worker_result["diagnostics"]["output_trace"]["items"]}
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
 
@@ -283,7 +283,7 @@ def test_worker_continues_after_middle_zip_payload_damage(tmp_path):
 def test_verification_keeps_zip_path_collisions_on_archive_path_not_basename(tmp_path):
     archive = _zip_with_path_collisions_and_one_bad_payload(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     manifest_path = write_extraction_progress_manifest(
         archive=str(archive),
         out_dir=str(out_dir),
@@ -310,7 +310,7 @@ def test_verification_keeps_zip_path_collisions_on_archive_path_not_basename(tmp
 def test_verification_counts_zero_byte_files_and_excludes_zip_directories(tmp_path):
     archive = _zip_with_directory_empty_file_and_bad_payload(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
     states = {item.archive_path: item.state for item in verification.file_observations}
 
@@ -332,7 +332,7 @@ def test_verification_counts_zero_byte_files_and_excludes_zip_directories(tmp_pa
 def test_worker_and_verification_count_multiple_spaced_zip_payload_failures(tmp_path):
     archive = _zip_with_two_spaced_bad_payloads(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     items = {Path(item["path"]).name: item for item in worker_result["diagnostics"]["output_trace"]["items"]}
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
 
@@ -353,7 +353,7 @@ def test_worker_and_verification_count_multiple_spaced_zip_payload_failures(tmp_
 def test_verification_scores_deflated_zip_payload_crc_damage_as_partial_payload(tmp_path):
     archive = _zip_with_deflated_bad_payload(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     items = {Path(item["path"]).name: item for item in worker_result["diagnostics"]["output_trace"]["items"]}
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
 
@@ -373,7 +373,7 @@ def test_verification_scores_deflated_zip_payload_crc_damage_as_partial_payload(
 def test_verification_uses_expected_names_for_truncated_tar_member_coverage(tmp_path):
     archive = _truncated_tar_with_partial_member(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="tar")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="tar")
     fact_bag = FactBag()
     fact_bag.set("resource.analysis", {
         "status": "damaged",
@@ -415,7 +415,7 @@ def test_verification_uses_expected_names_for_truncated_tar_member_coverage(tmp_
 def test_encrypted_zip_payload_damage_without_prior_crc_proof_is_inconclusive(tmp_path):
     archive = _encrypted_zip_with_bad_payload(tmp_path, password="secret")
     out_dir = tmp_path / "out"
-    completed, worker_result = _run_worker(archive, out_dir, format_hint="zip", password="secret")
+    completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip", password="secret")
     fact_bag = FactBag()
     fact_bag.set("archive.password", "secret")
     verification = _verify_worker_output(
@@ -460,7 +460,7 @@ def test_zipcrypto_damage_after_prior_crc_proof_is_damaged(tmp_path):
     data[payload_offset + 12] ^= 0x44
     archive.write_bytes(bytes(data))
 
-    completed, worker_result = _run_worker(
+    completed, worker_result = _run_native_attempt(
         archive,
         tmp_path / "out-first-entry-damaged",
         format_hint="zip",
@@ -484,19 +484,19 @@ def test_encrypted_zip_wrong_password_vs_payload_damage_matrix(tmp_path):
     complete = _encrypted_zip(tmp_path / "complete-encrypted", password="secret", corrupt_payload=False)
     damaged = _encrypted_zip(tmp_path / "damaged-encrypted", password="secret", corrupt_payload=True)
 
-    _complete_completed, complete_wrong = _run_worker(
+    _complete_completed, complete_wrong = _run_native_attempt(
         complete,
         tmp_path / "out-complete-wrong",
         format_hint="zip",
         password="wrong",
     )
-    _damaged_wrong_completed, damaged_wrong = _run_worker(
+    _damaged_wrong_completed, damaged_wrong = _run_native_attempt(
         damaged,
         tmp_path / "out-damaged-wrong",
         format_hint="zip",
         password="wrong",
     )
-    _damaged_ok_completed, damaged_ok = _run_worker(
+    _damaged_ok_completed, damaged_ok = _run_native_attempt(
         damaged,
         tmp_path / "out-damaged-ok",
         format_hint="zip",
@@ -528,7 +528,7 @@ def test_encrypted_zip_wrong_password_vs_payload_damage_matrix(tmp_path):
 def test_huge_declared_zip_member_does_not_inflate_partial_byte_coverage(tmp_path):
     archive = _zip_with_huge_declared_stored_member(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
 
     assert worker_result["status"] == "failed"
@@ -547,7 +547,7 @@ def test_huge_declared_zip_member_does_not_inflate_partial_byte_coverage(tmp_pat
 def test_unicode_reserved_and_long_zip_paths_match_archive_paths(tmp_path):
     archive, names = _zip_with_unicode_reserved_long_paths(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     manifest_path = write_extraction_progress_manifest(
         archive=str(archive),
         out_dir=str(out_dir),
@@ -576,7 +576,7 @@ def test_path_safety_blocks_unsafe_entries_but_counts_them_in_recovery(tmp_path)
     out_dir = tmp_path / "out"
     escape_target = tmp_path / "escape.txt"
 
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
     states = {item.archive_path: item.state for item in verification.file_observations}
 
@@ -597,7 +597,7 @@ def test_windows_reserved_ads_and_case_conflicts_are_counted_as_blocked_or_disti
     archive = _zip_with_windows_reserved_ads_and_case_conflicts(tmp_path)
     out_dir = tmp_path / "out"
 
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip")
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
     states = {item.archive_path: item.state for item in verification.file_observations}
     details = {item.archive_path: item.details for item in verification.file_observations}
@@ -614,7 +614,7 @@ def test_windows_reserved_ads_and_case_conflicts_are_counted_as_blocked_or_disti
     assert "case/a.txt" in states
 
 
-def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path, pipeline_resource_scheduler):
+def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path):
     archive = _zip_with_many_entries(tmp_path, count=260)
     out_dir = tmp_path / "out"
     task = _task(archive)
@@ -635,7 +635,6 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
         RunContext(),
         _FailIfCalledExtractor(archive, out_dir),
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "performance": {
                 "resource_guard": {
@@ -659,7 +658,7 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
     assert not out_dir.exists()
 
 
-def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(tmp_path, pipeline_resource_scheduler):
+def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(tmp_path):
     _require_7z_dll_or_skip()
     archive = _zip_high_compression_resource_guard_sample(tmp_path)
     out_dir = tmp_path / "guarded-native-out"
@@ -668,7 +667,6 @@ def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(
         RunContext(),
         _FailIfCalledExtractor(archive, out_dir),
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "performance": {
                 "precise_resource_min_size_mb": 0,
@@ -704,7 +702,7 @@ def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(
 def test_missing_split_volume_is_not_reported_as_payload_partial(tmp_path):
     archive, part_paths = _seven_zip_missing_middle_volume(tmp_path)
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="7z", part_paths=part_paths)
+    _completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="7z", part_paths=part_paths)
     manifest = write_extraction_progress_manifest(
         archive=str(archive),
         out_dir=str(out_dir),
@@ -736,7 +734,7 @@ def test_sfx_crop_patch_payload_damage_coverage_uses_virtual_zip_not_carrier(tmp
     task.set_archive_state(patched_state)
     out_dir = tmp_path / "out"
 
-    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt_state(task, out_dir, format_hint="zip")
     verification = _verify_worker_output(
         sfx,
         out_dir,
@@ -765,7 +763,7 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
     out_dir = tmp_path / "out"
 
     analysis = ArchiveInputPlanningStage({"input_planning": {"enabled": True}}).plan_task(task)
-    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt_state(task, out_dir, format_hint="zip")
     verification = _verify_worker_output(
         sfx,
         out_dir,
@@ -790,12 +788,12 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
                if source.get("method") == "archive_test_crc")
 
 
-def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_path, pipeline_resource_scheduler):
+def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_path):
     sfx, patch_stack, expected_digest = _sfx_zip_with_payload_damage_and_bad_cd_patch_stack(tmp_path)
     task = _task(sfx, detected_ext="zip")
     task.set_archive_state(ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack))
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt_state(task, out_dir, format_hint="zip")
     verification = _verify_worker_output(sfx, out_dir, worker_result, detected_ext="zip", fact_bag=task.fact_bag)
     result = ExtractionResult(
         success=False,
@@ -811,7 +809,6 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
         RunContext(),
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "extraction": {"content_requirement": "allow_partial"},
             "verification": {"enabled": True, "methods": []},
@@ -833,7 +830,7 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
     assert bad[0]["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
 
 
-def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_resource_scheduler):
+def test_recovery_report_schema_contract_for_partial_result(tmp_path):
     archive, out_dir, _completed, worker_result = _run_payload_damaged_zip_worker(tmp_path)
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
     result = ExtractionResult(
@@ -850,7 +847,6 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_r
         RunContext(),
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "extraction": {"content_requirement": "allow_partial"},
             "verification": {"enabled": True, "methods": []},
@@ -868,7 +864,7 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_r
     assert any(item["archive_path"] == "bad.bin" and item["failure_kind"] for item in report["files"])
 
 
-def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path, pipeline_resource_scheduler):
+def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
     if is_lite_edition():
         pytest.skip("repair system is disabled in Lite edition")
 
@@ -880,7 +876,6 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path, p
         RunContext(),
         extractor,
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 3},
             "verification": {
@@ -894,7 +889,7 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path, p
     runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive, detected_ext="7z")
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert repair_scheduler.calls == 1
@@ -938,7 +933,7 @@ def test_split_concat_ranges_patch_state_reaches_worker_without_full_copy(tmp_pa
     task.all_parts = [str(first), str(second)]
     out_dir = tmp_path / "out"
 
-    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    _completed, worker_result = _run_native_attempt_state(task, out_dir, format_hint="zip")
     verification = _verify_worker_output(
         first,
         out_dir,
@@ -966,8 +961,8 @@ def test_encrypted_sfx_patch_partial_preserves_password_priority(tmp_path):
     state = ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack)
     task.set_archive_state(state)
 
-    _wrong_completed, wrong = _run_worker_state(task, tmp_path / "wrong", format_hint="zip", password="wrong")
-    _ok_completed, ok = _run_worker_state(task, tmp_path / "ok", format_hint="zip", password="secret")
+    _wrong_completed, wrong = _run_native_attempt_state(task, tmp_path / "wrong", format_hint="zip", password="wrong")
+    _ok_completed, ok = _run_native_attempt_state(task, tmp_path / "ok", format_hint="zip", password="secret")
     task.fact_bag.set("archive.password", "secret")
     verification = _verify_worker_output(
         sfx,
@@ -997,7 +992,7 @@ def test_encrypted_sfx_patch_partial_preserves_password_priority(tmp_path):
     assert verification.archive_coverage.failed_files == 1
 
 
-def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path, pipeline_resource_scheduler):
+def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path):
     archive = tmp_path / "tail-missing.7z.001"
     archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
     out_dir = tmp_path / "out"
@@ -1006,7 +1001,6 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
         RunContext(),
         extractor,
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
@@ -1019,7 +1013,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
     )
     task = _task(archive, detected_ext="7z")
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir))
     collected = runner.collect_result(task, outcome)
 
     assert collected is None
@@ -1170,7 +1164,7 @@ def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
     assert "f2.bin" not in extracted_names
 
 
-def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path, pipeline_resource_scheduler):
+def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path):
     if is_lite_edition():
         pytest.skip("repair system is disabled in Lite edition")
 
@@ -1208,14 +1202,13 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
         RunContext(),
         extractor,
         _NoNestedOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config=config,
     )
     repair_scheduler = _ApplyRepairedArchiveScheduler(repaired_archive)
     runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive)
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir))
     collected = runner.collect_result(task, outcome)
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
 
@@ -1269,11 +1262,11 @@ def test_main_flow_accepts_best_effort_payload_damage_and_reports_coverage(tmp_p
 def _run_payload_damaged_zip_worker(tmp_path: Path):
     archive = _zip_with_one_bad_payload(tmp_path)
     out_dir = tmp_path / "out"
-    completed, worker_result = _run_worker(archive, out_dir, format_hint="zip", job_id="best-effort-payload-damage")
+    completed, worker_result = _run_native_attempt(archive, out_dir, format_hint="zip", job_id="best-effort-payload-damage")
     return archive, out_dir, completed, worker_result
 
 
-def _run_worker(
+def _run_native_attempt(
     archive: Path,
     out_dir: Path,
     *,
@@ -1306,7 +1299,7 @@ def _run_worker(
     return completed, _worker_result(completed.stdout)
 
 
-def _run_worker_state(
+def _run_native_attempt_state(
     task: ArchiveTask,
     out_dir: Path,
     *,
@@ -2072,7 +2065,7 @@ class _StructureFailureThenWorkerExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         self.calls += 1
         if self.calls == 1:
             return ExtractionResult(
@@ -2092,7 +2085,7 @@ class _StructureFailureThenWorkerExtractor:
             )
 
         archive_path = Path(task.archive_input().entry_path)
-        _completed, worker_result = _run_worker(archive_path, Path(out_dir), format_hint="zip")
+        _completed, worker_result = _run_native_attempt(archive_path, Path(out_dir), format_hint="zip")
         manifest = write_extraction_progress_manifest(
             archive=str(archive_path),
             out_dir=str(out_dir),
@@ -2160,7 +2153,7 @@ class _AlwaysFailingExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         return ExtractionResult(
             success=False,
             archive=str(self.archive),
@@ -2193,7 +2186,7 @@ class _FailIfCalledExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         raise AssertionError("resource-guarded task should not reach extraction")
 
 
@@ -2209,7 +2202,7 @@ class _NoopExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         raise AssertionError("noop extractor should not be called")
 
 
@@ -2250,7 +2243,7 @@ class _MissingVolumePartialExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         output = Path(out_dir)
         output.mkdir(parents=True, exist_ok=True)
         (output / "prefix-file.bin").write_bytes(b"partial prefix")

@@ -77,7 +77,7 @@ class _FakeSevenZipRunner:
         self.sources = []
         self.include_output_counts = bool(include_output_counts)
 
-    def run_extract(self, *, out_dir, task, **_kwargs):
+    def extract_attempt(self, *, out_dir, task, **_kwargs):
         state = task.archive_state()
         source = state.to_archive_input_descriptor().to_dict()
         self.sources.append(source)

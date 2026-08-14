@@ -323,21 +323,27 @@ def _inspection_cache_stats(engine: PipelineEngine | None) -> dict[str, Any]:
         return {}
 
 
-def _persistent_worker_pool_stats(engine: PipelineEngine | None) -> dict[str, Any]:
-    """Observe the explicit persistent 7-Zip worker pool without retaining workers."""
+def _native_worker_stats(engine: PipelineEngine | None) -> dict[str, Any]:
+    """Observe the single native worker and its native-owned job lifecycle."""
 
     try:
         services = getattr(engine, "_services", None)
         runner = getattr(services, "sevenzip_runner", None)
-        pool = getattr(runner, "_worker_pool", None)
-        if pool is None:
+        holder = getattr(runner, "_worker_holder", None)
+        if holder is None:
             return {}
-        with pool._condition:
+        with holder._lock:
+            worker = holder._worker
+            if worker is None:
+                return {"worker_alive": False, "closed": bool(holder._closed)}
+            with worker._dispatch_lock:
+                states = [dict(state) for state in worker._job_states.values()]
             return {
-                "max_workers": int(pool.max_workers),
-                "total": int(pool._total),
-                "idle": len(pool._idle),
-                "closed": bool(pool._closed),
+                "worker_alive": bool(worker.is_alive()),
+                "worker_epoch": worker.worker_epoch,
+                "active_jobs": len(states),
+                "job_states": sorted(state.get("state", "") for state in states),
+                "closed": bool(holder._closed),
             }
     except (AttributeError, TypeError, ValueError):
         return {}
@@ -355,7 +361,7 @@ def _known_cache_stats(engine: PipelineEngine | None) -> dict[str, Any]:
         "inspection": _inspection_cache_stats(engine),
         "native_seven_zip": _native_seven_zip_cache_stats(),
         "watch_filesystem": _watch_filesystem_cache_stats(),
-        "persistent_worker_pool": _persistent_worker_pool_stats(engine),
+        "native_worker": _native_worker_stats(engine),
     }
 
 
@@ -422,13 +428,10 @@ def _engine_stats(engine: PipelineEngine | None) -> dict[str, Any]:
     queue = getattr(engine, "_queue", None)
     if queue is not None:
         result["queue_size"] = int(queue.qsize())
-    for name in (
-        "_active_request_count",
-        "_pending_request_count",
-        "_outstanding_request_count",
-    ):
-        if hasattr(engine, name):
-            result[name.removeprefix("_")] = int(getattr(engine, name))
+    dispatch_condition = getattr(engine, "_dispatch_condition", None)
+    if dispatch_condition is not None:
+        with dispatch_condition:
+            result["request_threads"] = len(getattr(engine, "_request_threads", ()))
     return result
 
 

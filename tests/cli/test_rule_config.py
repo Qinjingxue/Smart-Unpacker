@@ -86,9 +86,9 @@ def test_config_validate_checks_verification_methods_are_registered():
     assert any("Unknown verification method" in error for error in result["errors"])
 
 
-def test_scheduler_profile_override_expands_scheduler_config():
+def test_worker_profile_override_expands_worker_config():
     class Args:
-        scheduler_profile = "aggressive"
+        worker_profile = "aggressive"
         recursive_extract = None
         archive_cleanup_mode = None
         flatten_single_directory = None
@@ -97,13 +97,13 @@ def test_scheduler_profile_override_expands_scheduler_config():
     config = {}
     overrides = apply_runtime_config_overrides(config, Args())
 
-    assert overrides["scheduler_profile"] == "aggressive"
-    assert config["performance"] == {"scheduler_profile": "aggressive"}
+    assert overrides["worker_profile"] == "aggressive"
+    assert config["performance"] == {"worker": {"profile": "aggressive"}}
 
 
 def test_write_manifest_override_enables_extraction_manifest_files():
     class Args:
-        scheduler_profile = None
+        worker_profile = None
         recursive_extract = None
         archive_cleanup_mode = None
         flatten_single_directory = None
@@ -116,7 +116,7 @@ def test_write_manifest_override_enables_extraction_manifest_files():
     assert config["extraction"]["write_progress_manifest"] is True
 
 
-def test_effective_config_includes_thresholds_native_scheduler_and_rule_pipeline():
+def test_effective_config_includes_thresholds_native_worker_and_rule_pipeline():
     config = _payload()
     config["filesystem"] = {
         "directory_scan_mode": "-",
@@ -125,14 +125,14 @@ def test_effective_config_includes_thresholds_native_scheduler_and_rule_pipeline
         ]
     }
     config["thresholds"] = {"archive_score_threshold": 6, "maybe_archive_threshold": 3}
-    config["performance"] = {"scheduler_profile": "auto"}
+    config["performance"] = {"worker": {"profile": "auto"}}
 
     effective = build_effective_config(config)
 
     assert effective["thresholds"]["archive_score_threshold"] == 6
     assert effective["size_range_min_bytes"] == 1048576
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
-    assert effective["scheduler"]["scheduler_profile"] == "auto"
-    assert effective["scheduler"]["controller"] == "native_worker"
-    assert effective["scheduler"]["machine_profile"] == "selected_by_worker"
+    assert effective["worker"]["profile"] == "auto"
+    assert effective["worker"]["controller"] == "native_worker"
+    assert effective["worker"]["machine_profile"] == "selected_by_worker"
     assert effective["detection"]["rule_pipeline"]["precheck"][0]["name"] == "embedded_payload_identity"

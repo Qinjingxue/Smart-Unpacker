@@ -56,7 +56,7 @@ python sunpack.py extract [options] <paths...>
 | `--ask-pw` | 在终端交互输入密码，空行结束。 |
 | `--no-builtin-pw` | 禁用内置高频密码表。 |
 | `--recur VALUE` | 覆盖递归解压设置。当前解析器接受正整数、`*`、`?`。 |
-| `--sched {auto,conservative,aggressive}` | 覆盖并发调度档位。 |
+| `--worker-profile {auto,conservative,aggressive}` | 覆盖 native worker 的初始性能档位；运行时并发仍由 worker 自己根据资源和在线 profile 调整。 |
 | `--cleanup VALUE` | 覆盖成功解压后的原压缩包处理方式：`d` 删除，`r` 回收站，`k` 不动。 |
 | `--direct-file` | 把每个输入路径当作归档文件，跳过初始目录扫描和 detection，直接进入 analysis -> extraction -> verification/repair -> postprocess。只适合明确指定文件。 |
 | `--flatten` | 解压后扁平化单一顶层目录。 |
@@ -73,7 +73,7 @@ python sunpack.py extract [options] <paths...>
 ```powershell
 python sunpack.py extract D:\Downloads
 python sunpack.py extract D:\A.7z -p 123456 -p secret
-python sunpack.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --sched auto
+python sunpack.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --worker-profile auto
 python sunpack.py extract D:\Nested --recur * --no-flatten
 python sunpack.py extract --direct-file D:\MaybeArchive.bin
 ```
@@ -141,9 +141,9 @@ python sunpack.py inspect D:\Downloads -v
 python sunpack.py watch [options] <paths...>
 ```
 
-`watch` 会监听一个或多个文件夹。服务启动时只创建一个常驻 pipeline engine；文件持续静默达到配置阈值后提交到 engine，短时间内的多个提交由 engine 自动组成微批。相同快照不因解压结果而重试，新分卷和密码源变化会开启新的活跃周期。
+`watch` 会监听一个或多个文件夹。服务启动时只创建一个常驻 pipeline engine 和一个 native worker；文件持续静默达到配置阈值后提交到 engine，多个提交直接进入 worker 内部队列，由 worker 的线程调度器统一处理。相同快照不因解压结果而重试，新分卷和密码源变化会开启新的活跃周期。
 
-常用参数与 `extract` 基本一致，包括密码、输出目录、递归、调度档位、清理策略、JSON/quiet/verbose/pause 等。
+常用参数与 `extract` 基本一致，包括密码、输出目录、递归、worker profile、清理策略、JSON/quiet/verbose/pause 等。
 
 示例：
 

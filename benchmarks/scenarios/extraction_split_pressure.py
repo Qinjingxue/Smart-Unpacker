@@ -598,12 +598,12 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     for pressure_case in pressure_cases:
         move_case_files_to_batch(pressure_case, batch_dir)
 
-    scan_config = archive_pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")
+    scan_config = archive_pressure_config(passwords=PASSWORD_TRY_LIST, worker_profile="auto")
     started = time.perf_counter()
     scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineEngine(archive_pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).start()
+    runner = PipelineEngine(archive_pressure_config(passwords=PASSWORD_TRY_LIST, worker_profile="auto")).start()
     pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
     try:

@@ -20,23 +20,7 @@ def normalize_recursive_extract(value: Any) -> dict[str, Any]:
     return {"mode": "fixed", "max_rounds": rounds}
 
 
-DEFAULT_PIPELINE_CONFIG = advanced_config_value(("pipeline",))
 DEFAULT_NESTED_EXTRACTION_POLICY = advanced_config_value(("nested_extraction_policy",))
-
-
-def normalize_pipeline_config(value: Any) -> dict[str, Any]:
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise ValueError("pipeline must be an object")
-    config = {**DEFAULT_PIPELINE_CONFIG, **value}
-    try:
-        config["batch_window_seconds"] = max(0.0, float(config["batch_window_seconds"]))
-        config["max_batch_requests"] = max(1, int(config["max_batch_requests"]))
-        config["queue_capacity"] = max(1, int(config["queue_capacity"]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("pipeline concurrency fields must be numeric") from exc
-    return config
 
 
 def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
@@ -100,12 +84,6 @@ CONFIG_FIELDS = (
         path=("recursive_extract",),
         default=advanced_config_value(("recursive_extract",)),
         normalize=normalize_recursive_extract,
-        owner=__name__,
-    ),
-    ConfigField(
-        path=("pipeline",),
-        default=DEFAULT_PIPELINE_CONFIG,
-        normalize=normalize_pipeline_config,
         owner=__name__,
     ),
     ConfigField(

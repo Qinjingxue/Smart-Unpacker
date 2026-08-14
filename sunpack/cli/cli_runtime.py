@@ -21,21 +21,19 @@ def build_effective_config(config: dict) -> dict[str, Any]:
             size_range_min_bytes = size_rule["gte"]
         elif "greater_than_or_equal" in size_rule:
             size_range_min_bytes = size_rule["greater_than_or_equal"]
-    requested_scheduler_profile = (
-        config.get("performance", {}).get("scheduler_profile", "auto")
-        if isinstance(config.get("performance"), dict)
-        else "auto"
-    )
+    performance = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
+    worker = performance.get("worker", {}) if isinstance(performance.get("worker"), dict) else {}
+    requested_worker_profile = worker.get("profile", "auto")
     return {
         "thresholds": {
             "archive_score_threshold": thresholds.get("archive_score_threshold", 6),
             "maybe_archive_threshold": thresholds.get("maybe_archive_threshold", 3),
         },
         "size_range_min_bytes": size_range_min_bytes,
-        "scheduler_profile": requested_scheduler_profile,
-        "scheduler": {
+        "worker_profile": requested_worker_profile,
+        "worker": {
             "controller": "native_worker",
-            "scheduler_profile": requested_scheduler_profile,
+            "profile": requested_worker_profile,
             "machine_profile": "selected_by_worker",
         },
         "detection": {
@@ -159,9 +157,9 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     if getattr(args, "recursive_extract", None) is not None:
         overrides["recursive_extract"] = args.recursive_extract
         payload["recursive_extract"] = normalize_config_value(("recursive_extract",), args.recursive_extract)
-    if getattr(args, "scheduler_profile", None) is not None:
-        overrides["scheduler_profile"] = args.scheduler_profile
-        section("performance", {})["scheduler_profile"] = args.scheduler_profile
+    if getattr(args, "worker_profile", None) is not None:
+        overrides["worker_profile"] = args.worker_profile
+        section("performance", {}).setdefault("worker", {})["profile"] = args.worker_profile
     if getattr(args, "archive_cleanup_mode", None) is not None:
         overrides["archive_cleanup_mode"] = args.archive_cleanup_mode
         section("post_extract", {})["archive_cleanup_mode"] = normalize_config_value(

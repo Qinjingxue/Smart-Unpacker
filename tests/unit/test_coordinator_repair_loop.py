@@ -114,7 +114,7 @@ class _FakeExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         return self.results.pop(0)
 
 
@@ -127,7 +127,7 @@ class _ArchiveInputExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         descriptor = task.archive_input()
         archive = descriptor.entry_path or task.main_path
         Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -150,7 +150,7 @@ class _PatchPlanExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         archive = task.archive_input().entry_path or task.main_path
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         if Path(archive).name == self.accept_name:

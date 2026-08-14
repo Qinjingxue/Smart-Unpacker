@@ -78,7 +78,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             extractor.metadata_scanner = FakeFailingMetadataScanner()
             extractor.rename_scheduler = FakeStager()
             calls = []
-            extractor.sevenzip_runner.run_extract = lambda **kwargs: (
+            extractor.sevenzip_runner.extract_attempt = lambda **kwargs: (
                 calls.append(kwargs) or SimpleNamespace(returncode=0, stdout="", stderr="")
             )
             task = ArchiveTask(
@@ -128,7 +128,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             )
 
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
-            extractor.sevenzip_runner.run_extract = lambda **_kwargs: succeeded
+            extractor.sevenzip_runner.extract_attempt = lambda **_kwargs: succeeded
             result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
@@ -158,7 +158,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
             attempts = iter([failed, succeeded])
-            extractor.sevenzip_runner.run_extract = lambda **_kwargs: next(attempts)
+            extractor.sevenzip_runner.extract_attempt = lambda **_kwargs: next(attempts)
             extractor.retry_policy.backoff = lambda _retry_count: None
             result = extractor.extract(task, str(out_dir))
 
@@ -193,7 +193,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            extractor.sevenzip_runner.run_extract = lambda **_kwargs: fake_run()
+            extractor.sevenzip_runner.extract_attempt = lambda **_kwargs: fake_run()
             extractor.retry_policy.backoff = lambda _retry_count: None
             result = extractor.extract(task, str(out_dir))
 
@@ -222,7 +222,7 @@ class ExtractionExecutionTests(unittest.TestCase):
                 calls += 1
                 return failed
 
-            extractor.sevenzip_runner.run_extract = fake_extract
+            extractor.sevenzip_runner.extract_attempt = fake_extract
             result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
@@ -291,7 +291,7 @@ class ExtractionExecutionTests(unittest.TestCase):
 
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
-            extractor.sevenzip_runner.run_extract = fake_extract
+            extractor.sevenzip_runner.extract_attempt = fake_extract
 
             result = extractor.extract(task, str(out_dir))
 
@@ -345,7 +345,7 @@ class ExtractionExecutionTests(unittest.TestCase):
 
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
-            extractor.sevenzip_runner.run_extract = fake_extract
+            extractor.sevenzip_runner.extract_attempt = fake_extract
 
             result = extractor.extract(task, str(out_dir))
 
@@ -368,7 +368,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            extractor.sevenzip_runner.run_extract = lambda **_kwargs: failed
+            extractor.sevenzip_runner.extract_attempt = lambda **_kwargs: failed
             extractor.retry_policy.backoff = lambda _retry_count: None
             result = extractor.extract(task, str(out_dir))
 

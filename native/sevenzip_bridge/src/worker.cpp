@@ -36,21 +36,6 @@
 
 namespace {
 
-std::string read_stdin() {
-    std::ostringstream buffer;
-    buffer << std::cin.rdbuf();
-    return buffer.str();
-}
-
-bool has_arg(int argc, char** argv, const std::string& expected) {
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] && expected == argv[i]) {
-            return true;
-        }
-    }
-    return false;
-}
-
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -1199,8 +1184,8 @@ unsigned long long native_total_memory_bytes() noexcept {
     return 0;
 }
 
-std::string native_scheduler_profile() {
-    const char* configured = std::getenv("SUNPACK_NATIVE_SCHEDULER_PROFILE");
+std::string native_worker_profile() {
+    const char* configured = std::getenv("SUNPACK_NATIVE_WORKER_PROFILE");
     if (configured && *configured &&
         (std::string(configured) == "aggressive" || std::string(configured) == "conservative")) {
         return configured;
@@ -1215,7 +1200,7 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
     std::size_t max_active_jobs
 ) noexcept {
     sunpack::sevenzip::NativeRuntimeConfig config;
-    const bool aggressive = native_scheduler_profile() == "aggressive";
+    const bool aggressive = native_worker_profile() == "aggressive";
     config.adaptive_enabled = configured_native_adaptive_enabled();
     config.initial_active_jobs = configured_native_initial_active_jobs();
     if (config.initial_active_jobs == 0) {
@@ -1258,7 +1243,7 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         "SUNPACK_NATIVE_HIGH_FLOOR_JOBS",
         aggressive ? std::size_t{6} : std::size_t{3});
     config.idle_decay_seconds = configured_native_double(
-        "SUNPACK_NATIVE_IDLE_DECAY_SECONDS",
+        "SUNPACK_NATIVE_WORKER_IDLE_DECAY_SECONDS",
         config.idle_decay_seconds,
         0.0,
         86400.0);
@@ -1342,7 +1327,7 @@ public:
                     "\",\"status\":\"failed\",\"native_status\":\"resource_limit\","
                     "\"failure_stage\":\"native_admission\",\"failure_kind\":\"memory_budget\","
                     "\"message\":\"job memory reservation exceeds native hard budget\"}");
-                print_scheduler_event(job_id, "job_finished", metadata);
+                print_worker_event(job_id, "job_finished", metadata);
                 return future;
             }
             if (queue_.size() >= queue_capacity_) {
@@ -1352,7 +1337,7 @@ public:
                     "\",\"status\":\"failed\",\"native_status\":\"backpressure\","
                     "\"retryable\":true,\"failure_stage\":\"native_admission\","
                     "\"failure_kind\":\"queue_capacity\",\"message\":\"native job queue is full\"}");
-                print_scheduler_event(job_id, "job_finished", metadata);
+                print_worker_event(job_id, "job_finished", metadata);
                 return future;
             }
             FairnessState& fairness = fairness_[metadata.request_id];
@@ -1369,7 +1354,7 @@ public:
                 next_sequence_++,
             });
         }
-        print_scheduler_event(job_id, "job_queued", metadata);
+        print_worker_event(job_id, "job_queued", metadata);
         condition_.notify_one();
         return future;
     }
@@ -1569,7 +1554,7 @@ private:
         return selected;
     }
 
-    void print_scheduler_event(
+    void print_worker_event(
         const std::string& job_id,
         const char* event,
         const JobMetadata& metadata,
@@ -1606,7 +1591,7 @@ private:
         std::size_t active_memory,
         std::size_t active_io_weight = 0
     ) const noexcept {
-        print_scheduler_event(
+        print_worker_event(
             json_string_field(job.request, "job_id", ""),
             event,
             job.metadata,
@@ -1889,7 +1874,7 @@ std::size_t auto_native_worker_count() noexcept {
 }
 
 std::size_t configured_native_worker_count() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_EXTRACT_THREADS");
+    const char* value = std::getenv("SUNPACK_NATIVE_WORKER_THREAD_CAPACITY");
     if (!value || !*value) {
         return auto_native_worker_count();
     }
@@ -1904,7 +1889,11 @@ std::size_t configured_native_worker_count() noexcept {
     return (std::min)(static_cast<std::size_t>(configured), std::size_t{32});
 }
 
-int run_message(const std::string& request, NativeJobExecutor& executor, bool wait_for_result) {
+int run_message(
+    const std::string& request,
+    NativeJobExecutor& executor,
+    std::vector<std::future<int>>& pending
+) {
     const std::string command = json_string_field(request, "worker_command", "");
     if (command == "cancel") {
         const std::string job_id = json_string_field(request, "job_id", "");
@@ -1913,43 +1902,16 @@ int run_message(const std::string& request, NativeJobExecutor& executor, bool wa
             "\",\"accepted\":" + std::string(accepted ? "true" : "false") + "}");
         return accepted ? 0 : 1;
     }
-    if (command != "batch_extract") {
-        auto future = executor.submit(request);
-        return wait_for_result ? future.get() : 0;
+    if (command == "shutdown") {
+        return 0;
     }
-    const std::string batch_id = json_string_field(request, "batch_id", "");
-    const auto jobs = json_object_array_field(request, "jobs");
-    if (jobs.empty()) {
-        print_json_line("{\"type\":\"batch_result\",\"batch_id\":\"" + json_escape(batch_id) +
-            "\",\"status\":\"error\",\"message\":\"jobs must be a non-empty array\"}");
-        return 2;
-    }
-    std::vector<std::future<int>> futures;
-    futures.reserve(jobs.size());
-    for (const auto& job : jobs) {
-        futures.push_back(executor.submit(job));
-    }
-    std::size_t failed = 0;
-    for (auto& future : futures) {
-        if (future.get() != 0) {
-            ++failed;
-        }
-    }
-    print_json_line("{\"type\":\"batch_result\",\"batch_id\":\"" + json_escape(batch_id) +
-        "\",\"status\":\"" + (failed ? "partial" : "ok") + "\",\"job_count\":" +
-        std::to_string(jobs.size()) + ",\"failed_count\":" + std::to_string(failed) + "}");
-    return failed ? 1 : 0;
+    pending.push_back(executor.submit(request));
+    return 0;
 }
 
-int main(int argc, char** argv) {
+int main() {
     NativeJobExecutor executor(configured_native_worker_count());
-    const bool persistent = has_arg(argc, argv, "--persistent");
-    if (!persistent) {
-        const int code = run_message(read_stdin(), executor, true);
-        executor.stop();
-        return code;
-    }
-
+    std::vector<std::future<int>> pending;
     std::string line;
     while (std::getline(std::cin, line)) {
         line.erase(line.begin(), std::find_if(line.begin(), line.end(), [](unsigned char ch) {
@@ -1959,12 +1921,17 @@ int main(int argc, char** argv) {
             continue;
         }
         const bool shutdown = json_string_field(line, "worker_command", "") == "shutdown";
-        const int code = run_message(line, executor, shutdown);
+        const int code = run_message(line, executor, pending);
         if (shutdown) {
             executor.stop();
             return code;
         }
     }
     executor.stop();
+    for (auto& future : pending) {
+        if (future.get() != 0) {
+            return 1;
+        }
+    }
     return 0;
 }

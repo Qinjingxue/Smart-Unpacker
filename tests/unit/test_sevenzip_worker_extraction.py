@@ -11,7 +11,12 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInput
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker, _apply_native_environment
+from sunpack.extraction.internal.sevenzip.sevenzip_runner import (
+    SevenZipRunner,
+    _NativeWorkerProcess,
+    _apply_native_environment,
+)
+from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_result_payload
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from tests.helpers.tool_config import get_test_tools
@@ -281,7 +286,7 @@ def test_worker_candidate_batch_rejects_all_candidates_without_full_extraction(t
     assert not (out_dir / filename).exists()
 
 
-def test_persistent_worker_result_escapes_control_characters(tmp_path):
+def test_native_worker_result_escapes_control_characters(tmp_path):
     worker_path = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
     archive = tmp_path / "control-name.zip"
@@ -293,32 +298,27 @@ def test_persistent_worker_result_escapes_control_characters(tmp_path):
         "archive_path": str(archive),
         "output_dir": str(tmp_path / "out"),
     }
-    runner = ExtractionScheduler(
-        max_retries=1,
-        process_config={"max_extract_task_seconds": 2, "process_sample_interval_ms": 10},
-    ).sevenzip_runner
-    persistent = _PersistentWorker(worker_path, None)
-
+    runner = SevenZipRunner({"max_task_seconds": 2, "watchdog_interval_ms": 10})
+    runner.worker_path = worker_path
+    runner.seven_zip_dll_path = seven_zip_dll
     try:
-        persistent.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-        stdout, stderr, returncode, reusable, result_payload, _progress_events = runner._read_persistent_worker_result(  # noqa: SLF001
-            persistent,
-            runtime_scheduler=None,
+        completed = runner.submit_attempt(
+            payload,
+            startupinfo=None,
             task=_task(archive),
-        )
+        ).result(timeout=10)
     finally:
-        persistent.close()
+        runner.close()
 
-    worker_result = result_payload
-    assert returncode != 0
-    assert reusable is True
-    assert "timed out" not in stderr.lower()
+    worker_result = worker_result_payload(completed)
+    assert completed.returncode != 0
+    assert "timed out" not in completed.stderr.lower()
     assert worker_result["job_id"] == "control-name"
     assert worker_result["failed_item"] == "control-\x01-name.txt"
     assert worker_result["diagnostics"]["failed_item"]["path"] == "control-\x01-name.txt"
 
 
-def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+def test_native_worker_starts_in_neutral_working_directory(tmp_path, monkeypatch):
     captured = {}
 
     class StartObserved(RuntimeError):
@@ -335,7 +335,7 @@ def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeyp
     monkeypatch.setattr("sunpack.extraction.internal.sevenzip.sevenzip_runner.subprocess.Popen", fake_popen)
 
     with pytest.raises(StartObserved):
-        _PersistentWorker("worker.exe", None)
+        _NativeWorkerProcess("worker.exe", None)
 
     assert captured["cwd"] == str(tmp_path)
 
@@ -343,21 +343,21 @@ def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeyp
 def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     environment = {
         "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES": "1",
-        "SUNPACK_NATIVE_EXTRACT_THREADS": "8",
+        "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY": "8",
     }
 
     _apply_native_environment(
         environment,
         {
-            "native_extract_threads": 0,
-            "native_memory_budget_bytes": 0,
-            "native_adaptive_enabled": True,
+            "thread_capacity": 0,
+            "memory_budget_bytes": 0,
+            "adaptive_enabled": True,
             "scale_up_threshold_mb_s": 20,
         },
     )
 
     assert "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES" not in environment
-    assert "SUNPACK_NATIVE_EXTRACT_THREADS" not in environment
+    assert "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY" not in environment
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
     assert environment["SUNPACK_NATIVE_IO_SCALE_UP_BYTES"] == str(20 * 1024 * 1024)
 
@@ -751,30 +751,41 @@ def test_worker_applies_explicit_shift_jis_item_paths(tmp_path):
     assert (out_dir / "日本語" / "説明.txt").read_bytes() == payload_bytes
 
 
-def test_worker_batch_isolates_failed_job_and_continues(tmp_path):
+def test_native_worker_queue_isolates_failed_job_and_continues(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
     archive = tmp_path / "ok.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("ok.txt", "batch payload")
-    request = {
-        "worker_command": "batch_extract",
-        "batch_id": "isolation",
-        "jobs": [
-            {"job_id": "bad", "seven_zip_dll_path": seven_zip_dll, "archive_path": str(tmp_path / "missing.zip"), "output_dir": str(tmp_path / "bad")},
-            {"job_id": "ok", "seven_zip_dll_path": seven_zip_dll, "archive_path": str(archive), "output_dir": str(tmp_path / "ok")},
-        ],
-    }
+    runner = SevenZipRunner({"thread_capacity": 2})
+    runner.worker_path = worker
+    runner.seven_zip_dll_path = seven_zip_dll
+    try:
+        bad = runner.submit_attempt(
+            {
+                "job_id": "bad",
+                "seven_zip_dll_path": seven_zip_dll,
+                "archive_path": str(tmp_path / "missing.zip"),
+                "part_paths": [str(tmp_path / "missing.zip")],
+                "output_dir": str(tmp_path / "bad"),
+            },
+            task=_task(tmp_path / "missing.zip"),
+        ).result(timeout=10)
+        good = runner.submit_attempt(
+            {
+                "job_id": "ok",
+                "seven_zip_dll_path": seven_zip_dll,
+                "archive_path": str(archive),
+                "part_paths": [str(archive)],
+                "output_dir": str(tmp_path / "ok"),
+            },
+            task=_task(archive),
+        ).result(timeout=10)
+    finally:
+        runner.close()
 
-    result = subprocess.run([worker], input=json.dumps(request), capture_output=True, text=True, encoding="utf-8")
-    messages = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
-    results = {message["job_id"]: message for message in messages if message.get("type") == "result"}
-    batch = next(message for message in messages if message.get("type") == "batch_result")
-
-    assert results["bad"]["status"] == "failed"
-    assert results["ok"]["status"] == "ok"
-    assert batch["status"] == "partial"
-    assert batch["failed_count"] == 1
+    assert worker_result_payload(bad)["status"] == "failed"
+    assert worker_result_payload(good)["status"] == "ok"
     assert (tmp_path / "ok" / "ok.txt").read_text(encoding="utf-8") == "batch payload"
 
 
@@ -800,7 +811,7 @@ def test_extraction_scheduler_classifies_malformed_worker_output_as_process_exit
     worker.write_text("@echo not-json\r\n@exit /b 2\r\n", encoding="utf-8")
     archive = tmp_path / "sample.7z"
     archive.write_bytes(b"not used")
-    scheduler = ExtractionScheduler(max_retries=1, process_config={"persistent_workers": False})
+    scheduler = ExtractionScheduler(max_retries=1)
     scheduler.sevenzip_runner.worker_path = str(worker)
 
     try:
@@ -809,8 +820,8 @@ def test_extraction_scheduler_classifies_malformed_worker_output_as_process_exit
         scheduler.close()
 
     assert result.success is False
-    assert result.diagnostics["failure_stage"] == "worker_exit"
-    assert result.diagnostics["failure_kind"] == "process_exit"
+    assert result.diagnostics["failure_stage"] == "worker_communication"
+    assert result.diagnostics["failure_kind"] == "worker_lost"
     assert result.diagnostics["process_failure"]["message"]
 
 
@@ -820,30 +831,19 @@ def test_sevenzip_runner_observed_process_timeout_reports_process_timeout(tmp_pa
     scheduler = ExtractionScheduler(
         max_retries=1,
         process_config={
-            "persistent_workers": False,
-            "max_extract_task_seconds": 0.1,
-            "process_sample_interval_ms": 10,
+            "max_task_seconds": 0.1,
+            "watchdog_interval_ms": 10,
+            "cancel_grace_seconds": 0.5,
         },
     )
-    process = subprocess.Popen(
-        [str(worker)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-    )
-
-    stdout, stderr = scheduler.sevenzip_runner.communicate_observed_process(process, runtime_scheduler=None, task=_task(worker))
+    scheduler.sevenzip_runner.worker_path = str(worker)
     try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        result = scheduler.extract(_task(worker), str(tmp_path / "out"))
     finally:
         scheduler.close()
 
-    assert stdout == ""
-    assert "timed out" in stderr
-    assert process.returncode == -101
+    assert result.success is False
+    assert result.diagnostics["process_failure"]["failure_kind"] == "timeout"
 
 
 def _task(path, archive_input=None):

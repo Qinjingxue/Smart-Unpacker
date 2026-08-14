@@ -140,7 +140,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("--color", result.stdout)
         self.assertIn("--recur", result.stdout)
-        self.assertIn("--sched", result.stdout)
+        self.assertIn("--worker-profile", result.stdout)
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
         self.assertIn("--write-manifest", result.stdout)

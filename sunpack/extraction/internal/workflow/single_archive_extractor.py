@@ -59,7 +59,6 @@ class SingleArchiveExtractor:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         *,
         allow_embedded_segments: bool = True,
         phase_timer: Callable[..., Any] | None = None,
@@ -69,7 +68,6 @@ class SingleArchiveExtractor:
             task,
             out_dir,
             split_info=split_info,
-            runtime_scheduler=runtime_scheduler,
             allow_embedded_segments=allow_embedded_segments,
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
@@ -79,7 +77,7 @@ class SingleArchiveExtractor:
         except StopIteration as completed:
             return completed.value
         while True:
-            result = self.sevenzip_runner.run_extract(**request)
+            result = self.sevenzip_runner.extract_attempt(**request)
             try:
                 request = state.send(result)
             except StopIteration as completed:
@@ -90,7 +88,6 @@ class SingleArchiveExtractor:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         *,
         allow_embedded_segments: bool = True,
         phase_timer: Callable[..., Any] | None = None,
@@ -107,7 +104,6 @@ class SingleArchiveExtractor:
             task,
             out_dir,
             split_info=split_info,
-            runtime_scheduler=runtime_scheduler,
             allow_embedded_segments=allow_embedded_segments,
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
@@ -139,7 +135,7 @@ class SingleArchiveExtractor:
                 ))
                 return
             try:
-                future = self.sevenzip_runner.submit_extract(**request)
+                future = self.sevenzip_runner.submit_attempt(**request)
             except Exception as exc:
                 self.sevenzip_runner.submit_continuation(
                     advance,
@@ -163,7 +159,6 @@ class SingleArchiveExtractor:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         *,
         allow_embedded_segments: bool = True,
         phase_timer: Callable[..., Any] | None = None,
@@ -182,7 +177,6 @@ class SingleArchiveExtractor:
                     out_dir,
                     segments,
                     split_info=split_info,
-                    runtime_scheduler=runtime_scheduler,
                     phase_timer=phase_timer,
                     phase_prefix=f"{phase_prefix}_embedded",
                 ))
@@ -323,7 +317,7 @@ class SingleArchiveExtractor:
                 if correct_pwd is None:
                     err = test_err
                 else:
-                    with _phase(phase_timer, f"{phase_prefix}_sevenzip_run_extract"):
+                    with _phase(phase_timer, f"{phase_prefix}_sevenzip_attempt"):
                         run_result = yield {
                             "archive_path": run_archive,
                             "part_paths": run_parts,
@@ -333,7 +327,6 @@ class SingleArchiveExtractor:
                             "selected_codepage": selected_codepage,
                             "decoded_names": filename_encoding.decoded_names,
                             "startupinfo": startupinfo,
-                            "runtime_scheduler": runtime_scheduler,
                             "task": task,
                             "phase_timer": phase_timer,
                             "phase_prefix": f"{phase_prefix}_sevenzip",
@@ -855,7 +848,6 @@ class SingleArchiveExtractor:
         segments: list[dict[str, Any]],
         *,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         phase_timer: Callable[..., Any] | None = None,
         phase_prefix: str = "extract_embedded",
     ) -> ExtractionResult:
@@ -940,7 +932,6 @@ class SingleArchiveExtractor:
                     task,
                     segment_dir,
                     split_info=split_info,
-                    runtime_scheduler=runtime_scheduler,
                     allow_embedded_segments=False,
                     phase_timer=phase_timer,
                     phase_prefix=f"{phase_prefix}_segment_extract",

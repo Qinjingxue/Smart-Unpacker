@@ -137,7 +137,7 @@ def test_collect_result_applies_main_pipeline_cleanup_after_diagnostics(tmp_path
     assert runner.context.failed_tasks == ["broken.zip [damaged]"]
 
 
-def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, pipeline_resource_scheduler):
+def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path):
     if is_lite_edition():
         pytest.skip("repair system is disabled in Lite edition")
 
@@ -159,7 +159,7 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, 
         def default_output_dir_for_task(self, _task):
             return str(output)
 
-        def extract(self, _task, out_dir, runtime_scheduler=None):
+        def extract(self, _task, out_dir):
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             (Path(out_dir) / "empty.txt").write_bytes(b"")
             return ExtractionResult(
@@ -188,13 +188,12 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, 
         RunContext(),
         Extractor(),
         NestedOutputScanPolicy({}),
-        pipeline_resource_scheduler,
         config={},
     )
     runner.verifier = RepairVerifier()
     runner._repair_after_verification_decision_with_beam = lambda *args, **kwargs: False
 
-    outcome = runner._extract_verify_with_retries(task, str(output), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(output))
     outcome.planned_out_dir = str(output)
     runner.collect_result(task, outcome)
 

@@ -85,23 +85,15 @@ class PipelineEngine:
     def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
         self.detection_options = detection_options or DetectionOptions()
-        pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
-        queue_capacity = max(1, int(pipeline_config["queue_capacity"]))
-        self._queue: queue.Queue = queue.Queue(maxsize=queue_capacity)
+        self._queue: queue.Queue = queue.Queue()
         self._services = _PipelineServices(config, self.detection_options)
         self._runtime = self._services
-        self._request_pool = None
         self._request_threads: set[threading.Thread] = set()
         self._request_runtime_factory = _RequestRuntime
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._runtime_cache_lock = threading.RLock()
         self._dispatch_condition = threading.Condition()
-        self._pressure_lock = threading.Lock()
-        self._active_request_count = 0
-        self._pending_request_count = 0
-        self._outstanding_request_count = 0
-        self._active_request_futures: dict[Future, _Submission] = {}
         self._path_leases = _PathLeaseRegistry()
         self._cancel_pending_on_stop = False
         self._password_source_lock = threading.Lock()
@@ -120,11 +112,8 @@ class PipelineEngine:
             return list(self._recent_passwords)
 
     def is_idle(self) -> bool:
-        with self._pressure_lock:
-            return (
-                getattr(self, "_outstanding_request_count", self._active_request_count) == 0
-                and self._queue.empty()
-            )
+        with self._dispatch_condition:
+            return not self._request_threads and self._queue.empty()
 
     def start(self) -> "PipelineEngine":
         with self._lifecycle_lock:
@@ -170,9 +159,7 @@ class PipelineEngine:
             with self._lifecycle_lock:
                 if not self._started or not self._accepting:
                     raise RuntimeError("PipelineEngine must be started before submit")
-                self._change_outstanding_request_count(1)
                 self._queue.put(submission)
-                self._sync_pipeline_pressure()
         return PipelineHandle(self, submission)
 
     def clear_runtime_caches(self) -> dict:
@@ -266,15 +253,11 @@ class PipelineEngine:
                     self._queue.task_done()
                     break
                 pending.append(item)
-            self._set_pending_request_count(len(pending))
-
             if stopping and self._cancel_pending_on_stop:
                 for submission in pending:
                     submission.future.cancel()
                     self._queue.task_done()
-                    self._change_outstanding_request_count(-1)
                 pending.clear()
-                self._set_pending_request_count(0)
 
             scheduled = False
             while pending:
@@ -291,25 +274,18 @@ class PipelineEngine:
                 if index is None:
                     break
                 submission = pending.pop(index)
-                self._set_pending_request_count(len(pending))
-                worker_future = Future()
                 worker_thread = threading.Thread(
                     target=self._execute_submission_thread,
-                    args=(submission, worker_future),
+                    args=(submission,),
                     name=f"sunpack-request-{submission.request_id[:8]}",
                     daemon=True,
                 )
-                self._request_threads.add(worker_thread)
                 with self._dispatch_condition:
-                    self._active_request_futures[worker_future] = submission
-                    active = len(self._active_request_futures)
-                self._set_active_request_count(active)
-                worker_future.add_done_callback(self._request_finished)
+                    self._request_threads.add(worker_thread)
                 worker_thread.start()
                 scheduled = True
 
             if stopping and not pending and self._active_count() == 0:
-                self._set_active_request_count(0)
                 return
             if not scheduled:
                 with self._dispatch_condition:
@@ -333,29 +309,20 @@ class PipelineEngine:
         finally:
             self._services.output_reservations.release(submission.request_id)
 
-    def _execute_submission_thread(self, submission: _Submission, worker_future: Future) -> None:
+    def _execute_submission_thread(self, submission: _Submission) -> None:
         try:
             self._execute_submission(submission)
         finally:
-            if not worker_future.done():
-                worker_future.set_result(None)
             current = threading.current_thread()
-            self._request_threads.discard(current)
-
-    def _request_finished(self, worker_future: Future) -> None:
-        with self._dispatch_condition:
-            submission = self._active_request_futures.pop(worker_future, None)
-            active = len(self._active_request_futures)
-            self._dispatch_condition.notify_all()
-        self._set_active_request_count(active)
-        if submission is not None:
             self._path_leases.release(submission.request_id)
             self._queue.task_done()
-            self._change_outstanding_request_count(-1)
+            with self._dispatch_condition:
+                self._request_threads.discard(current)
+                self._dispatch_condition.notify_all()
 
     def _active_count(self) -> int:
         with self._dispatch_condition:
-            return len(self._active_request_futures)
+            return len(self._request_threads)
 
     def _remember_recent_passwords(self, passwords: Iterable[str]) -> None:
         with self._recent_passwords_lock:
@@ -364,21 +331,6 @@ class PipelineEngine:
                     self._recent_passwords.remove(password)
                 self._recent_passwords.insert(0, password)
             del self._recent_passwords[20:]
-
-    def _set_active_request_count(self, count: int) -> None:
-        with self._pressure_lock:
-            self._active_request_count = max(0, int(count or 0))
-
-    def _set_pending_request_count(self, count: int) -> None:
-        with self._pressure_lock:
-            self._pending_request_count = max(0, int(count or 0))
-
-    def _change_outstanding_request_count(self, delta: int) -> None:
-        with self._pressure_lock:
-            self._outstanding_request_count = max(0, self._outstanding_request_count + int(delta))
-
-    def _sync_pipeline_pressure(self) -> None:
-        return None
 
     @staticmethod
     def _normalize_target(target: str | PipelineTarget) -> PipelineTarget:
@@ -474,7 +426,12 @@ class _PipelineServices:
             if isinstance(config.get("performance"), dict)
             else {}
         )
-        self.sevenzip_runner = SevenZipRunner(performance_config)
+        worker_config = dict(
+            performance_config.get("worker", {})
+            if isinstance(performance_config.get("worker"), dict)
+            else {}
+        )
+        self.sevenzip_runner = SevenZipRunner(worker_config)
 
     def start(self) -> None:
         return None
@@ -528,13 +485,18 @@ class _RequestRuntime:
             submission.request_id,
         )
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
+        worker_config = dict(
+            performance.get("worker", {})
+            if isinstance(performance.get("worker"), dict)
+            else {}
+        )
         request_runner = services.sevenzip_runner.fork()
         request_runner.request_id = submission.request_id
         self.extractor = ExtractionScheduler(
             cli_passwords=submission.user_passwords,
             builtin_passwords=submission.builtin_passwords,
             max_retries=self.config.get("max_retries", 3),
-            process_config=performance,
+            process_config=worker_config,
             output_config=self.config.get("output", {}),
             extraction_config={
                 **(self.config.get("extraction", {}) if isinstance(self.config.get("extraction"), dict) else {}),
@@ -548,12 +510,10 @@ class _RequestRuntime:
             self.context,
             self.extractor,
             self.output_scan_policy,
-            None,
             self.rename_scheduler,
             self.config,
             repair_inspection_service=services.repair_inspection_service,
             progress_reporter=self.reporter,
-            executor_pool=None,
             request_id=submission.request_id,
         )
 

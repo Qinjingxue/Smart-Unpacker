@@ -44,7 +44,7 @@ class ExtractionScheduler:
         self.process_config = {
             key: value
             for key, value in (process_config or {}).items()
-            if key != "scheduler_profile" and value is not None
+            if value is not None
         }
         self.retry_policy = ExtractRetryPolicy(self.max_retries)
         self.sevenzip_runner = sevenzip_runner or SevenZipRunner(self.process_config)
@@ -71,7 +71,6 @@ class ExtractionScheduler:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         phase_timer: Any = None,
         phase_prefix: str = "extract",
     ) -> ExtractionResult:
@@ -79,7 +78,6 @@ class ExtractionScheduler:
             task,
             out_dir,
             split_info=split_info,
-            runtime_scheduler=runtime_scheduler,
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
         )
@@ -89,23 +87,16 @@ class ExtractionScheduler:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: Any = None,
         phase_timer: Any = None,
         phase_prefix: str = "extract",
         on_complete: Callable[[ExtractionResult], None] | None = None,
     ) -> None:
         if on_complete is None:
             raise ValueError("ExtractionScheduler.extract_async requires on_complete")
-        # Keep test/dry-run adapters that replace the instance's synchronous
-        # extractor compatible with the callback API.
-        if "extract" in self.__dict__:
-            on_complete(self.extract(task, out_dir, runtime_scheduler=runtime_scheduler))
-            return
         self._single_archive_extractor().extract_async(
             task,
             out_dir,
             split_info=split_info,
-            runtime_scheduler=runtime_scheduler,
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
             on_complete=on_complete,

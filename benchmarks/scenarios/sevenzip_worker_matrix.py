@@ -14,6 +14,7 @@ import queue
 import shutil
 import statistics
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 from benchmarks.harness import BenchmarkWorkspace, ProcessSampler, render_report, report_from_payload
 from benchmarks.scenarios.extraction_format_matrix import GENERATED_FORMATS, create_corpus
-from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker
+from sunpack.extraction.internal.sevenzip.sevenzip_runner import _NativeWorkerProcess
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 
 
@@ -80,7 +81,7 @@ def _output_summary(path: Path) -> dict[str, int]:
     }
 
 
-def _worker_cpu_ms(worker: _PersistentWorker) -> float | None:
+def _worker_cpu_ms(worker: _NativeWorkerProcess) -> float | None:
     process = worker.process
     if process is None:
         return None
@@ -91,7 +92,7 @@ def _worker_cpu_ms(worker: _PersistentWorker) -> float | None:
     return (float(times.user) + float(times.system)) * 1000.0
 
 
-def _worker_stderr(worker: _PersistentWorker) -> str:
+def _worker_stderr(worker: _NativeWorkerProcess) -> str:
     lines: list[str] = []
     while True:
         try:
@@ -105,7 +106,7 @@ def _worker_stderr(worker: _PersistentWorker) -> str:
 
 
 def _run_job(
-    worker: _PersistentWorker,
+    worker: _NativeWorkerProcess,
     job: dict[str, Any],
     *,
     timeout_seconds: float,
@@ -117,34 +118,48 @@ def _run_job(
     sample_start = len(sampler.samples)
     sampler.take()
     started = time.perf_counter_ns()
-    worker.send(payload)
     events: list[dict[str, Any]] = []
     result: dict[str, Any] | None = None
-    deadline = time.monotonic() + max(1.0, timeout_seconds)
-    while result is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"worker job timed out: {job_id}")
-        try:
-            line = worker.stdout_queue.get(timeout=min(0.1, remaining))
-        except queue.Empty:
-            if not worker.is_alive():
-                raise RuntimeError(f"worker exited while running job: {job_id}; {_worker_stderr(worker)}")
-            continue
-        if line is None:
-            raise RuntimeError(f"worker closed stdout while running job: {job_id}; {_worker_stderr(worker)}")
+    failure: list[str] = []
+    completed = threading.Event()
+
+    def on_line(line: str) -> bool:
+        nonlocal result
         text = str(line).strip()
         if not text.startswith("{"):
-            continue
+            return False
         try:
             event = json.loads(text)
         except json.JSONDecodeError:
-            continue
+            return False
         if not isinstance(event, dict):
-            continue
+            return False
         events.append(event)
         if event.get("type") == "result" and str(event.get("job_id") or "") == job_id:
             result = event
+        if event.get("type") == "native_event" and event.get("event") == "job_finished" and result is not None:
+            completed.set()
+            return True
+        return False
+
+    def on_timeout(message: str) -> None:
+        failure.append(str(message))
+        completed.set()
+
+    worker.submit_async(payload, job_id, on_line=on_line, on_timeout=on_timeout)
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    while not completed.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"worker job timed out: {job_id}")
+        completed.wait(timeout=min(0.1, remaining))
+        if not worker.is_alive() and not completed.is_set():
+            raise RuntimeError(f"worker exited while running job: {job_id}; {_worker_stderr(worker)}")
+
+    if failure:
+        raise RuntimeError(f"worker failed while running job: {job_id}; {failure[-1]}")
+    if result is None:
+        raise RuntimeError(f"worker closed before returning a result: {job_id}; {_worker_stderr(worker)}")
 
     finished = time.perf_counter_ns()
     sampler.take()
@@ -286,7 +301,7 @@ def _run_case(
 ) -> list[dict[str, Any]]:
     case_slug = str(case["case_id"]).replace(":", "-")
     worker_start = time.perf_counter_ns()
-    worker = _PersistentWorker(str(worker_path), None)
+    worker = _NativeWorkerProcess(str(worker_path), None)
     worker_start_ms = round((time.perf_counter_ns() - worker_start) / 1_000_000.0, 3)
     sampler = ProcessSampler(interval_seconds=sample_interval)
     rows: list[dict[str, Any]] = []

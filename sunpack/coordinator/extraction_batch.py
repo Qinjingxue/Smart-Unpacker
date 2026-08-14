@@ -143,18 +143,15 @@ class ExtractionBatchRunner:
         context: RunContext,
         extractor: ExtractionScheduler,
         output_scan_policy: NestedOutputScanPolicy,
-        runtime_scheduler: Any,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
         repair_inspection_service: RepairInspectionService | None = None,
         progress_reporter: Any | None = None,
-        executor_pool=None,
         request_id: str = "",
     ):
         self.context = context
         self.extractor = extractor
         self.output_scan_policy = output_scan_policy
-        self.runtime_scheduler = runtime_scheduler
         self.rename_scheduler = rename_scheduler or RenameScheduler()
         self.config = config or {}
         self.content_policy = ContentRecoveryPolicy.from_config(self.config)
@@ -162,7 +159,6 @@ class ExtractionBatchRunner:
         self.i18n = I18nContext(cli_config.get("language"))
         self.repair_inspection_service = repair_inspection_service or RepairInspectionService(self.config)
         self.progress_reporter = progress_reporter
-        self.executor_pool = executor_pool
         self.request_id = str(request_id or "")
         self.progress_round_index = 1
         self.progress_direct_mode = False
@@ -174,10 +170,6 @@ class ExtractionBatchRunner:
         performance = advanced_config_value(("performance",))
         if isinstance(self.config.get("performance"), dict):
             performance.update(self.config["performance"])
-        # Kept as a read-only compatibility projection for callers and
-        # diagnostics.  Native extraction no longer consults this mapping for
-        # admission or concurrency decisions.
-        self.scheduler_config = dict(performance)
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
             rename_scheduler=self.rename_scheduler,
@@ -341,7 +333,6 @@ class ExtractionBatchRunner:
                 self._extract_verify_with_retries_async(
                     task,
                     planned_out_dir,
-                    self.runtime_scheduler,
                     missing_volume_retry=missing_volume_retry,
                     on_complete=lambda outcome, current=task, out_dir=planned_out_dir: complete(
                         current, out_dir, outcome
@@ -444,14 +435,12 @@ class ExtractionBatchRunner:
         self,
         task: ArchiveTask,
         out_dir: str,
-        runtime_scheduler: Any = None,
         *,
         missing_volume_retry=None,
     ) -> BatchExtractionOutcome:
         state = self._extract_verify_state_machine(
             task,
             out_dir,
-            runtime_scheduler,
             missing_volume_retry=missing_volume_retry,
         )
         try:
@@ -462,7 +451,6 @@ class ExtractionBatchRunner:
             result = self.extractor.extract(
                 request["task"],
                 request["out_dir"],
-                runtime_scheduler=request["runtime_scheduler"],
             )
             try:
                 request = state.send(result)
@@ -473,7 +461,6 @@ class ExtractionBatchRunner:
         self,
         task: ArchiveTask,
         out_dir: str,
-        runtime_scheduler: Any,
         *,
         missing_volume_retry=None,
         on_complete: Callable[[BatchExtractionOutcome], None],
@@ -481,7 +468,6 @@ class ExtractionBatchRunner:
         state = self._extract_verify_state_machine(
             task,
             out_dir,
-            runtime_scheduler,
             missing_volume_retry=missing_volume_retry,
         )
 
@@ -505,7 +491,6 @@ class ExtractionBatchRunner:
             self.extractor.extract_async(
                 request["task"],
                 request["out_dir"],
-                runtime_scheduler=request["runtime_scheduler"],
                 on_complete=advance,
             )
 
@@ -515,7 +500,6 @@ class ExtractionBatchRunner:
         self,
         task: ArchiveTask,
         out_dir: str,
-        runtime_scheduler: Any = None,
         *,
         missing_volume_retry=None,
     ):
@@ -535,7 +519,6 @@ class ExtractionBatchRunner:
             result = yield {
                 "task": task,
                 "out_dir": out_dir,
-                "runtime_scheduler": runtime_scheduler,
             }
             write_extraction_result(task, result)
             current_sequence = attempt_sequence
@@ -602,7 +585,6 @@ class ExtractionBatchRunner:
                             result,
                             verification,
                             out_dir,
-                            runtime_scheduler,
                             state,
                             incumbent_outcome,
                             current_sequence,
@@ -661,7 +643,6 @@ class ExtractionBatchRunner:
                             result,
                             verification,
                             out_dir,
-                            runtime_scheduler,
                         )
                         if isinstance(beam_evaluation, _BeamRepairTerminal):
                             state.record_result(
@@ -949,7 +930,6 @@ class ExtractionBatchRunner:
         result: ExtractionResult,
         verification: VerificationResult,
         out_dir: str,
-        runtime_scheduler: Any,
         loop_state: RepairLoopState,
         incumbent_outcome: BatchExtractionOutcome | None,
         round_index: int,
@@ -969,7 +949,6 @@ class ExtractionBatchRunner:
             result,
             verification,
             out_dir,
-            runtime_scheduler,
         )
         if isinstance(beam_evaluation, _BeamRepairTerminal):
             loop_state.record_result(beam_evaluation.repair_result, trigger="verification_beam")
@@ -1017,7 +996,6 @@ class ExtractionBatchRunner:
         result: ExtractionResult,
         verification: VerificationResult,
         out_dir: str,
-        runtime_scheduler: Any,
     ) -> _BeamRepairEvaluation | _BeamRepairTerminal | None:
         scheduler = self.repair_stage.scheduler
         if scheduler is None:
@@ -1034,7 +1012,7 @@ class ExtractionBatchRunner:
             scheduler,
             self.repair_stage.config,
             analyze=lambda candidate: {"confidence": float(candidate.confidence or 0.0)},
-            assess=lambda item: self._assess_beam_candidate(task, item, out_dir, runtime_scheduler, evaluated),
+            assess=lambda item: self._assess_beam_candidate(task, item, out_dir, evaluated),
             should_assess=self._beam_candidate_should_assess,
             score_assessment=score_verification_payload,
         )
@@ -1406,7 +1384,6 @@ class ExtractionBatchRunner:
         task: ArchiveTask,
         item: RepairBeamCandidate,
         out_dir: str,
-        runtime_scheduler: Any,
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
     ) -> VerificationResult:
         temp_dir = f"{out_dir}.beam_{len(evaluated) + 1:02d}_{item.candidate.module_name}"
@@ -1415,7 +1392,6 @@ class ExtractionBatchRunner:
             verifier=self.verifier,
             repair_stage=self.repair_stage,
             repair_inspection_service=self.repair_inspection_service,
-            runtime_scheduler=runtime_scheduler,
             light_verify=self._verify_beam_candidate_light,
             needs_full_verification=lambda candidate, light: self._beam_candidate_needs_full_verification(
                 RepairBeamCandidate(candidate=candidate, state=item.state, score=item.score),

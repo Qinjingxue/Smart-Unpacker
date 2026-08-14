@@ -48,14 +48,6 @@ def repo_root() -> Path:
     return REPO_ROOT
 
 
-@pytest.fixture
-def pipeline_resource_scheduler():
-    # Extraction admission is owned by the native worker.  Keep this fixture
-    # as a compatibility argument for tests that construct the batch runner
-    # directly; it intentionally supplies no Python scheduler.
-    yield None
-
-
 def pytest_addoption(parser):
     parser.addoption(
         "--run-performance",

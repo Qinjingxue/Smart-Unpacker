@@ -52,10 +52,11 @@ def _watch_memory_config() -> dict:
     }
     config["performance"] = {
         **(config.get("performance") or {}),
-        "persistent_workers": True,
-        "native_max_queue_jobs": 64,
+        "worker": {
+            **((config.get("performance") or {}).get("worker") or {}),
+            "max_queue_jobs": 64,
+        },
     }
-    config["pipeline"] = {**(config.get("pipeline") or {}), "queue_capacity": 64}
     return config
 
 

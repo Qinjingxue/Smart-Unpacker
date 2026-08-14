@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
-
-import psutil
-
-from sunpack.support import archive_knowledge_projection as knowledge_view
-
 
 @dataclass(frozen=True)
 class ResourceDemand:
@@ -33,81 +27,6 @@ class ResourceDemand:
             "io": normalized.io,
             "memory": normalized.memory,
         }
-
-
-@dataclass(frozen=True)
-class ResourceBudget:
-    cpu: int
-    io: int
-    memory: int
-
-    def normalized(self) -> "ResourceBudget":
-        return ResourceBudget(
-            cpu=max(1, int(self.cpu or 1)),
-            io=max(1, int(self.io or 1)),
-            memory=max(1, int(self.memory or 1)),
-        )
-
-    def scale(self, limit: int, max_workers: int) -> "ResourceBudget":
-        limit = max(1, int(limit or 1))
-        normalized = self.normalized()
-        return ResourceBudget(
-            cpu=max(1, min(normalized.cpu, limit)),
-            io=max(1, min(normalized.io, limit)),
-            memory=max(1, min(normalized.memory, limit)),
-        )
-
-
-@dataclass(frozen=True)
-class TaskRunFeedback:
-    demand: ResourceDemand
-    duration_seconds: float
-    estimated_bytes: int
-    active_workers_at_start: int
-    success: bool
-    profile_key: str = ""
-
-    @property
-    def throughput_bytes_per_second(self) -> float:
-        if self.duration_seconds <= 0 or self.estimated_bytes <= 0:
-            return 0.0
-        return self.estimated_bytes / self.duration_seconds
-
-
-def build_resource_budget(config: dict, max_workers: int) -> ResourceBudget:
-    max_workers = max(1, int(max_workers or 1))
-    cpu_tokens = int(config.get("cpu_tokens", _default_cpu_tokens(max_workers)) or max_workers)
-    io_tokens = int(config.get("io_tokens", max_workers) or max_workers)
-    memory_tokens = int(config.get("memory_tokens", _default_memory_tokens(max_workers)) or max_workers)
-    return ResourceBudget(cpu=cpu_tokens, io=io_tokens, memory=memory_tokens).normalized()
-
-
-def _default_cpu_tokens(max_workers: int) -> int:
-    return max(1, min(max_workers, os.cpu_count() or max_workers))
-
-
-def _default_memory_tokens(max_workers: int) -> int:
-    try:
-        available_mb = psutil.virtual_memory().available / (1024 * 1024)
-    except Exception:
-        return max_workers
-    return max(1, min(max_workers, int(available_mb // 512) or 1))
-
-
-def demand_from_value(value: Any) -> ResourceDemand:
-    if isinstance(value, ResourceDemand):
-        return value.normalized()
-    if isinstance(value, dict):
-        return ResourceDemand(
-            cpu=value.get("cpu", 1),
-            io=value.get("io", 1),
-            memory=value.get("memory", 1),
-        ).normalized()
-    if value:
-        scalar = max(1, int(value))
-        return ResourceDemand(cpu=scalar, io=scalar, memory=scalar).normalized()
-    return ResourceDemand()
-
 
 def estimate_resource_demand(analysis: Any) -> ResourceDemand:
     if not getattr(analysis, "ok", False):
@@ -184,34 +103,6 @@ def build_resource_profile_key(analysis: Any) -> str:
             _bucket(file_count, [(1000, "files<1k"), (10000, "files<10k"), (50000, "files<50k")], "files>=50k"),
         ]
     )
-
-
-def estimate_task_work_bytes(task: Any) -> int:
-    analysis = knowledge_view.resource_analysis(task)
-    if analysis:
-        try:
-            archive_size = int(analysis.get("archive_size", 0) or 0)
-            unpacked_size = int(analysis.get("total_unpacked_size", 0) or 0)
-            packed_size = int(analysis.get("total_packed_size", 0) or 0)
-            estimated = max(archive_size + unpacked_size, packed_size + unpacked_size)
-            if estimated > 0:
-                return estimated
-        except Exception:
-            pass
-    total = 0
-    for path in list(getattr(task, "all_parts", None) or []) or [getattr(task, "main_path", "")]:
-        try:
-            total += os.path.getsize(path)
-        except Exception:
-            pass
-    return max(0, total)
-
-
-def task_profile_key(task: Any) -> str:
-    projected = knowledge_view.resource_profile_key(task)
-    if projected:
-        return projected
-    return ""
 
 
 def _analysis_value(analysis: Any, key: str, default: Any = None) -> Any:

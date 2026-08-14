@@ -16,9 +16,6 @@
     "minimum_archive_byte_ratio": 0.1,
     "hard_maximum_other_projects": 1000
   },
-  "pipeline": {
-    "batch_window_seconds": 0
-  },
   "embedded_scan": {
     "enabled": true
   },
@@ -71,7 +68,9 @@
     ]
   },
   "performance": {
-    "scheduler_profile": "auto"
+    "worker": {
+      "profile": "auto"
+    }
   },
   "repair": {
     "telemetry": {

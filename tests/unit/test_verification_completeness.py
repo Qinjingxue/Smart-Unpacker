@@ -59,7 +59,7 @@ def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path
     assert verification.failed_files == 1
 
 
-def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_path, pipeline_resource_scheduler):
+def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_path):
     archive = tmp_path / "broken.zip"
     archive.write_bytes(b"broken")
     out_dir = tmp_path / "out"
@@ -68,10 +68,9 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
         RunContext(),
         extractor,
         _FakeOutputScanPolicy(),
-        pipeline_resource_scheduler,
-            config={
-                "extraction": {"content_requirement": "allow_partial"},
-                "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
+        config={
+            "extraction": {"content_requirement": "allow_partial"},
+            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
@@ -81,7 +80,7 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
     )
     runner.repair_stage = _OneShotRepairStage()
 
-    outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
@@ -111,7 +110,7 @@ def test_output_presence_ignores_sunpack_manifest_files(tmp_path):
     assert verification.issues[0].code == "fail.output_empty"
 
 
-def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp_path, pipeline_resource_scheduler):
+def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp_path):
     archive = tmp_path / "broken.zip"
     archive.write_bytes(b"broken")
     out_dir = tmp_path / "out"
@@ -145,7 +144,6 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
         RunContext(),
         _SingleResultExtractor(result),
         _FakeOutputScanPolicy(),
-        pipeline_resource_scheduler,
             config={
                 "extraction": {"content_requirement": "allow_partial"},
                 "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
@@ -159,7 +157,7 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     runner.repair_stage = _NoCandidateRepairStage()
 
     task = _task(archive)
-    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
@@ -192,7 +190,6 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
 
 def test_complete_mode_stops_before_repair_on_proven_payload_damage_and_cleans_output(
     tmp_path,
-    pipeline_resource_scheduler,
 ):
     archive = tmp_path / "broken.zip"
     archive.write_bytes(b"broken")
@@ -245,7 +242,6 @@ def test_complete_mode_stops_before_repair_on_proven_payload_damage_and_cleans_o
         RunContext(),
         _SingleResultExtractor(result),
         _FakeOutputScanPolicy(),
-        pipeline_resource_scheduler,
         config={
             "extraction": {"content_requirement": "complete"},
             "repair": {
@@ -263,7 +259,7 @@ def test_complete_mode_stops_before_repair_on_proven_payload_damage_and_cleans_o
     runner.repair_stage = repair_stage
     task = _task(archive)
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir))
 
     assert repair_stage.calls == 0
     assert outcome.outcome_kind == OutcomeKind.FAILURE
@@ -307,7 +303,7 @@ class _SingleResultExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         return self.result
 
 
@@ -324,7 +320,7 @@ class _TwoPartialResultsExtractor:
     def inspect(self, task, out_dir):
         return type("Preflight", (), {"skip_result": None})()
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, *, phase_timer=None, phase_prefix="extract"):
         self.calls += 1
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)

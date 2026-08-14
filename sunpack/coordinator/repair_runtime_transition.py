@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -55,7 +54,6 @@ class RepairRuntimeTransitionEvaluator:
         verifier: VerificationScheduler,
         repair_stage: Any,
         repair_inspection_service: RepairInspectionService | None = None,
-        runtime_scheduler: Any = None,
         light_verify: Callable[[ArchiveTask, ExtractionResult], VerificationResult] | None = None,
         needs_full_verification: Callable[[RepairCandidate, VerificationResult], bool] | None = None,
         source_digest: Callable[[dict[str, Any]], str] | None = None,
@@ -64,7 +62,6 @@ class RepairRuntimeTransitionEvaluator:
         self.verifier = verifier
         self.repair_stage = repair_stage
         self.repair_inspection_service = repair_inspection_service
-        self.runtime_scheduler = runtime_scheduler
         self.light_verify = light_verify
         self.needs_full_verification = needs_full_verification
         self.source_digest = source_digest or _default_source_digest
@@ -122,11 +119,10 @@ class RepairRuntimeTransitionEvaluator:
                         phase_prefix="transition_inspection_refresh",
                     )
             with _phase(phase_timer, "transition_extract", state_id=state_id, candidate_id=candidate_id):
-                extracted = _extract_with_optional_timer(
+                extracted = _extract_with_timer(
                     self.extractor,
                     task,
                     temp_dir,
-                    runtime_scheduler=self.runtime_scheduler,
                     phase_timer=phase_timer,
                     phase_prefix="transition_extract",
                 )
@@ -272,26 +268,20 @@ def _phase(timer: Callable[..., Any] | None, name: str, *, state_id: str = "", c
     return timer(name, state_id=state_id, candidate_id=candidate_id)
 
 
-def _extract_with_optional_timer(
+def _extract_with_timer(
     extractor: Any,
     task: ArchiveTask,
     out_dir: str,
     *,
-    runtime_scheduler: Any,
     phase_timer: Callable[..., Any] | None,
     phase_prefix: str,
 ) -> ExtractionResult:
-    extract = extractor.extract
-    try:
-        parameters = inspect.signature(extract).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    kwargs: dict[str, Any] = {"runtime_scheduler": runtime_scheduler}
-    if "phase_timer" in parameters:
-        kwargs["phase_timer"] = phase_timer
-    if "phase_prefix" in parameters:
-        kwargs["phase_prefix"] = phase_prefix
-    return extract(task, out_dir, **kwargs)
+    return extractor.extract(
+        task,
+        out_dir,
+        phase_timer=phase_timer,
+        phase_prefix=phase_prefix,
+    )
 
 
 def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: ExtractionResult, *, phase_timer: Callable[..., Any] | None, phase_prefix: str) -> VerificationResult:
