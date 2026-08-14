@@ -15,6 +15,17 @@ from sunpack.support.global_cache_manager import GLOBAL_CACHE
 from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
 
 
+@pytest.fixture(autouse=True)
+def _reset_process_caches():
+    GLOBAL_CACHE.clear_all()
+    clear_projection_cache()
+    clear_relation_probe_cache()
+    yield
+    GLOBAL_CACHE.clear_all()
+    clear_projection_cache()
+    clear_relation_probe_cache()
+
+
 def test_clear_all_runtime_caches_clears_python_owned_caches(tmp_path):
     GLOBAL_CACHE.set("runtime-cache-test", ("key",), {"payload": "value"})
     knowledge = ArchiveKnowledge({
@@ -45,8 +56,6 @@ def test_clear_all_runtime_caches_clears_python_owned_caches(tmp_path):
     assert GLOBAL_CACHE.stats()["entries"] == 0
     assert source_fingerprint(knowledge)
     assert report["errors"] == []
-    clear_projection_cache()
-    clear_relation_probe_cache()
 
 
 class _CleanupOnlyEngine:
