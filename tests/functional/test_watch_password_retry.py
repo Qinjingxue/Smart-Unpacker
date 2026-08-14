@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 import uuid
@@ -15,13 +16,13 @@ from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.tool_config import get_test_tools
 
 
-def _wait_for_completed_watch_run(watcher: WatchScheduler, *, timeout: float = 10.0):
+async def _wait_for_completed_watch_run(watcher: WatchScheduler, *, timeout: float = 10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = watcher.run_once()
+        result = await watcher.run_once()
         if result.processed:
             return result
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
     pytest.fail("watch pipeline did not complete before timeout")
 
 
@@ -81,34 +82,28 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         "clipboard_monitor_enabled": source == "watch_clipboard",
         "password_retry_debounce_seconds": 0,
     }
-    engine = PipelineEngine(config).start()
-    watcher = WatchScheduler(
-        config,
-        [str(watch_root)],
-        out_dir=str(output_root),
-        state_path=str(tmp_path / "state.json"),
-        quiet_seconds=0,
-        initial_scan=False,
-        pipeline_engine=engine,
-    )
-    try:
-        watcher.enqueue(str(archive))
-        first = _wait_for_completed_watch_run(watcher)
-        assert first.failed == 1, first
-        first_entries = list(watcher.state.entries.values())
-        assert len(first_entries) == 1, first_entries
-        assert first_entries[0].status == "failed_password"
-
-        if source == "directory":
-            directory_password_file.write_text(password + "\n", encoding="utf-8")
-            watcher.notify_password_table_changed(str(directory_password_file))
-        else:
-            monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
-            watcher._clipboard_monitor._handle_clipboard_update()
-        second = _wait_for_completed_watch_run(watcher)
-        extracted = list(output_root.rglob("payload.txt"))
-    finally:
-        engine.close()
+    async def scenario():
+        async with PipelineEngine(config) as engine:
+            watcher = WatchScheduler(
+                config, [str(watch_root)], out_dir=str(output_root),
+                state_path=str(tmp_path / "state.json"), quiet_seconds=0,
+                initial_scan=False, pipeline_engine=engine,
+            )
+            watcher.enqueue(str(archive))
+            first = await _wait_for_completed_watch_run(watcher)
+            assert first.failed == 1, first
+            first_entries = list(watcher.state.entries.values())
+            assert len(first_entries) == 1, first_entries
+            assert first_entries[0].status == "failed_password"
+            if source == "directory":
+                directory_password_file.write_text(password + "\n", encoding="utf-8")
+                watcher.notify_password_table_changed(str(directory_password_file))
+            else:
+                monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
+                watcher._clipboard_monitor._handle_clipboard_update()
+            second = await _wait_for_completed_watch_run(watcher)
+            return second, watcher, list(output_root.rglob("payload.txt"))
+    second, watcher, extracted = asyncio.run(scenario())
 
     assert second.succeeded == 1
     assert not watcher.state.entries
@@ -182,22 +177,17 @@ def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, incl
         "clipboard_monitor_enabled": False,
         "password_retry_debounce_seconds": 0,
     }
-    engine = PipelineEngine(config).start()
-    watcher = WatchScheduler(
-        config,
-        [str(watch_root)],
-        out_dir=str(output_root),
-        state_path=str(tmp_path / "state.json"),
-        quiet_seconds=0,
-        initial_scan=False,
-        pipeline_engine=engine,
-    )
-    try:
-        watcher.enqueue(str(archive))
-        result = _wait_for_completed_watch_run(watcher)
-        extracted = list(output_root.rglob("payload.txt"))
-    finally:
-        engine.close()
+    async def scenario():
+        async with PipelineEngine(config) as engine:
+            watcher = WatchScheduler(
+                config, [str(watch_root)], out_dir=str(output_root),
+                state_path=str(tmp_path / "state.json"), quiet_seconds=0,
+                initial_scan=False, pipeline_engine=engine,
+            )
+            watcher.enqueue(str(archive))
+            result = await _wait_for_completed_watch_run(watcher)
+            return result, watcher, list(output_root.rglob("payload.txt"))
+    result, watcher, extracted = asyncio.run(scenario())
 
     assert result.succeeded == (1 if include_real_password else 0), result
     assert result.failed == (0 if include_real_password else 1), result

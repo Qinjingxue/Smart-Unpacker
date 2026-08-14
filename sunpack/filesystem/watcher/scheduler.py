@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import json
@@ -7,7 +8,6 @@ import os
 import shutil
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -55,6 +55,7 @@ from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.collections import dedupe_normalized_paths
 from sunpack.support.archive_sessions import release_archive_sessions_under
+from sunpack.coordinator.engine import IdentityOutputCommitter, MappedOutputCommitter
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -98,23 +99,11 @@ class _ActiveCandidateState:
 class _ActivePipelineRequest:
     candidate: WatchCandidate
     group: WatchGroupSnapshot | None
-    handle: object
+    task: asyncio.Task
+    config: dict
     probe_workspace: str
     predicted_probe_dirs: list[str]
     predicted_final_dirs: list[str]
-
-
-@dataclass
-class _ActiveCompletion:
-    request: _ActivePipelineRequest
-    future: Future
-
-
-def _handle_done(handle: object) -> bool:
-    done = getattr(handle, "done", None)
-    # Older embedders and synchronous test doubles predate the asynchronous
-    # handle contract; their result is already available when submit returns.
-    return bool(done()) if callable(done) else True
 
 
 def _paths_overlap(first: str, second: str) -> bool:
@@ -192,10 +181,6 @@ class WatchScheduler:
         self._password_source_lock = threading.RLock()
         self._pending: dict[str, WatchCandidate] = {}
         self._inflight_requests: list[_ActivePipelineRequest] = []
-        self._completion_requests: list[_ActiveCompletion] = []
-        self._completion_pool = ThreadPoolExecutor(
-            thread_name_prefix="sunpack-watch-completion",
-        )
         self._active_states: dict[str, _ActiveCandidateState] = {}
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
@@ -271,13 +256,17 @@ class WatchScheduler:
             max_entries=int(watch_config["clipboard_builtin_max_entries"]),
         )
 
-    def start(self):
+    async def start(self):
+        await self.pipeline_engine.work_broker.run(
+            "watch_start",
+            "watch",
+            self._start_blocking,
+            request_id="watch",
+        )
+
+    def _start_blocking(self):
         if self._started:
             return
-        if getattr(self._completion_pool, "_shutdown", False):
-            self._completion_pool = ThreadPoolExecutor(
-                thread_name_prefix="sunpack-watch-completion",
-            )
         self._ensure_directory_password_files()
         self._recover_probe_workspaces()
         handler = _WatchEventHandler(self)
@@ -325,30 +314,37 @@ class WatchScheduler:
             except FileExistsError:
                 pass
 
-    def stop(self):
+    async def stop(self):
+        await self.pipeline_engine.work_broker.run(
+            "watch_stop",
+            "watch",
+            self._stop_blocking,
+            request_id="watch",
+        )
+
+    def _stop_blocking(self):
         if not self._started:
             return
         self._observer.stop()
         self._observer.join(timeout=self.observer_stop_timeout_seconds)
         self._clipboard_monitor.stop()
-        self._completion_pool.shutdown(wait=True, cancel_futures=False)
         with self._lock:
             self._cache_cleanup_deadline = None
         self._started = False
 
-    def run_forever(self):
-        self.start()
+    async def run_forever(self):
+        await self.start()
         try:
             while True:
                 self._run_wakeup.clear()
-                self.run_once()
-                self._run_wakeup.wait(self.next_delay_seconds())
+                await self.run_once()
+                await asyncio.sleep(self.next_delay_seconds())
         finally:
-            self.stop()
+            await self.stop()
 
-    def run_once(self) -> WatchRunResult:
+    async def run_once(self) -> WatchRunResult:
         self._process_password_dirty_dirs(time.monotonic())
-        result = self._harvest_completed_requests()
+        result = await self._harvest_completed_requests()
         ready = self._pop_ready(time.time())
         with self._lock:
             active_paths = {
@@ -384,24 +380,26 @@ class WatchScheduler:
                 missing_indices=list(snapshot.missing_indices),
             )
         active_requests = [
-            self._submit_candidate(dispatch.candidate, group=dispatch.group)
+            await self._submit_candidate(dispatch.candidate, group=dispatch.group)
             for dispatch in dispatches
         ]
         with self._lock:
             self._inflight_requests.extend(active_requests)
-        self._merge_run_result(result, self._harvest_completed_requests())
+        # Give newly submitted candidate coroutines one scheduling turn.  Fast
+        # no-op/failure requests can be harvested in this tick without ever
+        # waiting for slow candidates.
+        if active_requests:
+            await asyncio.sleep(0)
+        self._merge_run_result(result, await self._harvest_completed_requests())
         result.pending = self.pending_count
-        self._maybe_clear_idle_caches()
+        await self._maybe_clear_idle_caches()
         return result
 
     def _filter_output_conflicts(self, dispatches):
         with self._lock:
             active = [
                 path
-                for request in [
-                    *self._inflight_requests,
-                    *(item.request for item in self._completion_requests),
-                ]
+                for request in self._inflight_requests
                 for path in request.predicted_final_dirs
             ]
         selected = []
@@ -423,46 +421,26 @@ class WatchScheduler:
             reserved.extend(predicted)
         return selected, deferred
 
-    def _harvest_completed_requests(self) -> WatchRunResult:
+    async def _harvest_completed_requests(self) -> WatchRunResult:
         with self._lock:
-            completed = [request for request in self._inflight_requests if _handle_done(request.handle)]
+            completed = [request for request in self._inflight_requests if request.task.done()]
             if completed:
                 completed_ids = {id(request) for request in completed}
                 self._inflight_requests = [
                     request for request in self._inflight_requests if id(request) not in completed_ids
                 ]
         result = WatchRunResult()
-        scheduled_futures = []
-        for request in completed:
-            done_method = getattr(request.handle, "done", None)
-            if not callable(done_method):
-                self._merge_run_result(result, self._finish_active_request(request))
-                continue
-            future = self._completion_pool.submit(self._finish_active_request, request)
-            scheduled_futures.append(future)
-            future.add_done_callback(lambda _future: self._wake_service())
-            with self._lock:
-                self._completion_requests.append(_ActiveCompletion(request=request, future=future))
-
-        if scheduled_futures:
-            # Preserve prompt completion for cheap harvests while bounding how
-            # long a slow promotion/finalizer can hold the scheduler turn.
-            wait(scheduled_futures, timeout=0.05)
-
-        with self._lock:
-            finished = [item for item in self._completion_requests if item.future.done()]
-            if finished:
-                finished_ids = {id(item) for item in finished}
-                self._completion_requests = [
-                    item for item in self._completion_requests if id(item) not in finished_ids
-                ]
-        for item in finished:
-            self._merge_run_result(result, item.future.result())
+        if completed:
+            finished = await asyncio.gather(
+                *(self._finish_active_request(request) for request in completed),
+            )
+            for single in finished:
+                self._merge_run_result(result, single)
         return result
 
-    def _finish_active_request(self, request: _ActivePipelineRequest) -> WatchRunResult:
+    async def _finish_active_request(self, request: _ActivePipelineRequest) -> WatchRunResult:
         try:
-            single = self._complete_candidate(request)
+            single = await self._complete_candidate(request)
         except Exception as exc:
             single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
             self.log.write(
@@ -491,11 +469,7 @@ class WatchScheduler:
 
     def _inflight_path_keys_locked(self) -> set[str]:
         paths: set[str] = set()
-        requests = [
-            *self._inflight_requests,
-            *(item.request for item in self._completion_requests),
-        ]
-        for request in requests:
+        for request in self._inflight_requests:
             paths.add(os.path.normcase(os.path.abspath(request.candidate.path)))
             if request.group is not None:
                 paths.update(
@@ -571,26 +545,25 @@ class WatchScheduler:
         )
         self._run_wakeup.set()
 
-    def _maybe_clear_idle_caches(self) -> None:
+    async def _maybe_clear_idle_caches(self) -> None:
         if not self.runtime_cache_cleanup_enabled:
             return
         now = time.monotonic()
         with self._lock:
             if self._cache_cleanup_deadline is None or now < self._cache_cleanup_deadline:
                 return
-            if self._pending or self._inflight_requests or self._completion_requests:
+            if self._pending or self._inflight_requests:
                 return
             self._cache_cleanup_deadline = None
         self.log.write("cache_cleanup_started")
         started = time.perf_counter()
-        report = self.pipeline_engine.clear_runtime_caches()
+        report = await self.pipeline_engine.clear_runtime_caches()
         if report.get("skipped"):
             with self._lock:
                 if (
                     self._cache_cleanup_deadline is None
                     and not self._pending
                     and not self._inflight_requests
-                    and not self._completion_requests
                 ):
                     self._cache_cleanup_deadline = (
                         time.monotonic() + self.runtime_cache_cleanup_idle_seconds
@@ -1062,7 +1035,7 @@ class WatchScheduler:
             return None
         return candidate
 
-    def _submit_candidate(
+    async def _submit_candidate(
         self,
         candidate: WatchCandidate,
         *,
@@ -1093,32 +1066,31 @@ class WatchScheduler:
         predicted_probe_dirs = self._predicted_output_dirs(candidate.path, run_config)
         self._activate_output_roots([probe_workspace, *predicted_probe_dirs])
         try:
-            handle = self.pipeline_engine.submit(
+            task = asyncio.create_task(self.pipeline_engine.run(
                 [PipelineTarget(candidate.path, output=run_config["output"])],
-                defer_postprocess=True,
-            )
+                output_committer=IdentityOutputCommitter(),
+            ))
         except Exception:
             self._release_output_roots([probe_workspace, *predicted_probe_dirs])
             self._cleanup_probe_workspace(probe_workspace)
             raise
         self._reset_idle_cache_cleanup()
-        add_done_callback = getattr(handle, "add_done_callback", None)
-        if callable(add_done_callback):
-            add_done_callback(lambda _handle: self._wake_service())
+        task.add_done_callback(lambda _task: self._wake_service())
         return _ActivePipelineRequest(
             candidate=candidate,
             group=group,
-            handle=handle,
+            task=task,
+            config=run_config,
             probe_workspace=probe_workspace,
             predicted_probe_dirs=predicted_probe_dirs,
             predicted_final_dirs=predicted_final_dirs,
         )
 
-    def _complete_candidate(self, request: _ActivePipelineRequest) -> WatchRunResult:
+    async def _complete_candidate(self, request: _ActivePipelineRequest) -> WatchRunResult:
         candidate = request.candidate
         group = request.group
         try:
-            response = request.handle.result()
+            response = await request.task
         except Exception:
             self._cleanup_probe_workspace(request.probe_workspace)
             raise
@@ -1262,12 +1234,15 @@ class WatchScheduler:
             self.log.write("failed_terminal", path=candidate.path, error=error, failures=[])
             return WatchRunResult(processed=1, failed=1, errors=[error])
 
-        generated_output_dirs, output_path_map = self._promote_probe_outputs(
+        generated_output_dirs, output_path_map = await self._promote_probe_outputs(
             probe_output_dirs,
             request.predicted_final_dirs,
             request.probe_workspace,
         )
-        request.handle.finalize(output_path_map)
+        await MappedOutputCommitter(self.pipeline_engine.work_broker, output_path_map).commit(
+            request.config,
+            response,
+        )
         self._remember_recent_output_roots(generated_output_dirs)
         self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
@@ -1345,7 +1320,7 @@ class WatchScheduler:
         shutil.rmtree(owner_dir, ignore_errors=True)
         os.makedirs(probe_root, exist_ok=True)
 
-    def _promote_probe_outputs(
+    async def _promote_probe_outputs(
         self,
         probe_outputs: list[str],
         predicted_final_dirs: list[str],
@@ -1372,7 +1347,7 @@ class WatchScheduler:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             release_archive_sessions_under(source)
             try:
-                self._retry_probe_promotion_on_access_denied(
+                await self._retry_probe_promotion_on_access_denied(
                     lambda: os.replace(source, target),
                     source,
                     target,
@@ -1380,7 +1355,7 @@ class WatchScheduler:
             except OSError as exc:
                 if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
                     raise
-                self._retry_probe_promotion_on_access_denied(
+                await self._retry_probe_promotion_on_access_denied(
                     lambda: shutil.move(source, target),
                     source,
                     target,
@@ -1390,10 +1365,16 @@ class WatchScheduler:
             for reported in reported_sources:
                 if reported != source and _is_relative_to(reported, source):
                     path_map[reported] = os.path.join(target, os.path.relpath(reported, source))
-        self._cleanup_probe_workspace(workspace)
+        await self.pipeline_engine.work_broker.run(
+            "watch_cleanup",
+            workspace,
+            self._cleanup_probe_workspace,
+            workspace,
+            request_id=f"watch:{workspace}",
+        )
         return promoted, path_map
 
-    def _retry_probe_promotion_on_access_denied(
+    async def _retry_probe_promotion_on_access_denied(
         self,
         operation: Callable[[], object],
         source: str,
@@ -1402,7 +1383,12 @@ class WatchScheduler:
         retries = 0
         while True:
             try:
-                operation()
+                await self.pipeline_engine.work_broker.run(
+                    "watch_promotion",
+                    source,
+                    operation,
+                    request_id=f"watch:{source}",
+                )
                 return
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 5:
@@ -1421,7 +1407,7 @@ class WatchScheduler:
                     retry_seconds=PROBE_PROMOTION_RETRY_SECONDS,
                     error=str(exc),
                 )
-                time.sleep(PROBE_PROMOTION_RETRY_SECONDS)
+                await asyncio.sleep(PROBE_PROMOTION_RETRY_SECONDS)
 
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None

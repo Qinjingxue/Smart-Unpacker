@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 import copy
 import json
-import threading
-from typing import Iterator
+from typing import AsyncIterator
 
 from sunpack.config.loader import config_cache_token
 from sunpack.config.advanced_defaults import advanced_config_value
@@ -23,37 +22,34 @@ _MUTABLE_PATHS = {
     ("output", "common_root"),
     ("performance", "persistent_server_idle_seconds"),
 }
-_LOCK = threading.RLock()
-_ENGINE: PipelineEngine | None = None
-_ENGINE_KEY: tuple[tuple[object, ...], str, bool] | None = None
+_ENGINES: dict[tuple[tuple[object, ...], str, bool], PipelineEngine] = {}
+_LATEST_IDLE_SECONDS: float | None = None
 
 
 def enable_persistent_runtime() -> None:
     set_server_runtime_active(True)
 
 
-def close_persistent_runtime() -> None:
-    global _ENGINE, _ENGINE_KEY
-    with _LOCK:
-        engine = _ENGINE
-        _ENGINE = None
-        _ENGINE_KEY = None
-        set_server_runtime_active(False)
-    if engine is not None:
-        engine.close(graceful=True)
+async def close_persistent_runtime() -> None:
+    global _LATEST_IDLE_SECONDS
+    engines = tuple(_ENGINES.values())
+    _ENGINES.clear()
+    _LATEST_IDLE_SECONDS = None
+    set_server_runtime_active(False)
+    for engine in engines:
+        await engine.aclose(graceful=True)
 
 
 def persistent_runtime_is_idle() -> bool:
-    with _LOCK:
-        engine = _ENGINE
-    return engine is None or engine.is_idle()
+    return all(engine.is_idle() for engine in _ENGINES.values())
 
 
 def persistent_server_idle_seconds() -> float:
     default = advanced_config_value(("performance", "persistent_server_idle_seconds"))
-    with _LOCK:
-        engine = _ENGINE
-        config = engine.config if engine is not None else {}
+    if _LATEST_IDLE_SECONDS is not None:
+        return _LATEST_IDLE_SECONDS
+    engine = next(iter(_ENGINES.values()), None)
+    config = engine.config if engine is not None else {}
     performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
     try:
         return max(0.0, float(performance.get("persistent_server_idle_seconds", default)))
@@ -61,37 +57,35 @@ def persistent_server_idle_seconds() -> float:
         return max(0.0, float(default))
 
 
-@contextmanager
-def pipeline_engine(
+@asynccontextmanager
+async def pipeline_engine(
     config: dict,
     detection_options: DetectionOptions | None = None,
-) -> Iterator[PipelineEngine]:
-    global _ENGINE, _ENGINE_KEY
-    with _LOCK:
-        enabled = server_runtime_active()
-    if not enabled:
+) -> AsyncIterator[PipelineEngine]:
+    if not server_runtime_active():
         raise RuntimeError("extract pipeline is only available inside the persistent server")
 
+    global _LATEST_IDLE_SECONDS
     options = detection_options or DetectionOptions()
+    performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
+    try:
+        _LATEST_IDLE_SECONDS = max(
+            0.0,
+            float(performance.get("persistent_server_idle_seconds", persistent_server_idle_seconds())),
+        )
+    except (TypeError, ValueError):
+        pass
     key = (config_cache_token(), _stable_config_key(config), options.deep_scan)
-    with _LOCK:
-        if _ENGINE is None or _ENGINE_KEY != key:
-            previous = _ENGINE
-            _ENGINE = None
-            _ENGINE_KEY = None
-            if previous is not None:
-                previous.close(graceful=True)
-            engine_config = copy.deepcopy(config)
-            _ENGINE = (
-                PipelineEngine(engine_config, detection_options=options)
-                if options.deep_scan
-                else PipelineEngine(engine_config)
-            ).start()
-            _ENGINE_KEY = key
-        else:
-            _ENGINE.reconfigure_request(config)
-        engine = _ENGINE
-    assert engine is not None
+    engine = _ENGINES.get(key)
+    if engine is None:
+        engine_config = copy.deepcopy(config)
+        created = (
+            PipelineEngine(engine_config, detection_options=options)
+            if options.deep_scan
+            else PipelineEngine(engine_config)
+        )
+        engine = await created.__aenter__()
+        _ENGINES[key] = engine
     yield engine
 
 

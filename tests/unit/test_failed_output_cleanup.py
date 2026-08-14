@@ -14,6 +14,7 @@ from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, Extract
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
 from tests.helpers.edition import is_lite_edition
+from tests.helpers.async_batch import run_extract_verify
 
 
 @pytest.mark.parametrize("with_zero_file", [False, True])
@@ -193,7 +194,7 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path):
     runner.verifier = RepairVerifier()
     runner._repair_after_verification_decision_with_beam = lambda *args, **kwargs: False
 
-    outcome = runner._extract_verify_with_retries(task, str(output))
+    outcome = run_extract_verify(runner, task, str(output))
     outcome.planned_out_dir = str(output)
     runner.collect_result(task, outcome)
 

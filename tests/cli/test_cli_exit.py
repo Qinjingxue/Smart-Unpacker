@@ -1,4 +1,5 @@
 from argparse import Namespace
+import asyncio
 
 from sunpack.cli.cli import maybe_pause
 from sunpack.cli.cli_constants import EXIT_OK, EXIT_TASK_FAILED
@@ -14,7 +15,7 @@ def test_successful_extract_does_not_pause(monkeypatch, capsys):
     pause_calls = []
     monkeypatch.setattr("sunpack.cli.cli.os.system", pause_calls.append)
 
-    maybe_pause(Namespace(command="extract", pause_on_exit=True), CliContext(), EXIT_OK, _result())
+    asyncio.run(maybe_pause(Namespace(command="extract", pause_on_exit=True), CliContext(), EXIT_OK, _result()))
 
     assert pause_calls == []
     assert capsys.readouterr().out == ""
@@ -22,13 +23,12 @@ def test_successful_extract_does_not_pause(monkeypatch, capsys):
 
 def test_failed_extract_still_pauses(monkeypatch):
     pause_calls = []
-    monkeypatch.setattr("sunpack.cli.cli.os.system", pause_calls.append)
 
-    maybe_pause(
+    asyncio.run(maybe_pause(
         Namespace(command="extract", pause_on_exit=True),
-        CliContext(),
+        CliContext(input_reader=lambda prompt: pause_calls.append(prompt) or ""),
         EXIT_TASK_FAILED,
         _result(["extraction failed"]),
-    )
+    ))
 
     assert len(pause_calls) == 1

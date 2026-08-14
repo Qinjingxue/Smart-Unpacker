@@ -9,11 +9,11 @@ class ArchiveSpaceRecovery:
 
     def cleanup_next_archive_group(self) -> bool:
         if self.actions.cleanup_mode == "keep":
-            print(self.actions.t("space.full_keep"))
+            print(self.actions.t("space.full_keep"), file=self.actions.stdout, flush=True)
             return False
 
         if not self.context.unpacked_archives:
-            print(self.actions.t("space.full_no_archives"))
+            print(self.actions.t("space.full_no_archives"), file=self.actions.stdout, flush=True)
             return False
 
         parts_to_delete = self.context.unpacked_archives.pop(0)

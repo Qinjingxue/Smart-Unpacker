@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,9 @@ from sunpack.support.archive_knowledge_projection import (
 )
 from sunpack.support.global_cache_manager import GLOBAL_CACHE
 from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
+
+
+_TEST_LOOP = asyncio.new_event_loop()
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +71,7 @@ class _CleanupOnlyEngine:
     def is_idle(self):
         return True
 
-    def clear_runtime_caches(self):
+    async def clear_runtime_caches(self):
         self.clear_calls += 1
         return {"before": {"reader": {"cache_entries": 1}}, "after": {"reader": {"cache_entries": 0}}}
 
@@ -93,7 +97,7 @@ def test_watch_deadline_clears_only_after_idle_window(tmp_path):
     watcher._arm_idle_cache_cleanup()
     assert watcher.next_delay_seconds() == pytest.approx(10, abs=0.1)
     watcher._cache_cleanup_deadline = 0
-    watcher._maybe_clear_idle_caches()
+    _TEST_LOOP.run_until_complete(watcher._maybe_clear_idle_caches())
     assert engine.clear_calls == 1
     assert watcher._cache_cleanup_deadline is None
 
@@ -101,5 +105,5 @@ def test_watch_deadline_clears_only_after_idle_window(tmp_path):
     watcher._reset_idle_cache_cleanup()
     watcher._cache_cleanup_deadline = 0
     watcher._pending["busy"] = object()
-    watcher._maybe_clear_idle_caches()
+    _TEST_LOOP.run_until_complete(watcher._maybe_clear_idle_caches())
     assert engine.clear_calls == 1

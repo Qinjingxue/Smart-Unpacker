@@ -57,11 +57,11 @@ def register(subparsers, ctx):
     startup_parser.add_argument("startup_action", choices=["enable", "disable", "status"])
 
 
-def handle(args, ctx):
+async def handle(args, ctx):
     try:
         action = args.watch_action
         if action == "start":
-            return _handle_start(args, ctx)
+            return await _handle_start(args, ctx)
         if action == "add":
             return _handle_add(args)
         if action == "remove":
@@ -81,7 +81,7 @@ def handle(args, ctx):
     return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.watch.unknown_action", action=action)])
 
 
-def _handle_start(args, ctx):
+async def _handle_start(args, ctx):
     if _request_watch_elevation(args):
         return 0, CliCommandResult(
             command=COMMAND,
@@ -90,7 +90,7 @@ def _handle_start(args, ctx):
         )
     from sunpack.coordinator.watch_runtime import run_watch_service
 
-    code = run_watch_service(
+    code = await run_watch_service(
         tray_enabled=not bool(getattr(args, "no_tray", False)),
         once=bool(getattr(args, "once", False)),
     )

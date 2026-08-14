@@ -192,6 +192,9 @@ CLI 可用 `--recur` 临时覆盖。
 | `performance.worker.watchdog_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
 | `performance.worker.watchdog_interval_ms` | `int` / `float` | Python 仅用于发现 worker 丢失的检查间隔。 |
 | `performance.worker.thread_capacity` | `int` | `IInArchive` 线程硬容量；`0` 由 worker 按机器能力探测。实际活动任务数由 native 自适应准入。 |
+| `performance.worker.stage_thread_capacity` | `int` | 同步扫描、分析、校验、修复和后处理的固定 worker 线程容量；`0` 自动按机器能力选择。 |
+| `performance.worker.max_inflight_files` | `int` | 同时存在的文件级异步状态机上限；`0` 自动取 worker 总容量的 4 倍，范围 64–512。 |
+| `performance.worker.max_pending_stage_jobs` | `int` | Python blocking lane 的待执行作业硬上限，满载时异步生产者等待而不创建新线程。 |
 | `performance.worker.adaptive_enabled` | `bool` | 是否启用 native CPU/IO/内存采样和动态准入。 |
 | `performance.worker.initial_active_jobs` | `int` | native 初始活动任务数，`0` 自动选择。 |
 | `performance.worker.sample_interval_ms` | `int` | native 资源采样间隔，最小 100 ms。 |
@@ -260,8 +263,6 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `parallel` | `bool` | 单个输入内是否并行跑格式模块。 |
-| `max_workers` | `int` | 单输入格式模块并发上限。 |
 | `max_concurrent_reads` | `int` | 单视图并发读取上限。 |
 | `shared_cache_mb` | `int` | 二进制视图共享读缓存。 |
 | `max_read_mb_per_archive` | `int` / `null` | 单归档最多读取大小，`null` 表示不限。 |

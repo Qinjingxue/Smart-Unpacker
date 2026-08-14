@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
@@ -23,6 +24,13 @@ from sunpack.i18n import I18nContext
 from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent
 
 
+def _advance_state(state, sent, *, first: bool):
+    try:
+        return False, next(state) if first else state.send(sent)
+    except StopIteration as completed:
+        return True, completed.value
+
+
 class SingleArchiveExtractor:
     def __init__(
         self,
@@ -39,6 +47,7 @@ class SingleArchiveExtractor:
         write_progress_manifest: bool = False,
         quiet: bool = False,
         language: str = "en",
+        output_stream=None,
     ):
         self.seven_z_path = seven_z_path
         self.password_store = password_store
@@ -53,6 +62,7 @@ class SingleArchiveExtractor:
         self.write_progress_manifest = bool(write_progress_manifest)
         self.quiet = bool(quiet)
         self.i18n = I18nContext(language)
+        self.output_stream = output_stream if output_stream is not None else sys.stdout
 
     def extract(
         self,
@@ -83,23 +93,24 @@ class SingleArchiveExtractor:
             except StopIteration as completed:
                 return completed.value
 
-    def extract_async(
+    async def extract_asyncio(
         self,
+        broker,
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
         *,
+        request_id: str,
+        file_id: str,
+        cancellation,
         allow_embedded_segments: bool = True,
         phase_timer: Callable[..., Any] | None = None,
         phase_prefix: str = "extract",
-        on_complete: Callable[[ExtractionResult], None],
-    ) -> None:
-        """Run the Python attempt state machine around native callbacks.
-
-        Only the preparation, verification and retry continuations run on a
-        Python callback executor.  The extraction attempt itself is submitted
-        directly to the native persistent worker.
+    ) -> ExtractionResult:
+        """Advance one extraction generator without holding a worker slot
+        while the native worker owns the archive operation.
         """
+
         state = self._extract_state_machine(
             task,
             out_dir,
@@ -108,51 +119,29 @@ class SingleArchiveExtractor:
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
         )
-
-        def finish(result: ExtractionResult) -> None:
+        sent = None
+        first = True
+        while True:
+            done, value = await broker.run(
+                "extract_prepare" if first else "extract_continue",
+                file_id,
+                _advance_state,
+                state,
+                sent,
+                first=first,
+                request_id=request_id,
+                cancellation=cancellation,
+            )
+            if done:
+                return value
+            request = value
+            first = False
             try:
-                on_complete(result)
-            except Exception:
-                pass
-
-        def advance(sent: object = None, *, first: bool = False) -> None:
-            try:
-                request = next(state) if first else state.send(sent)
-            except StopIteration as completed:
-                finish(completed.value)
-                return
+                sent = await self.sevenzip_runner.submit_attempt_asyncio(**request)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
-                finish(self._failed(
-                    task.main_path,
-                    out_dir,
-                    list(task.all_parts or []),
-                    str(exc),
-                    diagnostics={
-                        "failure_stage": "python_continuation",
-                        "failure_kind": "exception",
-                        "message": str(exc),
-                    },
-                ))
-                return
-            try:
-                future = self.sevenzip_runner.submit_attempt(**request)
-            except Exception as exc:
-                self.sevenzip_runner.submit_continuation(
-                    advance,
-                    self.sevenzip_runner.failed_process_for_exception(exc, request),
-                )
-                return
-
-            def native_done(done) -> None:
-                try:
-                    native_result = done.result()
-                except Exception as exc:
-                    native_result = self.sevenzip_runner.failed_process_for_exception(exc, request)
-                self.sevenzip_runner.submit_continuation(advance, native_result)
-
-            future.add_done_callback(native_done)
-
-        self.sevenzip_runner.submit_continuation(advance, first=True)
+                sent = self.sevenzip_runner.failed_process_for_exception(exc, request)
 
     def _extract_state_machine(
         self,
@@ -1138,7 +1127,7 @@ class SingleArchiveExtractor:
 
     def _log(self, message: str) -> None:
         if not self.quiet:
-            print(message)
+            print(message, file=self.output_stream, flush=True)
 
 
 def _phase(timer: Callable[..., Any] | None, name: str):

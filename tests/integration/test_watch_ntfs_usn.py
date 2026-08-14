@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ import sunpack_native
 
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.filesystem.watcher.scanner import _candidate_for
+from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="NTFS USN tests require Windows")
@@ -29,7 +31,7 @@ def _watcher(root: Path, *, quiet_seconds: float = 0.05) -> WatchScheduler:
         state_path=str(root / ".watch-state" / "state.json"),
         quiet_seconds=quiet_seconds,
         initial_scan=False,
-        pipeline_engine=object(),
+        pipeline_engine=FakePipelineEngine(lambda _config: None),
     )
 
 
@@ -125,8 +127,9 @@ def test_slow_writes_busy_handle_move_and_event_storm_reach_ready(tmp_path):
     temporary = tmp_path / "slow.zip.baiduyun.p.downloading"
     final = tmp_path / "slow.zip"
     watcher = _watcher(tmp_path)
-    watcher.start()
-    try:
+    async def scenario():
+      await watcher.start()
+      try:
         with temporary.open("wb") as writer:
             for index in range(8):
                 writer.write(bytes([index]) * 128 * 1024)
@@ -151,5 +154,6 @@ def test_slow_writes_busy_handle_move_and_event_storm_reach_ready(tmp_path):
         time.sleep(0.3)
         ready = watcher._pop_ready(time.time())
         assert [Path(candidate.path).name for candidate in ready] == ["slow.zip"]
-    finally:
-        watcher.stop()
+      finally:
+        await watcher.stop()
+    asyncio.run(scenario())

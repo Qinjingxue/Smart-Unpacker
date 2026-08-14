@@ -5,6 +5,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner, _proves_content_loss
+from tests.helpers.async_batch import run_extract_verify
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.results import OutcomeKind
 from sunpack.repair.result import RepairResult
@@ -80,7 +81,7 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
     )
     runner.repair_stage = _OneShotRepairStage()
 
-    outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir))
+    outcome = run_extract_verify(runner, _task(archive), str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
@@ -157,7 +158,7 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     runner.repair_stage = _NoCandidateRepairStage()
 
     task = _task(archive)
-    outcome = runner._extract_verify_with_retries(task, str(out_dir))
+    outcome = run_extract_verify(runner, task, str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
@@ -259,7 +260,7 @@ def test_complete_mode_stops_before_repair_on_proven_payload_damage_and_cleans_o
     runner.repair_stage = repair_stage
     task = _task(archive)
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir))
+    outcome = run_extract_verify(runner, task, str(out_dir))
 
     assert repair_stage.calls == 0
     assert outcome.outcome_kind == OutcomeKind.FAILURE

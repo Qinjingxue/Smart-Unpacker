@@ -1,7 +1,6 @@
 import os
 import hashlib
 import json
-import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, List
@@ -39,6 +38,14 @@ from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.support.output_cleanup import OutputCleanupEvent
+from sunpack.coordinator.async_work import map_bounded
+
+
+def _advance_batch_state(state, sent, *, first: bool):
+    try:
+        return False, next(state) if first else state.send(sent)
+    except StopIteration as completed:
+        return True, completed.value
 from sunpack.passwords.directory_context import DirectoryPasswordContextStore
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
@@ -185,57 +192,85 @@ class ExtractionBatchRunner:
         # Physical source paths are immutable. Detected formats and logical
         # volume identities travel through ArchiveInputDescriptor/ArchiveState.
 
-    def execute(
+    async def execute_async(
         self,
         tasks: List[ArchiveTask],
         *,
+        broker,
+        cancellation,
         default_output_dir_for_task=None,
         missing_volume_retry=None,
+        ensure_input_lease=None,
     ) -> List[str]:
+        """Execute independent logical archives as interleaved coroutines."""
+
         if not tasks:
             if self.progress_reporter is not None:
                 self.progress_reporter.begin_round(self.progress_round_index, [], direct=self.progress_direct_mode)
             return []
 
-        self.prepare_tasks(tasks)
-        self.directory_password_contexts.annotate(tasks)
-        output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
-            tasks,
-            default_output_dir_for_task or self.extractor.default_output_dir_for_task,
+        def prepare_batch():
+            self.prepare_tasks(tasks)
+            self.directory_password_contexts.annotate(tasks)
+            resolver = self.rename_scheduler.build_output_dir_resolver(
+                tasks,
+                default_output_dir_for_task or self.extractor.default_output_dir_for_task,
+            )
+            resolver = self._cached_output_dir_resolver(resolver)
+            prepared = self._skip_tasks_inside_batch_outputs(tasks, resolver)
+            return resolver, prepared
+
+        output_dir_resolver, prepared_tasks = await broker.run(
+            "admission",
+            self.request_id,
+            prepare_batch,
+            request_id=self.request_id,
+            cancellation=cancellation,
         )
-        output_dir_resolver = self._cached_output_dir_resolver(output_dir_resolver)
-        tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
         if self.progress_reporter is not None:
-            self.progress_reporter.begin_round(self.progress_round_index, tasks, direct=self.progress_direct_mode)
-        results = self._execute_ready_tasks(
-            tasks,
-            output_dir_resolver,
-            missing_volume_retry=missing_volume_retry,
+            self.progress_reporter.begin_round(
+                self.progress_round_index,
+                prepared_tasks,
+                direct=self.progress_direct_mode,
+            )
+
+        async def execute_one(task):
+            return await self._execute_one_async(
+                task,
+                output_dir_resolver,
+                broker=broker,
+                cancellation=cancellation,
+                missing_volume_retry=missing_volume_retry,
+                ensure_input_lease=ensure_input_lease,
+            )
+
+        worker_config = (
+            self.config.get("performance", {}).get("worker", {})
+            if isinstance(self.config.get("performance"), dict)
+            else {}
         )
+        configured_limit = int(worker_config.get("max_inflight_files", 0) or 0) if isinstance(worker_config, dict) else 0
+        inflight_limit = configured_limit or min(512, max(64, broker.thread_capacity * 8))
+        outcomes = await map_bounded(prepared_tasks, inflight_limit, execute_one)
 
         output_dirs = []
         logical_scan_roots = []
         output_inventories: dict[str, OutputInventory] = {}
-        for task, outcome in results:
+        for task, outcome in outcomes:
             output_dir = self.collect_result(task, outcome)
-            if output_dir:
-                output_dirs.append(output_dir)
-                self.directory_password_contexts.remember(output_dir, task)
-                if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
-                    projected_roots = self.output_scan_policy.project_logical_scan_roots(
-                        output_dir,
-                        outcome.result,
-                    )
-                else:
-                    projected_roots = [(output_dir, None)]
-                for logical_root, projected_inventory in projected_roots:
-                    logical_scan_roots.append(logical_root)
-                    inventory = OutputInventory.from_value(
-                        projected_inventory,
-                        expected_root=logical_root,
-                    )
-                    if inventory is not None:
-                        output_inventories[os.path.normcase(os.path.abspath(logical_root))] = inventory
+            if not output_dir:
+                continue
+            output_dirs.append(output_dir)
+            self.directory_password_contexts.remember(output_dir, task)
+            if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
+                projected_roots = self.output_scan_policy.project_logical_scan_roots(output_dir, outcome.result)
+            else:
+                projected_roots = [(output_dir, None)]
+            for logical_root, projected_inventory in projected_roots:
+                logical_scan_roots.append(logical_root)
+                inventory = OutputInventory.from_value(projected_inventory, expected_root=logical_root)
+                if inventory is not None:
+                    output_inventories[os.path.normcase(os.path.abspath(logical_root))] = inventory
         if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
             return self.output_scan_policy.scan_roots_from_outputs(
                 output_dirs,
@@ -244,107 +279,110 @@ class ExtractionBatchRunner:
             )
         return self.output_scan_policy.scan_roots_from_outputs(output_dirs)
 
-    def _execute_ready_tasks(
+    async def _execute_one_async(
         self,
-        tasks: List[ArchiveTask],
+        task: ArchiveTask,
         output_dir_resolver,
         *,
+        broker,
+        cancellation,
         missing_volume_retry=None,
-    ) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
-        ready_tasks: list[ArchiveTask] = []
-        skipped_results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
-        for _index, task, _out_dir, preflight in self._inspect_tasks_before_extract(tasks, output_dir_resolver):
-            if preflight.skip_result is not None:
-                outcome = BatchExtractionOutcome(preflight.skip_result)
-                if (
-                    callable(missing_volume_retry)
-                    and preflight.skip_result.failure is not None
-                    and preflight.skip_result.failure.contains(FailureKind.MISSING_VOLUME)
-                    and not bool(task.fact_bag.get("relation.volume_retry_attempted"))
-                ):
-                    replacement = missing_volume_retry(task, outcome)
-                    if isinstance(replacement, ArchiveTask):
-                        task.adopt_detection_plan(replacement)
-                        task.fact_bag.set("relation.volume_retry_attempted", True)
-                        self.prepare_tasks([task])
-                        self.directory_password_contexts.annotate([task])
-                        ready_tasks.append(task)
-                        continue
-                skipped_results.append((task, outcome))
-                self._report_task_finished(task, outcome)
-                continue
-            ready_tasks.append(task)
+        ensure_input_lease=None,
+    ) -> tuple[ArchiveTask, BatchExtractionOutcome]:
+        file_id = task.key or task.main_path
 
-        if not ready_tasks:
-            return skipped_results
-        if len(ready_tasks) == 1:
+        def preflight():
+            inspected = self._inspect_tasks_before_extract([task], output_dir_resolver)[0]
+            _index, _task, out_dir, result = inspected
+            if result.skip_result is not None:
+                return out_dir, BatchExtractionOutcome(result.skip_result)
             guard_enabled = bool(self._resource_guard_config().get("enabled", False))
-            if guard_enabled or knowledge_view.resource_analysis(ready_tasks[0]):
-                self.resource_inspector.inspect(ready_tasks[0])
+            if guard_enabled or knowledge_view.resource_analysis(task):
+                self.resource_inspector.inspect(task)
             else:
-                self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
-        else:
-            self._inspect_resource_profiles(ready_tasks)
-        guarded_results = self._resource_guard_results(ready_tasks, output_dir_resolver)
-        if guarded_results:
-            guarded = {id(task) for task, _outcome in guarded_results}
-            ready_tasks = [task for task in ready_tasks if id(task) not in guarded]
-            skipped_results.extend(guarded_results)
-            for task, outcome in guarded_results:
-                self._report_task_finished(task, outcome)
-        if not ready_tasks:
-            return skipped_results
+                self.resource_inspector.record_estimated_single_task_profile(task)
+            guarded = self._resource_guard_results([task], output_dir_resolver)
+            return out_dir, guarded[0][1] if guarded else None
 
-        return skipped_results + self._execute_native_ready_tasks(
-            ready_tasks,
-            output_dir_resolver,
+        retried_missing_volume = False
+        while True:
+            planned_out_dir, terminal = await broker.run(
+                "preflight",
+                file_id,
+                preflight,
+                request_id=self.request_id,
+                cancellation=cancellation,
+            )
+            if not (
+                terminal is not None
+                and callable(missing_volume_retry)
+                and not retried_missing_volume
+                and terminal.result.failure is not None
+                and terminal.result.failure.contains(FailureKind.MISSING_VOLUME)
+            ):
+                break
+            replacement = await broker.run(
+                "missing_volume",
+                file_id,
+                missing_volume_retry,
+                task,
+                terminal,
+                request_id=self.request_id,
+                cancellation=cancellation,
+            )
+            retried_missing_volume = True
+            if not isinstance(replacement, ArchiveTask):
+                break
+            task.adopt_detection_plan(replacement)
+            task.fact_bag.set("relation.volume_retry_attempted", True)
+            await broker.run(
+                "relation",
+                file_id,
+                self.prepare_tasks,
+                [task],
+                request_id=self.request_id,
+                cancellation=cancellation,
+            )
+        if terminal is not None:
+            terminal.planned_out_dir = planned_out_dir
+            self._report_task_finished(task, terminal)
+            return task, terminal
+
+        state = self._extract_verify_state_machine(
+            task,
+            planned_out_dir,
             missing_volume_retry=missing_volume_retry,
         )
-
-    def _execute_native_ready_tasks(
-        self,
-        tasks: list[ArchiveTask],
-        output_dir_resolver,
-        *,
-        missing_volume_retry=None,
-    ) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
-        """Submit all ready attempts; native owns extraction admission.
-
-        The request thread waits for the batch-level business result, not for
-        one Python worker per archive.  Native completion callbacks resume the
-        verification/retry state machine and the final result is collected
-        here for the existing pipeline API.
-        """
-        if not tasks:
-            return []
-        condition = threading.Condition()
-        completed: dict[int, tuple[ArchiveTask, BatchExtractionOutcome]] = {}
-
-        def complete(task: ArchiveTask, planned_out_dir: str, outcome: BatchExtractionOutcome) -> None:
-            outcome.planned_out_dir = planned_out_dir
-            self._report_task_finished(task, outcome)
-            with condition:
-                completed[id(task)] = (task, outcome)
-                condition.notify_all()
-
-        for task in tasks:
-            planned_out_dir = output_dir_resolver(task)
-            try:
-                self._extract_verify_with_retries_async(
-                    task,
-                    planned_out_dir,
-                    missing_volume_retry=missing_volume_retry,
-                    on_complete=lambda outcome, current=task, out_dir=planned_out_dir: complete(
-                        current, out_dir, outcome
-                    ),
-                )
-            except Exception:
-                raise
-
-        with condition:
-            while len(completed) < len(tasks):
-                condition.wait()
-        return [completed[id(task)] for task in tasks]
+        sent = None
+        first = True
+        while True:
+            done, value = await broker.run(
+                "extract_prepare" if first else "verify_repair",
+                file_id,
+                _advance_batch_state,
+                state,
+                sent,
+                first=first,
+                request_id=self.request_id,
+                cancellation=cancellation,
+            )
+            if done:
+                outcome = value
+                outcome.planned_out_dir = planned_out_dir
+                self._report_task_finished(task, outcome)
+                return task, outcome
+            request = value
+            first = False
+            if callable(ensure_input_lease):
+                await ensure_input_lease(request["task"])
+            sent = await self.extractor.extract_asyncio(
+                broker,
+                request["task"],
+                request["out_dir"],
+                request_id=self.request_id,
+                file_id=file_id,
+                cancellation=cancellation,
+            )
 
     def _report_task_started(self, task: ArchiveTask) -> None:
         if self.progress_reporter is not None:
@@ -430,71 +468,6 @@ class ExtractionBatchRunner:
     def _inspect_resource_profiles(self, tasks: list[ArchiveTask]) -> None:
         for task in tasks:
             self.resource_inspector.inspect(task)
-
-    def _extract_verify_with_retries(
-        self,
-        task: ArchiveTask,
-        out_dir: str,
-        *,
-        missing_volume_retry=None,
-    ) -> BatchExtractionOutcome:
-        state = self._extract_verify_state_machine(
-            task,
-            out_dir,
-            missing_volume_retry=missing_volume_retry,
-        )
-        try:
-            request = next(state)
-        except StopIteration as completed:
-            return completed.value
-        while True:
-            result = self.extractor.extract(
-                request["task"],
-                request["out_dir"],
-            )
-            try:
-                request = state.send(result)
-            except StopIteration as completed:
-                return completed.value
-
-    def _extract_verify_with_retries_async(
-        self,
-        task: ArchiveTask,
-        out_dir: str,
-        *,
-        missing_volume_retry=None,
-        on_complete: Callable[[BatchExtractionOutcome], None],
-    ) -> None:
-        state = self._extract_verify_state_machine(
-            task,
-            out_dir,
-            missing_volume_retry=missing_volume_retry,
-        )
-
-        def advance(result=None, *, first: bool = False) -> None:
-            try:
-                request = next(state) if first else state.send(result)
-            except StopIteration as completed:
-                on_complete(completed.value)
-                return
-            except Exception as exc:
-                on_complete(BatchExtractionOutcome(
-                    result=ExtractionResult(
-                        success=False,
-                        archive=task.main_path,
-                        out_dir=out_dir,
-                        all_parts=list(task.all_parts or []),
-                        error=str(exc),
-                    ),
-                ))
-                return
-            self.extractor.extract_async(
-                request["task"],
-                request["out_dir"],
-                on_complete=advance,
-            )
-
-        self.extractor.sevenzip_runner.submit_continuation(advance, first=True)
 
     def _extract_verify_state_machine(
         self,

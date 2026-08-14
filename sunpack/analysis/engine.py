@@ -1,5 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from typing import Any
 
 from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs
@@ -236,24 +234,14 @@ class AnalysisEngine:
         module_configs = enabled_module_configs(self.config)
         if not modules:
             return []
-        if not self.config.get("parallel", True) or len(modules) == 1:
-            return [self._run_module(module, view, prepass, module_configs.get(module.spec.name, {})) for module in modules]
-
-        max_workers = max(1, int(self.config.get("max_workers", 3) or 1))
-        evidences = []
-        executor_context = (
-            nullcontext(self.executor_pool)
-            if self.executor_pool is not None
-            else ThreadPoolExecutor(max_workers=min(max_workers, len(modules)))
-        )
-        with executor_context as executor:
-            futures = {
-                executor.submit(self._run_module, module, view, prepass, module_configs.get(module.spec.name, {})): module
-                for module in modules
-            }
-            for future in as_completed(futures):
-                evidences.append(future.result())
-        return evidences
+        # File-level concurrency is owned by AsyncWorkBroker.  Spawning a
+        # second executor here creates nested pools, oversubscribes the host,
+        # and lets one archive consume all analysis slots.  A single archive's
+        # modules therefore run deterministically inside its broker job.
+        return [
+            self._run_module(module, view, prepass, module_configs.get(module.spec.name, {}))
+            for module in modules
+        ]
 
     def _run_module(self, module, view: SharedBinaryView, prepass: dict, config: dict) -> ArchiveFormatEvidence:
         try:

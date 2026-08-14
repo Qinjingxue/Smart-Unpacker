@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import random
 import shutil
@@ -75,10 +76,19 @@ class WatchHarness:
     submit_times: list[float] = field(default_factory=list)
     submission_events: list[SubmissionEvent] = field(default_factory=list)
     stable_at_by_name: dict[str, float] = field(default_factory=dict)
+    loop: asyncio.AbstractEventLoop | None = None
+    delegate: PipelineEngine | None = None
+    async_stop: Any = None
 
     def close(self) -> None:
-        self.watcher.stop()
-        self.engine.close()
+        if self.loop is None:
+            return
+        if self.async_stop is not None:
+            self.loop.run_until_complete(self.async_stop())
+        if self.delegate is not None:
+            self.loop.run_until_complete(self.delegate.aclose())
+        self.loop.close()
+        self.loop = None
 
 
 class _TimedPipelineEngine:
@@ -93,9 +103,8 @@ class _TimedPipelineEngine:
         self.delegate = delegate
         self.submit_times = submit_times
         self.submission_events = submission_events
-        self.handles = []
 
-    def submit(self, *args, **kwargs):
+    async def run(self, *args, **kwargs):
         submitted_at = time.perf_counter()
         self.submit_times.append(submitted_at)
         targets = args[0] if args else kwargs.get("targets", ())
@@ -106,9 +115,7 @@ class _TimedPipelineEngine:
                 for target in targets
             ),
         ))
-        handle = self.delegate.submit(*args, **kwargs)
-        self.handles.append(handle)
-        return handle
+        return await self.delegate.run(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self.delegate, name)
@@ -400,7 +407,9 @@ def start_watch(
     config["post_extract"]["archive_cleanup_mode"] = cleanup_mode
     submit_times: list[float] = []
     submission_events: list[SubmissionEvent] = []
-    delegate = PipelineEngine(config).start()
+    loop = asyncio.new_event_loop()
+    delegate = PipelineEngine(config)
+    loop.run_until_complete(delegate.__aenter__())
     engine = _TimedPipelineEngine(delegate, submit_times, submission_events)
     watcher = WatchScheduler(
         config,
@@ -412,6 +421,12 @@ def start_watch(
         pipeline_engine=engine,
         group_coordinator=WatchGroupCoordinator(config),
     )
+    async_run_once = watcher.run_once
+    async_start = watcher.start
+    async_stop = watcher.stop
+    watcher.run_once = lambda: loop.run_until_complete(async_run_once())
+    watcher.start = lambda: loop.run_until_complete(async_start())
+    watcher.stop = lambda: loop.run_until_complete(async_stop())
     if initial_scan:
         watcher.start()
     return WatchHarness(
@@ -422,6 +437,9 @@ def start_watch(
         watcher=watcher,
         submit_times=submit_times,
         submission_events=submission_events,
+        loop=loop,
+        delegate=delegate,
+        async_stop=async_stop,
     )
 
 
@@ -617,8 +635,7 @@ def drive_watch_until(
         combined.errors.extend(result.errors)
         with watcher._lock:
             inflight = bool(watcher._inflight_requests)
-            completion_pending = bool(watcher._completion_requests)
-        if condition() and watcher.pending_count == 0 and not inflight and not completion_pending:
+        if condition() and watcher.pending_count == 0 and not inflight:
             return combined
         time.sleep(0.01)
     pytest.fail(

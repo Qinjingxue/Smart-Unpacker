@@ -12,11 +12,21 @@ from sunpack.i18n import I18nContext
 class RunReporter:
     """Thread-safe, user-facing progress for one pipeline run."""
 
-    def __init__(self, language: str = "en", quiet: bool = False, verbose: bool = False):
+    def __init__(
+        self,
+        language: str = "en",
+        quiet: bool = False,
+        verbose: bool = False,
+        *,
+        stdout=None,
+        stderr=None,
+    ):
         self.i18n = I18nContext(language)
         self.language = self.i18n.language
         self.quiet = bool(quiet)
         self.verbose = bool(verbose)
+        self.stdout = stdout if stdout is not None else sys.stdout
+        self.stderr = stderr if stderr is not None else sys.stderr
         self._lock = threading.Lock()
         self._total_tasks = 0
         self._completed_tasks = 0
@@ -25,7 +35,7 @@ class RunReporter:
         self._task_lineages: dict[int, tuple[str, ...]] = {}
         self._output_lineages: dict[str, tuple[str, ...]] = {}
         self._top_level_outputs: list[str] = []
-        self._interactive = not self.quiet and _terminal_supports_updates(sys.stdout)
+        self._interactive = not self.quiet and _terminal_supports_updates(self.stdout)
         self._use_color = self._interactive and os.environ.get("NO_COLOR") is None
         self._panel_tasks: list[int] = []
         self._task_rows: dict[int, dict[str, Any]] = {}
@@ -38,7 +48,7 @@ class RunReporter:
         depth = max(1, int(round_index or 1))
         with self._lock:
             key = "report.scan_started" if depth == 1 else "report.recursive_scan_checking"
-            print(self.i18n.t(key, depth=depth), flush=True)
+            self._print(self.i18n.t(key, depth=depth))
 
     def begin_round(self, round_index: int, tasks: list[Any], direct: bool = False) -> None:
         depth = max(1, int(round_index or 1))
@@ -69,11 +79,11 @@ class RunReporter:
                 message = self.i18n.t("report.scan_found", count=len(tasks))
             else:
                 message = self.i18n.t("report.recursive_found", depth=depth, count=len(tasks))
-            print(message, flush=True)
+            self._print(message)
             if self._interactive:
                 self._panel_tasks = [id(task) for task in tasks]
                 for task_id in self._panel_tasks:
-                    print(self._format_task_row(self._task_rows[task_id]), flush=True)
+                    self._print(self._format_task_row(self._task_rows[task_id]))
 
     def task_started(self, task: Any, round_index: int) -> None:
         if self.quiet:
@@ -86,7 +96,7 @@ class RunReporter:
             name = _task_name(task)
             prefix = self._tree_prefix(depth)
             progress = f"{self._completed_tasks}/{self._total_tasks}"
-            print(self.i18n.t("report.processing", prefix=prefix, progress=progress, name=name), flush=True)
+            self._print(self.i18n.t("report.processing", prefix=prefix, progress=progress, name=name))
 
     def task_status(self, task: Any, state: str, detail: str = "") -> None:
         if self.quiet:
@@ -96,7 +106,7 @@ class RunReporter:
                 self._update_task_locked(task, state=state, detail=detail, force=True)
                 return
             if state == "repairing":
-                print(self.i18n.t("report.repairing", name=_task_name(task)), flush=True)
+                self._print(self.i18n.t("report.repairing", name=_task_name(task)))
 
     def task_progress(self, task: Any, event: dict[str, Any]) -> None:
         if self.quiet:
@@ -131,7 +141,7 @@ class RunReporter:
                 displayed_percent = (new_percent // 10) * 10
                 if new_percent >= 100 or displayed_percent >= last_percent + 10:
                     self._last_streamed_progress[task_id] = displayed_percent
-                    print(self._format_task_row(row), flush=True)
+                    self._print(self._format_task_row(row))
 
     def task_finished(self, task: Any, outcome: Any, round_index: int) -> None:
         with self._lock:
@@ -178,7 +188,7 @@ class RunReporter:
             elif self.verbose and not success:
                 error = str(getattr(result, "error", "") or "")
                 detail = self.i18n.t("report.detail.error", error=error) if error else ""
-            print(f"{prefix}[{status} {progress}] {name}{relation}{detail}", flush=True)
+            self._print(f"{prefix}[{status} {progress}] {name}{relation}{detail}")
 
     def log_final_summary(
         self,
@@ -196,40 +206,40 @@ class RunReporter:
         elapsed = max(0.0, time.time() - start_time)
 
         if not self.quiet:
-            print("\n" + self.i18n.t("report.complete_title"))
-            print("-" * 54)
-            print(self.i18n.t("report.time", duration=self.i18n.format_duration(elapsed)))
-            print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count, failed=failed_count))
+            self._print("\n" + self.i18n.t("report.complete_title"))
+            self._print("-" * 54)
+            self._print(self.i18n.t("report.time", duration=self.i18n.format_duration(elapsed)))
+            self._print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count, failed=failed_count))
             if self._max_depth > 1:
-                print(self.i18n.t("report.recursion", levels=self._max_depth, count=self._nested_tasks))
+                self._print(self.i18n.t("report.recursion", levels=self._max_depth, count=self._nested_tasks))
             output_location = self._output_location()
             if output_location:
-                print(self.i18n.t("report.output", output=output_location))
+                self._print(self.i18n.t("report.output", output=output_location))
 
             for item in recovered:
                 archive = os.path.basename(str(item.get("archive") or ""))
                 coverage = item.get("archive_coverage") if isinstance(item.get("archive_coverage"), dict) else {}
                 completeness = _percent(coverage.get("completeness", item.get("completeness", 0.0)))
-                print(self.i18n.t("report.partial", archive=archive, completeness=completeness, coverage=_file_coverage(coverage)))
+                self._print(self.i18n.t("report.partial", archive=archive, completeness=completeness, coverage=_file_coverage(coverage)))
                 warning = FailureInfo.from_dict(item.get("warning"))
                 if warning is not None:
-                    print(self.i18n.t("report.partial_warning", warning=warning.message))
+                    self._print(self.i18n.t("report.partial_warning", warning=warning.message))
 
         structured_failures = list(failures or [])
         if failed_tasks:
             if not self.quiet:
                 for failed_task in failed_tasks:
-                    print(self.i18n.t("report.failed", task=failed_task))
+                    self._print(self.i18n.t("report.failed", task=failed_task))
                 if structured_failures and all(failure.is_password_failure for failure in structured_failures):
-                    print(self.i18n.t("report.password_failure"))
+                    self._print(self.i18n.t("report.password_failure"))
                 else:
                     for repair in _terminal_repair_statuses(structured_failures):
                         status = str(repair.get("status") or "")
                         reason = str(repair.get("terminal_reason") or status)
                         if status == "disabled_by_edition":
-                            print(self.i18n.t("report.lite_repair_unavailable"))
+                            self._print(self.i18n.t("report.lite_repair_unavailable"))
                         else:
-                            print(self.i18n.t("report.repair_terminal", status=status, reason=reason))
+                            self._print(self.i18n.t("report.repair_terminal", status=status, reason=reason))
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
                 with open(log_path, "w", encoding="utf-8") as handle:
@@ -238,10 +248,10 @@ class RunReporter:
                     for failure in structured_failures:
                         handle.write(f"failure={failure.to_dict()}\n")
                 if not self.quiet:
-                    print(self.i18n.t("report.failure_details", path=log_path))
+                    self._print(self.i18n.t("report.failure_details", path=log_path))
             except Exception:
                 if not self.quiet:
-                    print(self.i18n.t("report.failure_log_save_error"))
+                    self._print(self.i18n.t("report.failure_log_save_error"))
         else:
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
@@ -250,10 +260,13 @@ class RunReporter:
             except OSError:
                 pass
             if not self.quiet:
-                print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
+                self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
 
         if not self.quiet:
-            print("-" * 54)
+            self._print("-" * 54)
+
+    def _print(self, value: str) -> None:
+        print(value, file=self.stdout, flush=True)
 
     def _lineage_for_path(self, path: str) -> tuple[str, ...]:
         if not path:
@@ -298,12 +311,12 @@ class RunReporter:
         if not force and now - self._last_render_at < 0.08:
             return
         self._last_render_at = now
-        sys.stdout.write(f"\033[{len(self._panel_tasks)}A")
+        self.stdout.write(f"\033[{len(self._panel_tasks)}A")
         for task_id in self._panel_tasks:
             row = self._task_rows.get(task_id)
             text = self._format_task_row(row) if row is not None else ""
-            sys.stdout.write(f"\r\033[2K{text}\n")
-        sys.stdout.flush()
+            self.stdout.write(f"\r\033[2K{text}\n")
+        self.stdout.flush()
 
     def _format_task_row(self, row: dict[str, Any]) -> str:
         depth = int(row.get("depth", 1) or 1)

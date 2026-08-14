@@ -1,5 +1,6 @@
 import argparse
-import contextlib
+import asyncio
+import inspect
 import os
 import sys
 
@@ -80,7 +81,7 @@ def cached_cli_parser(ctx: CliContext, command: str | None = None) -> argparse.A
     return parser
 
 
-def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
+async def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
     if ctx.commands is None:
         ctx.commands = command_map()
     module = ctx.commands.get(getattr(args, "command", None))
@@ -92,31 +93,42 @@ def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
             summary={},
             errors=[ctx.t("cli.unknown_command", command=command)],
         )
-    return module.handle(args, ctx)
+    result = module.handle(args, ctx)
+    return await result if inspect.isawaitable(result) else result
 
 
-def maybe_pause(args, ctx: CliContext, exit_code: int, result: CliCommandResult):
+async def maybe_pause(args, ctx: CliContext, exit_code: int, result: CliCommandResult):
     successful_extract = (
         getattr(args, "command", "") == "extract"
         and exit_code == EXIT_OK
         and not result.errors
     )
     if getattr(args, "pause_on_exit", False) and not successful_extract:
-        print(ctx.t("cli.pause_prompt"), flush=True)
-        os.system("pause >nul")
+        await ctx.readline(ctx.t("cli.pause_prompt"))
 
 
 def main(argv=None):
+    return asyncio.run(async_main(argv))
+
+
+async def async_main(
+    argv=None,
+    *,
+    cwd: str | None = None,
+    stdin=None,
+    stdout=None,
+    stderr=None,
+    input_reader=None,
+):
     global CURRENT_CLI_LANG
     if argv is None:
         argv = sys.argv[1:]
-    configure_stdio_encoding()
+    if stdout is None and stderr is None:
+        configure_stdio_encoding()
     if argv and argv[0] in {"--persistent-server", "--persistent-shutdown"}:
-        from sunpack.cli.persistent_process import handle_early_argv
+        from sunpack.cli.persistent_process import run_server, submit_request
 
-        result = handle_early_argv(list(argv))
-        if result is not None:
-            return result
+        return await run_server() if argv[0] == "--persistent-server" else submit_request([], shutdown=True)
     if argv and argv[0] == "extract" and not any(item in {"-h", "--help"} for item in argv[1:]):
         from sunpack.cli.runtime_state import server_runtime_active
 
@@ -127,7 +139,14 @@ def main(argv=None):
 
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
-    ctx = CliContext(language=CURRENT_CLI_LANG)
+    ctx = CliContext(
+        language=CURRENT_CLI_LANG,
+        cwd=os.path.abspath(cwd or os.getcwd()),
+        stdin=stdin if stdin is not None else sys.stdin,
+        stdout=stdout if stdout is not None else sys.stdout,
+        stderr=stderr if stderr is not None else sys.stderr,
+        input_reader=input_reader,
+    )
     # Extract and scan are latency-sensitive paths. Other commands retain full
     # discovery because some command registrations are imported by companion
     # command modules today.
@@ -147,7 +166,13 @@ def main(argv=None):
     args.quiet = bool(getattr(args, "quiet", False) or "-q" in argv or "--quiet" in argv)
     args.verbose = bool(getattr(args, "verbose", False) or "-v" in argv or "--verbose" in argv)
     args.pause_on_exit = bool(getattr(args, "pause_on_exit", False) or "--pause" in argv)
-    reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose)
+    reporter = CliReporter(
+        json_mode=args.json,
+        quiet=args.quiet,
+        verbose=args.verbose,
+        stdout=ctx.stdout,
+        stderr=ctx.stderr,
+    )
     ctx.reporter = reporter
     if args.json and getattr(args, "prompt_passwords", False):
         result = CliCommandResult(
@@ -161,11 +186,7 @@ def main(argv=None):
     if args.json:
         args.pause_on_exit = False
     try:
-        if args.json:
-            with contextlib.redirect_stdout(sys.stderr):
-                exit_code, result = dispatch_command(args, ctx)
-        else:
-            exit_code, result = dispatch_command(args, ctx)
+        exit_code, result = await dispatch_command(args, ctx)
     except Exception as exc:
         reporter.error(ctx.t("cli.runtime_failure", error=exc))
         result = CliCommandResult(
@@ -175,11 +196,11 @@ def main(argv=None):
             errors=[str(exc)],
         )
         reporter.emit_result(result)
-        maybe_pause(args, ctx, EXIT_RUNTIME, result)
+        await maybe_pause(args, ctx, EXIT_RUNTIME, result)
         return EXIT_RUNTIME
 
     reporter.emit_result(result)
-    maybe_pause(args, ctx, exit_code, result)
+    await maybe_pause(args, ctx, exit_code, result)
     return exit_code
 
 

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import gzip
 import json
@@ -17,7 +18,9 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
+from sunpack.coordinator.async_work import AsyncWorkBroker, CancellationToken
 from tests.helpers.pipeline_engine import execute_pipeline
+from tests.helpers.async_batch import run_extract_verify
 from sunpack.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
@@ -647,7 +650,15 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
         },
     )
 
-    [(returned_task, outcome)] = runner._execute_ready_tasks([task], lambda _task: str(out_dir))
+    async def execute_one():
+        broker = AsyncWorkBroker(thread_capacity=1)
+        try:
+            return await runner._execute_one_async(
+                task, lambda _task: str(out_dir), broker=broker, cancellation=CancellationToken()
+            )
+        finally:
+            await broker.close()
+    returned_task, outcome = asyncio.run(execute_one())
 
     assert returned_task is task
     assert outcome.outcome_kind == OutcomeKind.FAILURE
@@ -681,7 +692,15 @@ def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(
         },
     )
 
-    [(returned_task, outcome)] = runner._execute_ready_tasks([task], lambda _task: str(out_dir))
+    async def execute_one():
+        broker = AsyncWorkBroker(thread_capacity=1)
+        try:
+            return await runner._execute_one_async(
+                task, lambda _task: str(out_dir), broker=broker, cancellation=CancellationToken()
+            )
+        finally:
+            await broker.close()
+    returned_task, outcome = asyncio.run(execute_one())
     analysis = task.fact_bag.get("resource.analysis")
     guard = task.fact_bag.get("resource.guard")
 
@@ -889,7 +908,7 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
     runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive, detected_ext="7z")
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir))
+    outcome = run_extract_verify(runner, task, str(out_dir))
 
     assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert repair_scheduler.calls == 1
@@ -1013,7 +1032,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
     )
     task = _task(archive, detected_ext="7z")
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir))
+    outcome = run_extract_verify(runner, task, str(out_dir))
     collected = runner.collect_result(task, outcome)
 
     assert collected is None
@@ -1208,7 +1227,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
     runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive)
 
-    outcome = runner._extract_verify_with_retries(task, str(out_dir))
+    outcome = run_extract_verify(runner, task, str(out_dir))
     collected = runner.collect_result(task, outcome)
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
 

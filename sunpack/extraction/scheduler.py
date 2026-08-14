@@ -24,6 +24,7 @@ class ExtractionScheduler:
         output_config: dict | None = None,
         extraction_config: dict | None = None,
         sevenzip_runner: SevenZipRunner | None = None,
+        output_stream=None,
     ):
         self.password_store = PasswordStore.from_sources(
             cli_passwords=cli_passwords or [],
@@ -48,6 +49,7 @@ class ExtractionScheduler:
         }
         self.retry_policy = ExtractRetryPolicy(self.max_retries)
         self.sevenzip_runner = sevenzip_runner or SevenZipRunner(self.process_config)
+        self.output_stream = output_stream
 
     def set_progress_callback(self, callback: Callable[[ArchiveTask, dict], None] | None) -> None:
         self.sevenzip_runner.progress_callback = callback
@@ -82,24 +84,29 @@ class ExtractionScheduler:
             phase_prefix=phase_prefix,
         )
 
-    def extract_async(
+    async def extract_asyncio(
         self,
+        broker,
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
+        *,
+        request_id: str,
+        file_id: str,
+        cancellation,
         phase_timer: Any = None,
         phase_prefix: str = "extract",
-        on_complete: Callable[[ExtractionResult], None] | None = None,
-    ) -> None:
-        if on_complete is None:
-            raise ValueError("ExtractionScheduler.extract_async requires on_complete")
-        self._single_archive_extractor().extract_async(
+    ) -> ExtractionResult:
+        return await self._single_archive_extractor().extract_asyncio(
+            broker,
             task,
             out_dir,
             split_info=split_info,
+            request_id=request_id,
+            file_id=file_id,
+            cancellation=cancellation,
             phase_timer=phase_timer,
             phase_prefix=phase_prefix,
-            on_complete=on_complete,
         )
 
     def close(self) -> None:
@@ -129,4 +136,5 @@ class ExtractionScheduler:
             write_progress_manifest=bool(self.extraction_config.get("write_progress_manifest", False)),
             quiet=bool(self.extraction_config.get("quiet", False)),
             language=str(self.extraction_config.get("language") or "en"),
+            output_stream=self.output_stream,
         )

@@ -28,7 +28,7 @@ def register(subparsers, ctx):
 
 def handle(args, ctx):
     reporter = ctx.reporter
-    target_paths, missing_paths = resolve_target_paths(args.paths)
+    target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
 

@@ -76,6 +76,9 @@
       "watchdog_no_progress_timeout_seconds": 180,
       "watchdog_interval_ms": 500,
       "thread_capacity": 0,
+      "stage_thread_capacity": 0,
+      "max_inflight_files": 0,
+      "max_pending_stage_jobs": 4096,
       "adaptive_enabled": true,
       "initial_active_jobs": 0,
       "sample_interval_ms": 500,
@@ -147,8 +150,6 @@
     "cache_size": 512
   },
   "analysis": {
-    "parallel": true,
-    "max_workers": 3,
     "max_concurrent_reads": 1,
     "shared_cache_mb": 64,
     "max_read_mb_per_archive": 256,

@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Any, Dict, Iterable
 
 from sunpack.contracts.run_context import RunContext
@@ -8,15 +9,16 @@ from sunpack.i18n import I18nContext
 
 
 class PostProcessActions:
-    def __init__(self, config: Dict[str, Any], context: RunContext | None = None, language: str = "en"):
+    def __init__(self, config: Dict[str, Any], context: RunContext | None = None, language: str = "en", *, stdout=None):
         self.config = config
         self.context = context
         self.i18n = I18nContext(language)
         self.cleanup_mode = config.get("post_extract", {}).get("archive_cleanup_mode", "recycle")
         if self.cleanup_mode not in {"keep", "recycle", "delete"}:
             raise ValueError("archive_cleanup_mode must be normalized before PostProcessActions starts")
-        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=language)
-        self.flattener = DirectoryFlattener(language=language)
+        self.stdout = stdout if stdout is not None else sys.stdout
+        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=language, stdout=self.stdout)
+        self.flattener = DirectoryFlattener(language=language, stdout=self.stdout)
 
     def apply(
         self,

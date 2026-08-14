@@ -7,25 +7,23 @@ from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 
 
 class FakePipelineEngine:
-    """Synchronous Engine test double backed by a lightweight runner factory."""
+    """Async engine test double backed by a lightweight runner factory."""
 
     def __init__(self, runner_factory):
         self.runner_factory = runner_factory
         self.user_passwords = []
         self.builtin_passwords = []
         self._recent_passwords = []
+        self.work_broker = _InlineBroker()
 
-    def start(self):
+    async def __aenter__(self):
         return self
 
-    def close(self, *, graceful=True):
+    async def aclose(self, *, graceful=True):
         return None
 
-    def __enter__(self):
-        return self.start()
-
-    def __exit__(self, exc_type, exc, traceback):
-        self.close()
+    async def __aexit__(self, exc_type, exc, traceback):
+        await self.aclose()
 
     @property
     def recent_passwords(self):
@@ -38,17 +36,16 @@ class FakePipelineEngine:
     def is_idle(self):
         return True
 
-    def clear_runtime_caches(self):
+    async def clear_runtime_caches(self):
         return {"fake": True}
 
-    def submit(self, targets, *, direct=False, defer_postprocess=False):
+    async def run(self, targets, *, direct=False, request_config=None, stdout=None, stderr=None, output_committer=None):
         paths = [target.path if hasattr(target, "path") else str(target) for target in targets]
         output = dict(targets[0].output) if targets and hasattr(targets[0], "output") else {}
-        config = {
-            "output": output,
-            "user_passwords": list(self.user_passwords),
-            "builtin_passwords": list(self.builtin_passwords),
-        }
+        config = dict(request_config or {})
+        config["output"] = {**(config.get("output") or {}), **output}
+        config.setdefault("user_passwords", list(self.user_passwords))
+        config.setdefault("builtin_passwords", list(self.builtin_passwords))
         runner = self.runner_factory(config)
         summary = runner.run_targets(paths)
         self._recent_passwords = list(getattr(runner, "recent_passwords", ()) or ())
@@ -68,25 +65,13 @@ class FakePipelineEngine:
             ),
             recent_passwords=tuple(self._recent_passwords),
         )
-        return _FakeHandle(runner, response)
+        if output_committer is not None:
+            response = await output_committer.commit(config, response)
+        return response
 
 
-class _FakeHandle:
-    def __init__(self, runner, response):
-        self.runner = runner
-        self.response = response
-
-    def result(self, timeout=None):
-        return self.response
-
-    def done(self):
-        return True
-
-    def add_done_callback(self, callback):
-        callback(self)
-
-    def finalize(self, output_path_map=None):
-        callback = getattr(self.runner, "apply_deferred_postprocess", None)
-        if callable(callback):
-            callback(dict(output_path_map or {}))
-        return self.response
+class _InlineBroker:
+    async def run(self, _stage, _file_id, operation, *args, **kwargs):
+        kwargs.pop("request_id", None)
+        kwargs.pop("cancellation", None)
+        return operation(*args, **kwargs)

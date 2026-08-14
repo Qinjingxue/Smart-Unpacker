@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from pathlib import Path
@@ -20,6 +21,7 @@ class ConfigFileObserver:
         *,
         debounce_seconds: float = 0.5,
         observer_factory=Observer,
+        loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.directory = Path(directory).resolve()
         self.filenames = {str(name).casefold() for name in filenames}
@@ -27,7 +29,8 @@ class ConfigFileObserver:
         self.debounce_seconds = max(0.0, float(debounce_seconds))
         self._observer = observer_factory()
         self._handler = _ConfigEventHandler(self)
-        self._timer: threading.Timer | None = None
+        self._loop = loop
+        self._timer: asyncio.TimerHandle | None = None
         self._lock = threading.Lock()
         self._started = False
         self._stopped = False
@@ -67,12 +70,15 @@ class ConfigFileObserver:
         with self._lock:
             if self._stopped:
                 return
+            self._loop.call_soon_threadsafe(self._schedule_emit)
+
+    def _schedule_emit(self) -> None:
+        with self._lock:
+            if self._stopped:
+                return
             if self._timer is not None:
                 self._timer.cancel()
-            timer = threading.Timer(self.debounce_seconds, self._emit)
-            timer.daemon = True
-            self._timer = timer
-            timer.start()
+            self._timer = self._loop.call_later(self.debounce_seconds, self._emit)
 
     def _emit(self) -> None:
         with self._lock:

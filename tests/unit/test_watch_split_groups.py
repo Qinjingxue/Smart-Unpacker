@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import struct
 from types import SimpleNamespace
 
@@ -10,6 +11,13 @@ from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 import sunpack.filesystem.watcher.scheduler as scheduler_module
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
+
+
+_TEST_LOOP = asyncio.new_event_loop()
+
+
+def _run_once(watcher):
+    return _TEST_LOOP.run_until_complete(watcher.run_once())
 
 
 def _summary(*failures: FailureInfo):
@@ -88,11 +96,11 @@ def test_watch_holds_orphan_non_head_until_first_volume_arrives(tmp_path):
     second.write_bytes(b"part-2")
     watcher.enqueue(str(second))
 
-    first = watcher.run_once()
+    first = _run_once(watcher)
     head = root / "sample.7z.001"
     head.write_bytes(b"part-1")
     watcher.enqueue(str(head))
-    second_result = watcher.run_once()
+    second_result = _run_once(watcher)
 
     assert first.processed == 0
     assert second_result.succeeded == 1
@@ -137,12 +145,12 @@ def test_watch_aligned_group_deadlines_dispatch_together_without_restarting_quie
     # must stay pending (not be dropped) and their deadlines must align with
     # the latest pending member instead of restarting.
     clock.advance(0.97)
-    first = watcher.run_once()
+    first = _run_once(watcher)
     assert first.processed == 0
     assert watcher.pending_count == 4
 
     clock.advance(0.06)
-    second = watcher.run_once()
+    second = _run_once(watcher)
     assert second.succeeded == 1
     assert attempts == [str((root / "aligned.7z.001").resolve())]
 
@@ -164,13 +172,13 @@ def test_watch_conservatively_holds_old_rar_orphan_until_head_arrives(tmp_path):
         path = root / name
         path.write_bytes(name.encode())
         watcher.enqueue(str(path))
-    assert watcher.run_once().processed == 0
+    assert _run_once(watcher).processed == 0
 
     head = root / "old-style.rar"
     head.write_bytes(b"head")
     watcher.enqueue(str(head))
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert attempts == [str(head.resolve())]
 
 
@@ -192,7 +200,7 @@ def test_watch_does_not_hold_plain_numeric_files_as_missing_volumes(tmp_path):
         path.write_bytes(name.encode())
         watcher.enqueue(str(path))
 
-    result = watcher.run_once()
+    result = _run_once(watcher)
 
     assert result.processed == 1
     assert len(attempts) == 1
@@ -217,7 +225,7 @@ def test_watch_holds_strong_middle_gap_until_missing_volume_arrives(tmp_path):
     third.write_bytes(b"tail")
     watcher.enqueue(str(head))
 
-    first_result = watcher.run_once()
+    first_result = _run_once(watcher)
 
     assert first_result.processed == 0
     assert attempts == []
@@ -231,7 +239,7 @@ def test_watch_holds_strong_middle_gap_until_missing_volume_arrives(tmp_path):
     second.write_bytes(b"middle")
     watcher.enqueue(str(second))
 
-    second_result = watcher.run_once()
+    second_result = _run_once(watcher)
     assert second_result.succeeded == 1
     assert attempts == [str(head.resolve())]
 
@@ -255,7 +263,7 @@ def test_watch_dispatches_weak_camouflaged_gap_for_backend_classification(tmp_pa
     third.write_bytes(b"ordinary data")
     watcher.enqueue(str(head))
 
-    result = watcher.run_once()
+    result = _run_once(watcher)
 
     assert result.succeeded == 1
     assert attempts == [str(head.resolve())]
@@ -280,7 +288,7 @@ def test_watch_does_not_infer_missing_tail_from_equal_volume_sizes(tmp_path):
     second.write_bytes(b"y" * 4096)
     watcher.enqueue(str(head))
 
-    result = watcher.run_once()
+    result = _run_once(watcher)
 
     assert result.succeeded == 1
     assert attempts == [str(head.resolve())]
@@ -305,7 +313,7 @@ def test_watch_holds_modern_split_zip_until_terminal_volume_arrives(tmp_path):
     second.write_bytes(b"opaque middle volume")
     watcher.enqueue(str(first))
 
-    first_result = watcher.run_once()
+    first_result = _run_once(watcher)
 
     assert first_result.processed == 0
     assert attempts == []
@@ -318,7 +326,7 @@ def test_watch_holds_modern_split_zip_until_terminal_volume_arrives(tmp_path):
     terminal.write_bytes(_split_zip_terminal_bytes(2))
     watcher.enqueue(str(terminal))
 
-    second_result = watcher.run_once()
+    second_result = _run_once(watcher)
     assert second_result.succeeded == 1
     assert attempts == [str(first.resolve())]
 
@@ -344,15 +352,15 @@ def test_watch_runtime_missing_volume_retries_only_after_group_changes(tmp_path)
     second.write_bytes(b"part-2")
     watcher.enqueue(str(head))
     watcher.enqueue(str(second))
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
 
     watcher.enqueue(str(head), force=True)
-    assert watcher.run_once().processed == 0
+    assert _run_once(watcher).processed == 0
     third = root / "sample.7z.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert attempts == [str(head.resolve()), str(head.resolve())]
 
 
@@ -382,19 +390,19 @@ def test_watch_treats_possible_missing_partial_recovery_as_suspended(tmp_path):
     watcher.enqueue(str(head))
     watcher.enqueue(str(second))
 
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
     group_state = watcher.state.group_state(next(iter(watcher.state.groups)))
     assert group_state is not None
     assert group_state.status == "suspended"
     assert group_state.has_blocker("missing_volume")
 
     watcher.enqueue(str(head), force=True)
-    assert watcher.run_once().processed == 0
+    assert _run_once(watcher).processed == 0
     third = root / "sample.zip.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert attempts == [str(head.resolve()), str(head.resolve())]
 
 
@@ -423,15 +431,15 @@ def test_watch_combined_missing_volume_and_password_requires_both_changes(tmp_pa
     second.write_bytes(b"part-2")
     watcher.enqueue(str(head))
     watcher.enqueue(str(second))
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
 
     watcher.notify_password_source_changed("test")
-    assert watcher.run_once().processed == 0
+    assert _run_once(watcher).processed == 0
     third = root / "sample.7z.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert len(attempts) == 2
 
 
@@ -458,15 +466,15 @@ def test_watch_replaces_missing_blocker_with_password_blocker_after_retry(tmp_pa
     second.write_bytes(b"part-2")
     watcher.enqueue(str(head))
     watcher.enqueue(str(second))
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
 
     third = root / "sample.7z.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
     watcher.notify_password_source_changed("test")
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert len(attempts) == 3
 
 
@@ -495,15 +503,15 @@ def test_watch_combined_failure_waits_for_split_group_change(tmp_path):
     second.write_bytes(b"part-2")
     watcher.enqueue(str(head))
     watcher.enqueue(str(second))
-    assert watcher.run_once().failed == 1
+    assert _run_once(watcher).failed == 1
 
     watcher.notify_password_source_changed("test")
-    assert watcher.run_once().processed == 0
+    assert _run_once(watcher).processed == 0
     third = root / "sample.7z.003"
     third.write_bytes(b"part-3")
     watcher.enqueue(str(third))
 
-    assert watcher.run_once().succeeded == 1
+    assert _run_once(watcher).succeeded == 1
     assert attempts == [str(head.resolve()), str(head.resolve())]
 
 
@@ -528,14 +536,14 @@ def test_watch_split_suspension_survives_restart(tmp_path):
     second.write_bytes(b"part-2")
     first_watcher.enqueue(str(head))
     first_watcher.enqueue(str(second))
-    assert first_watcher.run_once().failed == 1
+    assert _run_once(first_watcher).failed == 1
 
     restarted = _watcher(tmp_path, Runner)
     restarted.enqueue(str(head), force=True)
-    assert restarted.run_once().processed == 0
+    assert _run_once(restarted).processed == 0
     third = root / "restart.7z.003"
     third.write_bytes(b"part-3")
     restarted.enqueue(str(third))
 
-    assert restarted.run_once().succeeded == 1
+    assert _run_once(restarted).succeeded == 1
     assert len(attempts) == 2

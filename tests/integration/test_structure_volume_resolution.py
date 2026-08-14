@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -139,8 +140,10 @@ def test_pipeline_uses_initial_structure_group_without_missing_volume_retry(
         "resolve_volume_once_in_directory",
         counting_resolver,
     )
-    with engine:
-        response = engine.submit([str(first)]).result(timeout=60)
+    async def run():
+        async with engine:
+            return await asyncio.wait_for(engine.run([str(first)]), 60)
+    response = asyncio.run(run())
 
     assert response.summary.success_count == 1
     assert response.summary.failed_tasks == []

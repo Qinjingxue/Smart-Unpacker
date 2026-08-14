@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import struct
 import sys
+import time
+from typing import Any
 
 from sunpack.support.runtime_cwd import runtime_working_directory
 from sunpack.config.cli_settings import load_cli_language_from_config
@@ -19,7 +23,7 @@ def handle_early_argv(argv: list[str]) -> int | None:
     if not argv:
         return None
     if argv[0] == SERVER_ARG:
-        return run_server()
+        return asyncio.run(run_server())
     if argv[0] == SHUTDOWN_ARG:
         return submit_request([], shutdown=True)
     return None
@@ -62,23 +66,19 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
         "stdout_tty": bool(sys.stdout is not None and sys.stdout.isatty()),
         "stdin_tty": bool(sys.stdin is not None and sys.stdin.isatty()),
     }
-    os.chdir(runtime_working_directory())
-    try:
-        response = _send_or_start(payload)
-        stdout = str(response.get("stdout") or "")
-        stderr = str(response.get("stderr") or "")
-        if stdout:
-            print(stdout, end="", file=sys.stdout)
-        if stderr:
-            print(stderr, end="", file=sys.stderr)
-        if pause and sys.stdin is not None and sys.stdin.isatty():
-            try:
-                input(i18n.t("cli.press_enter"))
-            except (EOFError, KeyboardInterrupt):
-                pass
-        return int(response.get("exit_code", 1))
-    finally:
-        os.chdir(request_cwd)
+    response = _send_or_start(payload)
+    stdout = str(response.get("stdout") or "")
+    stderr = str(response.get("stderr") or "")
+    if stdout:
+        print(stdout, end="", file=sys.stdout)
+    if stderr:
+        print(stderr, end="", file=sys.stderr)
+    if pause and sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input(i18n.t("cli.press_enter"))
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return int(response.get("exit_code", 1))
 
 
 def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
@@ -141,75 +141,82 @@ def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
         connection.close()
 
 
-def run_server() -> int:
+async def run_server() -> int:
     import secrets
-    import socket
-    import struct
-    import time
 
-    previous_cwd = os.getcwd()
-    os.chdir(runtime_working_directory())
-    try:
-        lock_stream = _acquire_server_lock()
-        if lock_stream is None:
-            return 0
-        token = secrets.token_bytes(32)
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(8)
-        listener.settimeout(0.25)
-        port = listener.getsockname()[1]
-        from sunpack.cli.cli import main
-        from sunpack.cli.persistent_runtime import (
-            close_persistent_runtime,
-            enable_persistent_runtime,
-            persistent_runtime_is_idle,
-            persistent_server_idle_seconds,
-        )
+    lock_stream = _acquire_server_lock()
+    if lock_stream is None:
+        return 0
+    token = secrets.token_bytes(32)
+    from sunpack.cli.persistent_runtime import (
+        close_persistent_runtime,
+        enable_persistent_runtime,
+        persistent_runtime_is_idle,
+        persistent_server_idle_seconds,
+    )
 
-        enable_persistent_runtime()
-        _write_state(port, token)
-        served_request = False
-        last_completed_at = time.monotonic()
+    enable_persistent_runtime()
+    shutdown = asyncio.Event()
+    state = {"served": False, "last_completed": time.monotonic(), "active": 0}
+    port = 0
 
+    async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        state["active"] += 1
         try:
-            while True:
-                try:
-                    connection, _ = listener.accept()
-                except socket.timeout:
-                    if _idle_shutdown_due(
-                        served_request=served_request,
-                        last_completed_at=last_completed_at,
-                        idle_seconds=persistent_server_idle_seconds(),
-                        runtime_idle=persistent_runtime_is_idle(),
-                    ):
-                        return 0
-                    continue
-                try:
-                    payload = _recv_request(connection, token)
-                    if payload is None:
-                        continue
-                    connection.sendall(_STREAM_MAGIC)
-                    if payload.get("shutdown"):
-                        _remove_state_if_owned(port, token)
-                        connection.sendall(struct.pack("!BIi", 0, 4, 0))
-                        return 0
-                    exit_code = _execute_streaming_request(main, payload, connection)
-                    connection.sendall(struct.pack("!BIi", 0, 4, exit_code))
-                    served_request = True
-                    last_completed_at = time.monotonic()
-                except (EOFError, OSError):
-                    continue
-                finally:
-                    connection.close()
+            payload = await _recv_request_async(reader, token)
+            if payload is None:
+                return
+            writer.write(_STREAM_MAGIC)
+            await writer.drain()
+            if payload.get("shutdown"):
+                writer.write(struct.pack("!BIi", 0, 4, 0))
+                await writer.drain()
+                shutdown.set()
+                return
+            exit_code = await _execute_streaming_request_async(payload, reader, writer)
+            writer.write(struct.pack("!BIi", 0, 4, exit_code))
+            await writer.drain()
+            state["served"] = True
+            state["last_completed"] = time.monotonic()
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
         finally:
-            _remove_state_if_owned(port, token)
-            listener.close()
-            close_persistent_runtime()
-            lock_stream.close()
+            state["active"] -= 1
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+    server = await asyncio.start_server(handle_connection, "127.0.0.1", 0, backlog=64)
+    port = int(server.sockets[0].getsockname()[1])
+    _write_state(port, token)
+
+    async def monitor_idle() -> None:
+        while not shutdown.is_set():
+            await asyncio.sleep(0.25)
+            if state["active"]:
+                continue
+            if _idle_shutdown_due(
+                served_request=bool(state["served"]),
+                last_completed_at=float(state["last_completed"]),
+                idle_seconds=persistent_server_idle_seconds(),
+                runtime_idle=persistent_runtime_is_idle(),
+            ):
+                shutdown.set()
+
+    monitor = asyncio.create_task(monitor_idle(), name="persistent-idle-monitor")
+    try:
+        await shutdown.wait()
+        return 0
     finally:
-        os.chdir(previous_cwd)
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
+        _remove_state_if_owned(port, token)
+        await close_persistent_runtime()
+        lock_stream.close()
 
 
 def _idle_shutdown_due(
@@ -263,6 +270,28 @@ def _recv_request(connection, token: bytes) -> dict[str, Any] | None:
     }
 
 
+async def _recv_request_async(reader: asyncio.StreamReader, token: bytes) -> dict[str, Any] | None:
+    if await reader.readexactly(4) != _REQUEST_MAGIC or await reader.readexactly(len(token)) != token:
+        return None
+    flags, cwd_size, argc = struct.unpack("!III", await reader.readexactly(12))
+    if cwd_size > _MAX_FIELD_BYTES or argc > 4096:
+        return None
+    cwd = (await reader.readexactly(cwd_size)).decode("utf-8", "surrogatepass")
+    argv = []
+    for _ in range(argc):
+        size = struct.unpack("!I", await reader.readexactly(4))[0]
+        if size > _MAX_FIELD_BYTES:
+            return None
+        argv.append((await reader.readexactly(size)).decode("utf-8", "surrogatepass"))
+    return {
+        "cwd": cwd,
+        "argv": argv,
+        "shutdown": bool(flags & 1),
+        "stdout_tty": bool(flags & 2),
+        "stdin_tty": bool(flags & 4),
+    }
+
+
 def _recv_stream(connection, input_stream=None) -> dict[str, Any]:
     import struct
 
@@ -286,23 +315,23 @@ def _recv_stream(connection, input_stream=None) -> dict[str, Any]:
             stream.flush()
 
 
-class _ConnectionTextStream:
+class _AsyncConnectionTextStream:
     encoding = "utf-8"
     errors = "replace"
 
-    def __init__(self, connection, kind: int, *, is_tty: bool = False):
-        self.connection = connection
+    def __init__(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, kind: int, *, is_tty: bool = False):
+        self.loop = loop
+        self.queue = queue
         self.kind = kind
         self._is_tty = is_tty
         self.supports_terminal_updates = is_tty
 
     def write(self, text: str) -> int:
-        import struct
-
         value = str(text)
         data = value.encode("utf-8", "surrogatepass")
         if data:
-            self.connection.sendall(struct.pack("!BI", self.kind, len(data)) + data)
+            frame = struct.pack("!BI", self.kind, len(data)) + data
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, frame)
         return len(value)
 
     def flush(self) -> None:
@@ -312,47 +341,66 @@ class _ConnectionTextStream:
         return self._is_tty
 
 
-class _ConnectionInputStream:
-    encoding = "utf-8"
-    errors = "replace"
+async def _execute_streaming_request_async(
+    payload: dict[str, Any],
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> int:
+    from sunpack.cli.cli import async_main
 
-    def __init__(self, connection, *, is_tty: bool = False):
-        self.connection = connection
-        self._is_tty = is_tty
+    loop = asyncio.get_running_loop()
+    output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    write_lock = asyncio.Lock()
 
-    def readline(self, _size: int = -1) -> str:
-        import struct
+    async def send_frame(frame: bytes) -> None:
+        async with write_lock:
+            writer.write(frame)
+            await writer.drain()
 
-        self.connection.sendall(struct.pack("!BI", 3, 0))
-        size = struct.unpack("!I", _recv_exact(self.connection, 4))[0]
+    async def pump_output() -> None:
+        while True:
+            frame = await output_queue.get()
+            try:
+                if frame is None:
+                    return
+                await send_frame(frame)
+            finally:
+                output_queue.task_done()
+
+    async def read_input(prompt: str = "") -> str:
+        if prompt:
+            stdout.write(prompt)
+        await asyncio.sleep(0)
+        await output_queue.join()
+        await send_frame(struct.pack("!BI", 3, 0))
+        size = struct.unpack("!I", await reader.readexactly(4))[0]
         if size > _MAX_FIELD_BYTES:
             raise ValueError("persistent input frame is too large")
-        return _recv_exact(self.connection, size).decode("utf-8", "replace")
+        return (await reader.readexactly(size)).decode("utf-8", "replace")
 
-    def isatty(self) -> bool:
-        return self._is_tty
-
-
-def _execute_streaming_request(main, payload: dict[str, Any], connection) -> int:
-    import contextlib
-
-    stdout = _ConnectionTextStream(connection, 1, is_tty=bool(payload.get("stdout_tty")))
-    stderr = _ConnectionTextStream(connection, 2, is_tty=False)
-    stdin = _ConnectionInputStream(connection, is_tty=bool(payload.get("stdin_tty")))
-    previous_cwd = os.getcwd()
-    previous_stdin = sys.stdin
+    stdout = _AsyncConnectionTextStream(loop, output_queue, 1, is_tty=bool(payload.get("stdout_tty")))
+    stderr = _AsyncConnectionTextStream(loop, output_queue, 2, is_tty=False)
+    pump = asyncio.create_task(pump_output(), name="persistent-output-pump")
     try:
-        os.chdir(str(payload.get("cwd") or previous_cwd))
         argv = [str(item) for item in payload.get("argv") or []]
-        sys.stdin = stdin
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            return int(main(argv) or 0)
+        return int(
+            await async_main(
+                argv,
+                cwd=str(payload.get("cwd") or runtime_working_directory()),
+                stdout=stdout,
+                stderr=stderr,
+                input_reader=read_input,
+            )
+            or 0
+        )
     except BaseException as exc:
         print(I18nContext(load_cli_language_from_config()).t("cli.persistent_request_failed", error=exc), file=stderr)
         return 1
     finally:
-        sys.stdin = previous_stdin
-        os.chdir(previous_cwd)
+        await asyncio.sleep(0)
+        await output_queue.join()
+        await output_queue.put(None)
+        await pump
 
 
 def _write_state(port: int, token: bytes) -> None:

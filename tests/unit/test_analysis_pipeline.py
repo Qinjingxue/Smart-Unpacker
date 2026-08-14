@@ -570,7 +570,7 @@ class _SlowModule:
         return ArchiveFormatEvidence(format=self.spec.name, confidence=0.0, status="not_found")
 
 
-def test_analysis_scheduler_runs_modules_in_parallel(tmp_path):
+def test_analysis_scheduler_runs_modules_in_single_broker_job(tmp_path):
     registry = get_analysis_module_registry()
     first = _SlowModule("slow_a")
     second = _SlowModule("slow_b")
@@ -582,8 +582,6 @@ def test_analysis_scheduler_runs_modules_in_parallel(tmp_path):
     start = time.perf_counter()
     AnalysisEngine({
         "analysis": {
-            "parallel": True,
-            "max_workers": 2,
             "modules": [
                 {"name": "slow_a", "enabled": True},
                 {"name": "slow_b", "enabled": True},
@@ -592,4 +590,7 @@ def test_analysis_scheduler_runs_modules_in_parallel(tmp_path):
     }).analyze_path(str(path))
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 0.28
+    # Module execution is owned by the bounded work broker.  Modules for one
+    # archive share a job, while different archives can run concurrently;
+    # there is no unbounded per-archive analysis pool anymore.
+    assert elapsed >= 0.28

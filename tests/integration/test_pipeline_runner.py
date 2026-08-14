@@ -1,7 +1,9 @@
 from pathlib import Path
+import asyncio
 
 import sunpack.coordinator.engine as engine_module
 from sunpack.coordinator.engine import PipelineEngine
+from sunpack.coordinator.async_work import CancellationToken
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.detection import FactBag
@@ -38,8 +40,10 @@ def test_pipeline_runner_passes_native_worker_overrides():
     _configure_request_runtime(engine, lambda runtime: captured.update(
         extractor=runtime.extractor.process_config,
     ))
-    with engine:
-        engine.submit(["missing.zip"]).result(timeout=5)
+    async def run():
+        async with engine:
+            await engine.run(["missing.zip"])
+    asyncio.run(run())
 
     assert captured["extractor"]["max_task_seconds"] == 1800
     assert captured["extractor"]["watchdog_no_progress_timeout_seconds"] == 180
@@ -90,8 +94,8 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
             all_parts=task.all_parts,
         )
 
-    def fake_extract_async(task, out_dir, *, on_complete, **_kwargs):
-        on_complete(fake_extract(task, out_dir))
+    async def fake_extract_asyncio(_broker, task, out_dir, **_kwargs):
+        return fake_extract(task, out_dir)
 
     def configure(runtime):
         original_close = runtime.extractor.close
@@ -103,13 +107,15 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
         monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
         monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda task: task)
         monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
-        monkeypatch.setattr(runtime.extractor, "extract_async", fake_extract_async)
+        monkeypatch.setattr(runtime.extractor, "extract_asyncio", fake_extract_asyncio)
         monkeypatch.setattr(runtime.extractor, "close", tracked_close)
 
     _configure_request_runtime(engine, configure)
 
-    with engine:
-        summary = engine.submit([str(tmp_path)]).result().summary
+    async def run():
+        async with engine:
+            return (await engine.run([str(tmp_path)])).summary
+    summary = asyncio.run(run())
 
     assert summary.success_count == 1
     assert summary.failed_tasks == []
@@ -135,9 +141,11 @@ def test_pipeline_runner_exposes_recent_passwords_without_password_manager():
         engine,
         lambda runtime: runtime.extractor.password_store.remember_success("secret"),
     )
-    with engine:
-        engine.submit(["missing.zip"]).result(timeout=5)
-        assert engine.recent_passwords == ["secret"]
+    async def run():
+        async with engine:
+            await engine.run(["missing.zip"])
+            assert engine.recent_passwords == ["secret"]
+    asyncio.run(run())
 
 
 def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, monkeypatch):
@@ -166,8 +174,8 @@ def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, m
         extracted.append(task.main_path)
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
-    def fake_extract_async(task, out_dir, *, on_complete, **_kwargs):
-        on_complete(fake_extract(task, out_dir))
+    async def fake_extract_asyncio(_broker, task, out_dir, **_kwargs):
+        return fake_extract(task, out_dir)
 
     captured = {}
     def configure(runtime):
@@ -175,18 +183,20 @@ def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, m
         monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
         monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda task: task)
         monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
-        monkeypatch.setattr(runtime.extractor, "extract_async", fake_extract_async)
+        monkeypatch.setattr(runtime.extractor, "extract_asyncio", fake_extract_asyncio)
 
     _configure_request_runtime(engine, configure)
-    engine.start()
-    try:
-        engine.submit([str(tmp_path / "missing.zip")]).result(timeout=5)
-        captured["runtime"].batch_runner.execute([task_for(archive), task_for(nested)])
-    finally:
-        engine.close()
+    async def run():
+        async with engine:
+            await engine.run([str(tmp_path / "missing.zip")])
+            await captured["runtime"].batch_runner.execute_async(
+                [task_for(archive), task_for(nested)],
+                broker=engine.work_broker,
+                cancellation=CancellationToken(),
+            )
+    asyncio.run(run())
 
-    assert extracted == [str(archive), str(nested)]
-    engine.close()
+    assert set(extracted) == {str(archive), str(nested)}
 
 
 def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_path, monkeypatch):
@@ -218,8 +228,8 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
         nested.write_bytes(b"nested")
         return ExtractionResult(success=True, archive=item.main_path, out_dir=out_dir, all_parts=item.all_parts)
 
-    def fake_extract_async(item, out_dir, *, on_complete, **_kwargs):
-        on_complete(fake_extract(item, out_dir))
+    async def fake_extract_asyncio(_broker, item, out_dir, **_kwargs):
+        return fake_extract(item, out_dir)
 
     captured = {}
     def configure(runtime):
@@ -227,18 +237,20 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
         monkeypatch.setattr(runtime.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
         monkeypatch.setattr(runtime.batch_runner.resource_inspector, "inspect", lambda item: item)
         monkeypatch.setattr(runtime.extractor, "extract", fake_extract)
-        monkeypatch.setattr(runtime.extractor, "extract_async", fake_extract_async)
+        monkeypatch.setattr(runtime.extractor, "extract_asyncio", fake_extract_asyncio)
 
     _configure_request_runtime(engine, configure)
 
-    engine.start()
-    try:
-        engine.submit([str(input_root / "missing.zip")]).result(timeout=5)
-        scan_roots = captured["runtime"].batch_runner.execute([task])
-    finally:
-        engine.close()
+    async def run():
+        async with engine:
+            await engine.run([str(input_root / "missing.zip")])
+            return await captured["runtime"].batch_runner.execute_async(
+                [task],
+                broker=engine.work_broker,
+                cancellation=CancellationToken(),
+            )
+    scan_roots = asyncio.run(run())
 
     expected_out_dir = output_root / "sub" / "payload"
     assert expected_out_dir.exists()
     assert scan_roots == [str(expected_out_dir)]
-    engine.close()

@@ -58,11 +58,14 @@ def build_effective_config(config: dict) -> dict[str, Any]:
         },
     }
 
-def resolve_target_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+def resolve_target_paths(paths: list[str], *, base_dir: str | None = None) -> tuple[list[str], list[str]]:
     target_paths = []
     missing_paths = []
     for raw_path in paths:
         norm_path = os.path.normpath(raw_path)
+        if not os.path.isabs(norm_path):
+            norm_path = os.path.join(base_dir or os.getcwd(), norm_path)
+        norm_path = os.path.abspath(norm_path)
         if os.path.exists(norm_path):
             target_paths.append(norm_path)
         else:
@@ -121,6 +124,44 @@ def prompt_for_passwords(
         if not line:
             break
         passwords.append(line)
+    return dedupe_passwords(passwords)
+
+
+async def prompt_for_passwords_async(
+    ctx,
+    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
+    input_prompt: str = "password> ",
+) -> list[str]:
+    passwords = []
+    print(prompt_text, file=ctx.stdout, flush=True)
+    while True:
+        line = (await ctx.readline(input_prompt)).rstrip("\r\n")
+        if not line:
+            break
+        passwords.append(line)
+    return dedupe_passwords(passwords)
+
+
+async def collect_cli_passwords_async(
+    args,
+    ctx,
+    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
+    input_prompt: str = "password> ",
+) -> list[str]:
+    passwords = list(getattr(args, "password", []) or [])
+    if getattr(args, "password_file", None):
+        password_file = str(args.password_file)
+        if not os.path.isabs(password_file):
+            password_file = os.path.join(ctx.cwd, password_file)
+        passwords.extend(read_password_file(password_file))
+    if getattr(args, "prompt_passwords", False):
+        passwords.extend(
+            await prompt_for_passwords_async(
+                ctx,
+                prompt_text=prompt_text,
+                input_prompt=input_prompt,
+            )
+        )
     return dedupe_passwords(passwords)
 
 

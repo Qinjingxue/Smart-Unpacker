@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import queue
@@ -5,7 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
@@ -399,13 +400,224 @@ class _NativeWorkerHolder:
             worker.close()
 
 
+class _AsyncNativeWorkerProcess:
+    """Long-lived native worker transported entirely by the owner event loop."""
+
+    def __init__(self, worker_path: str, startupinfo, process_config: dict | None = None):
+        self.worker_path = worker_path
+        self.startupinfo = startupinfo
+        self.process_config = process_config or {}
+        self.process: asyncio.subprocess.Process | None = None
+        self.worker_epoch = ""
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._stderr_lines: list[str] = []
+        self._send_lock = asyncio.Lock()
+        self._tasks: list[asyncio.Task] = []
+        self._closing = False
+        self.handshake: dict[str, Any] = {}
+        self._ready: asyncio.Future | None = None
+
+    async def start(self) -> None:
+        if self.is_alive():
+            return
+        self.worker_epoch = uuid.uuid4().hex
+        environment = _apply_native_environment(os.environ.copy(), self.process_config)
+        self.process = await asyncio.create_subprocess_exec(
+            self.worker_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            startupinfo=self.startupinfo,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            cwd=runtime_working_directory(),
+            env=environment,
+        )
+        self._ready = asyncio.get_running_loop().create_future()
+        self._tasks = [
+            asyncio.create_task(self._dispatch_stdout(), name="sunpack-native-stdout"),
+            asyncio.create_task(self._pump_stderr(), name="sunpack-native-stderr"),
+            asyncio.create_task(self._watchdog(), name="sunpack-native-watchdog"),
+        ]
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready), timeout=2.0)
+        except asyncio.TimeoutError:
+            self.handshake = {
+                "profile": str(self.process_config.get("profile") or "auto"),
+                "thread_capacity": int(self.process_config.get("thread_capacity", 0) or (os.cpu_count() or 1)),
+                "initial_active_limit": int(self.process_config.get("initial_active_jobs", 0) or 1),
+                "legacy_worker": True,
+            }
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.returncode is None
+
+    async def submit(self, payload: str, job_id: str, *, on_line, on_timeout) -> None:
+        if job_id in self._jobs:
+            raise RuntimeError(f"sevenzip_worker job id is already active: {job_id}")
+        now = time.monotonic()
+        self._jobs[job_id] = {
+            "on_line": on_line,
+            "on_timeout": on_timeout,
+            "started_at": now,
+            "last_progress_at": now,
+            "cancel_requested": False,
+            "cancel_deadline": 0.0,
+            "state": "submitted",
+        }
+        try:
+            await self.send(payload)
+        except BaseException:
+            self._jobs.pop(job_id, None)
+            raise
+
+    async def send(self, payload: str) -> None:
+        if not self.is_alive() or self.process is None or self.process.stdin is None:
+            raise RuntimeError("sevenzip_worker is not running")
+        async with self._send_lock:
+            self.process.stdin.write((payload + "\n").encode("utf-8"))
+            await self.process.stdin.drain()
+
+    async def cancel(self, job_id: str) -> None:
+        await self.send(json.dumps({"worker_command": "cancel", "job_id": job_id}, separators=(",", ":")))
+
+    def take_stderr(self) -> list[str]:
+        lines = self._stderr_lines
+        self._stderr_lines = []
+        return lines
+
+    async def _dispatch_stdout(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        try:
+            while line_bytes := await self.process.stdout.readline():
+                line = line_bytes.decode("utf-8", "replace")
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    payload = {}
+                job_id = str(payload.get("job_id") or "") if isinstance(payload, dict) else ""
+                if isinstance(payload, dict) and payload.get("type") == "worker_ready":
+                    self.handshake = dict(payload)
+                    if self._ready is not None and not self._ready.done():
+                        self._ready.set_result(self.handshake)
+                    continue
+                state = self._jobs.get(job_id)
+                if state is None:
+                    continue
+                state["last_progress_at"] = time.monotonic()
+                event = str(payload.get("event") or "") if isinstance(payload, dict) else ""
+                if payload.get("type") == "result":
+                    state["state"] = "result_received"
+                elif event:
+                    state["state"] = event.removeprefix("job_")
+                try:
+                    completed = bool(state["on_line"](line))
+                except Exception as exc:
+                    state["on_timeout"](f"sevenzip_worker completion callback failed: {exc}")
+                    completed = True
+                if completed:
+                    self._jobs.pop(job_id, None)
+        finally:
+            if not self._closing:
+                for job_id, state in tuple(self._jobs.items()):
+                    state["on_timeout"]("sevenzip_worker exited before job completion")
+                    self._jobs.pop(job_id, None)
+
+    async def _pump_stderr(self) -> None:
+        assert self.process is not None and self.process.stderr is not None
+        while line := await self.process.stderr.readline():
+            self._stderr_lines.append(line.decode("utf-8", "replace"))
+
+    async def _watchdog(self) -> None:
+        interval = max(0.01, float(self.process_config.get("watchdog_interval_ms", 100) or 100) / 1000.0)
+        while not self._closing and self.is_alive():
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            for job_id, state in tuple(self._jobs.items()):
+                max_seconds = max(0.0, float(self.process_config.get("max_task_seconds", 0) or 0))
+                no_progress_seconds = max(
+                    0.0,
+                    float(self.process_config.get("watchdog_no_progress_timeout_seconds", 0) or 0),
+                )
+                timed = bool(max_seconds and now - state["started_at"] > max_seconds)
+                stalled = bool(no_progress_seconds and now - state["last_progress_at"] > no_progress_seconds)
+                if not timed and not stalled:
+                    if not state["cancel_requested"] or now <= state["cancel_deadline"]:
+                        continue
+                message = "sevenzip_worker made no observable progress" if stalled else "sevenzip_worker timed out"
+                if not state["cancel_requested"]:
+                    state["cancel_requested"] = True
+                    state["cancel_deadline"] = now + max(
+                        0.5, float(self.process_config.get("cancel_grace_seconds", 5) or 5)
+                    )
+                    try:
+                        await self.cancel(job_id)
+                    except Exception:
+                        state["cancel_deadline"] = 0.0
+                    continue
+                state["on_timeout"](message)
+                self._jobs.pop(job_id, None)
+
+    async def close(self) -> None:
+        if self.process is None:
+            return
+        self._closing = True
+        if self.is_alive():
+            try:
+                await self.send('{"worker_command":"shutdown","job_id":"shutdown"}')
+                await asyncio.wait_for(self.process.wait(), timeout=0.5)
+            except (Exception, asyncio.CancelledError):
+                if self.is_alive():
+                    self.process.terminate()
+                    try:
+                        await asyncio.wait_for(self.process.wait(), timeout=0.5)
+                    except Exception:
+                        self.process.kill()
+        current = asyncio.current_task()
+        for task in self._tasks:
+            if task is not current and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in self._tasks if task is not current), return_exceptions=True)
+        self._tasks.clear()
+
+
+class _AsyncNativeWorkerHolder:
+    def __init__(self, worker_path_callback, process_config: dict):
+        self.worker_path_callback = worker_path_callback
+        self.process_config = process_config
+        self._lock = asyncio.Lock()
+        self._worker: _AsyncNativeWorkerProcess | None = None
+        self._closed = False
+
+    async def get_or_start(self, startupinfo) -> _AsyncNativeWorkerProcess:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("native worker is closed")
+            if self._worker is None or not self._worker.is_alive():
+                if self._worker is not None:
+                    await self._worker.close()
+                self._worker = _AsyncNativeWorkerProcess(
+                    self.worker_path_callback(), startupinfo, self.process_config
+                )
+                await self._worker.start()
+            return self._worker
+
+    async def close(self) -> None:
+        async with self._lock:
+            self._closed = True
+            worker = self._worker
+            self._worker = None
+        if worker is not None:
+            await worker.close()
+
+
 class SevenZipRunner:
     def __init__(
         self,
         process_config: dict,
         *,
         shared_worker_holder: _NativeWorkerHolder | None = None,
-        shared_async_executor: ThreadPoolExecutor | None = None,
+        shared_async_worker_holder: _AsyncNativeWorkerHolder | None = None,
+        event_loop=None,
     ):
         self.process_config = process_config
         self.progress_callback = None
@@ -415,25 +627,33 @@ class SevenZipRunner:
         self.seven_zip_dll_path = None
         self._worker_holder: _NativeWorkerHolder | None = shared_worker_holder
         self._owns_worker_holder = shared_worker_holder is None
+        self._async_worker_holder = shared_async_worker_holder
+        self._owns_async_worker_holder = shared_async_worker_holder is None
         self._worker_holder_lock = threading.Lock()
-        self._async_executor = shared_async_executor or ThreadPoolExecutor(
-            thread_name_prefix="sunpack-native-submit",
-        )
-        self._owns_async_executor = shared_async_executor is None
+        self._event_loop = event_loop
 
     def fork(self) -> "SevenZipRunner":
         """Create request-local callback state while sharing native workers."""
         shared_holder = self._worker_holder_or_create()
+        shared_async_holder = self._async_worker_holder_or_create()
         runner = SevenZipRunner(
             self.process_config,
             shared_worker_holder=shared_holder,
-            shared_async_executor=self._async_executor,
+            shared_async_worker_holder=shared_async_holder,
+            event_loop=self._event_loop,
         )
         runner.worker_path = self.worker_path
         runner.seven_zip_dll_path = self.seven_zip_dll_path
         runner.native_event_callback = self.native_event_callback
         runner.request_id = self.request_id
         return runner
+
+    def bind_event_loop(self, loop) -> None:
+        self._event_loop = loop
+
+    async def start_asyncio(self) -> dict[str, Any]:
+        worker = await self._async_worker_holder_or_create().get_or_start(None)
+        return dict(worker.handshake)
 
     def extract_attempt(
         self,
@@ -525,9 +745,155 @@ class SevenZipRunner:
             on_complete=kwargs.get("on_complete"),
         )
 
-    def submit_continuation(self, callback: Callable[..., Any], *args, **kwargs) -> Future:
-        """Run a short Python business continuation off the pipe reader."""
-        return self._async_executor.submit(callback, *args, **kwargs)
+    async def submit_attempt_asyncio(self, job: dict | None = None, **kwargs) -> subprocess.CompletedProcess:
+        """Submit and await one native attempt without pipe or continuation threads."""
+        try:
+            if job is None:
+                job = self._build_job(
+                    archive_path=kwargs["archive_path"],
+                    part_paths=kwargs.get("part_paths") or [],
+                    out_dir=kwargs["out_dir"],
+                    password=kwargs.get("password"),
+                    password_candidates=kwargs.get("password_candidates"),
+                    selected_codepage=kwargs.get("selected_codepage"),
+                    decoded_names=kwargs.get("decoded_names") or [],
+                    task=kwargs["task"],
+                    phase_timer=kwargs.get("phase_timer"),
+                    phase_prefix=kwargs.get("phase_prefix", "sevenzip"),
+                )
+        except Exception as exc:
+            return self.failed_process_for_exception(exc, job)
+        return await self._submit_native_job_asyncio(
+            job,
+            startupinfo=kwargs.get("startupinfo"),
+            task=kwargs.get("task"),
+        )
+
+    async def _submit_native_job_asyncio(
+        self,
+        job: dict,
+        *,
+        startupinfo=None,
+        task: ArchiveTask | None = None,
+    ) -> subprocess.CompletedProcess:
+        prepared_job = dict(job)
+        job_id = str(prepared_job.get("job_id") or "")
+        if not job_id:
+            raise ValueError("native job_id is required")
+        result_future = asyncio.get_running_loop().create_future()
+        worker: _AsyncNativeWorkerProcess | None = None
+        try:
+            worker = await self._async_worker_holder_or_create().get_or_start(startupinfo)
+            prepared_job["worker_epoch"] = worker.worker_epoch
+            stdout_lines: list[str] = []
+            stderr_lines: list[str] = []
+            progress_events: list[dict[str, Any]] = []
+            pending_result: subprocess.CompletedProcess | None = None
+            pending_payload: dict[str, Any] | None = None
+            retries = 0
+            max_retries = max(1, int(self.process_config.get("backpressure_retries", 120) or 120))
+            payload_text = json.dumps(prepared_job, ensure_ascii=False, separators=(",", ":"))
+
+            def complete(value: subprocess.CompletedProcess) -> None:
+                if not result_future.done():
+                    result_future.set_result(value)
+
+            async def retry_after_backpressure(delay: float) -> None:
+                await asyncio.sleep(delay)
+                if result_future.done() or not worker.is_alive():
+                    return
+                try:
+                    await worker.submit(payload_text, job_id, on_line=on_line, on_timeout=on_timeout)
+                except Exception as exc:
+                    on_timeout(f"native worker retry failed: {exc}")
+
+            def on_line(line: str) -> bool:
+                nonlocal pending_result, pending_payload, retries
+                value = self._json_line(line)
+                if value:
+                    value.setdefault("worker_epoch", worker.worker_epoch)
+                if value and value.get("type") == "progress":
+                    progress_events.append(value)
+                    self._emit_progress(task, value)
+                    return False
+                if value and value.get("type") == "native_event":
+                    self._emit_native_event(task, value)
+                    if value.get("event") != "job_finished" or pending_result is None:
+                        return False
+                    if (
+                        isinstance(pending_payload, dict)
+                        and pending_payload.get("retryable")
+                        and pending_payload.get("native_status") == "backpressure"
+                        and retries < max_retries
+                    ):
+                        retries += 1
+                        pending_result = None
+                        pending_payload = None
+                        asyncio.create_task(
+                            retry_after_backpressure(min(1.0, 0.05 * retries)),
+                            name=f"native-backpressure-{job_id}",
+                        )
+                        return True
+                    complete(pending_result)
+                    pending_result = None
+                    pending_payload = None
+                    return True
+                if value and value.get("type") == "cancel_ack":
+                    return False
+                if value and value.get("type") == "result":
+                    stderr_lines.extend(worker.take_stderr())
+                    pending_result = self._completed_process(
+                        [worker.worker_path],
+                        0 if value.get("status") == "ok" else 1,
+                        "".join(stdout_lines),
+                        "".join(stderr_lines),
+                        request_payload=prepared_job,
+                        result_payload=value,
+                        progress_events=progress_events,
+                    )
+                    pending_payload = value
+                    return False
+                stdout_lines.append(line)
+                return False
+
+            def on_timeout(message: str) -> None:
+                complete(self._completed_process(
+                    [worker.worker_path],
+                    -101,
+                    "".join(stdout_lines),
+                    message,
+                    request_payload=prepared_job,
+                    process_failure={
+                        "failure_stage": "worker_communication",
+                        "failure_kind": "worker_lost" if not worker.is_alive() else "timeout",
+                        "worker_epoch": worker.worker_epoch,
+                        "message": message,
+                    },
+                    progress_events=progress_events,
+                ))
+
+            await worker.submit(payload_text, job_id, on_line=on_line, on_timeout=on_timeout)
+            try:
+                return await result_future
+            except asyncio.CancelledError:
+                try:
+                    await worker.cancel(job_id)
+                except Exception:
+                    pass
+                raise
+        except Exception as exc:
+            return self._completed_process(
+                [self.worker_path or "sunpack_sevenzip_worker.exe"],
+                -100,
+                "",
+                f"native worker communication failed: {exc}",
+                request_payload=prepared_job,
+                process_failure={
+                    "failure_stage": "worker_start" if worker is None else "worker_communication",
+                    "failure_kind": "process_start" if worker is None else "process_io",
+                    "message": str(exc),
+                },
+            )
 
     def failed_process_for_exception(
         self,
@@ -617,9 +983,15 @@ class SevenZipRunner:
                                 except Exception as exc:
                                     on_timeout(f"native worker retry failed: {exc}")
 
-                            timer = threading.Timer(min(1.0, 0.05 * backpressure_retries), retry_submission)
-                            timer.daemon = True
-                            timer.start()
+                            delay = min(1.0, 0.05 * backpressure_retries)
+                            if self._event_loop is None:
+                                on_timeout("native worker backpressure requires an event loop")
+                            else:
+                                self._event_loop.call_soon_threadsafe(
+                                    self._event_loop.call_later,
+                                    delay,
+                                    retry_submission,
+                                )
                             return True
                         complete(pending_result)
                         pending_result = None
@@ -691,13 +1063,7 @@ class SevenZipRunner:
                 except Exception:
                     pass
 
-            def dispatch_completion(done: Future) -> None:
-                try:
-                    self._async_executor.submit(notify, done)
-                except RuntimeError:
-                    notify(done)
-
-            future.add_done_callback(dispatch_completion)
+            future.add_done_callback(notify)
         return future
 
     def _build_job(
@@ -719,6 +1085,8 @@ class SevenZipRunner:
             "job_id": attempt_id,
             "attempt_id": attempt_id,
             "request_id": str(self.request_id or ""),
+            "file_id": str(getattr(task, "key", "") or archive_path),
+            "stage": "extract",
             "seven_zip_dll_path": self._seven_zip_dll_path(),
             "archive_path": archive_path,
             "part_paths": list(part_paths or [archive_path]),
@@ -862,14 +1230,24 @@ class SevenZipRunner:
                 self._worker_holder = _NativeWorkerHolder(self._worker_path, self.process_config)
             return self._worker_holder
 
+    def _async_worker_holder_or_create(self) -> _AsyncNativeWorkerHolder:
+        if self._async_worker_holder is None:
+            self._async_worker_holder = _AsyncNativeWorkerHolder(self._worker_path, self.process_config)
+        return self._async_worker_holder
+
+    async def aclose(self) -> None:
+        if self._owns_async_worker_holder and self._async_worker_holder is not None:
+            holder = self._async_worker_holder
+            self._async_worker_holder = None
+            await holder.close()
+        self.close()
+
     def close(self) -> None:
         if not self._owns_worker_holder:
             return
         with self._worker_holder_lock:
             holder = self._worker_holder
             self._worker_holder = None
-        if self._owns_async_executor:
-            self._async_executor.shutdown(wait=True, cancel_futures=False)
         if holder is not None:
             holder.close()
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,7 +71,7 @@ def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monke
     )
     ctx = CliContext(language="en", reporter=CliReporter())
 
-    exit_code, result = extract.handle(args, ctx)
+    exit_code, result = asyncio.run(extract.handle(args, ctx))
 
     assert exit_code == 0
     assert attempts == [[], ["secret"]]
@@ -128,7 +129,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
     )
     ctx = CliContext(language="en", reporter=CliReporter(verbose=True))
 
-    exit_code, result = extract.handle(args, ctx)
+    exit_code, result = asyncio.run(extract.handle(args, ctx))
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -192,7 +193,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
     )
     ctx = CliContext(language="en", reporter=CliReporter(verbose=False))
 
-    exit_code, result = extract.handle(args, ctx)
+    exit_code, result = asyncio.run(extract.handle(args, ctx))
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -274,7 +275,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
     reporter = CliReporter(json_mode=True)
     ctx = CliContext(language="en", reporter=reporter)
 
-    exit_code, result = extract.handle(args, ctx)
+    exit_code, result = asyncio.run(extract.handle(args, ctx))
     reporter.emit_result(result)
 
     payload = json.loads(capsys.readouterr().out)

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import os
-import queue
-import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Protocol, TextIO
 
 from sunpack.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.repair_inspection import RepairInspectionService
@@ -34,6 +32,7 @@ from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.archive_sessions import release_archive_sessions_under
 from sunpack.detection.options import DetectionOptions
+from sunpack.coordinator.async_work import AsyncWorkBroker, CancellationToken, map_bounded
 
 
 @dataclass
@@ -41,133 +40,178 @@ class _Submission:
     request_id: str
     targets: tuple[PipelineTarget, ...]
     direct: bool
-    defer_postprocess: bool
     user_passwords: tuple[str, ...]
     builtin_passwords: tuple[str, ...]
     config: dict
-    future: Future
+    stdout: TextIO | None = None
+    stderr: TextIO | None = None
 
 
-class PipelineHandle:
-    def __init__(self, engine: "PipelineEngine", submission: _Submission):
-        self._engine = engine
-        self._submission = submission
-        self._finalize_lock = threading.Lock()
-        self._finalized = not submission.defer_postprocess
+class AsyncOutputCommitter(Protocol):
+    async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse: ...
 
-    @property
-    def request_id(self) -> str:
-        return self._submission.request_id
 
-    def result(self, timeout: float | None = None) -> PipelineResponse:
-        return self._submission.future.result(timeout=timeout)
+class DirectOutputCommitter:
+    def __init__(self, broker: AsyncWorkBroker, *, stdout=None):
+        self._broker = broker
+        self._stdout = stdout
 
-    def done(self) -> bool:
-        return self._submission.future.done()
+    async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse:
+        await self._broker.run(
+            "postprocess",
+            response.request_id,
+            _finalize_response,
+            config,
+            response,
+            stdout=self._stdout,
+            request_id=response.request_id,
+        )
+        return response
 
-    def add_done_callback(self, callback) -> None:
-        self._submission.future.add_done_callback(lambda _future: callback(self))
 
-    def finalize(self, output_path_map: Mapping[str, str] | None = None) -> PipelineResponse:
-        response = self.result()
-        with self._finalize_lock:
-            if not self._finalized:
-                self._engine._finalize_submission(self._submission, response, output_path_map=output_path_map)
-                self._finalized = True
+class IdentityOutputCommitter:
+    """Let an embedding perform an atomic output commit after inspection."""
+
+    async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse:
+        return response
+
+
+class MappedOutputCommitter:
+    def __init__(self, broker: AsyncWorkBroker, output_path_map: Mapping[str, str]):
+        self._broker = broker
+        self._output_path_map = dict(output_path_map)
+
+    async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse:
+        await self._broker.run(
+            "postprocess",
+            response.request_id,
+            _finalize_response,
+            config,
+            response,
+            output_path_map=self._output_path_map,
+            request_id=response.request_id,
+        )
         return response
 
 
 class PipelineEngine:
-    """Process-scoped services with independently completing request pipelines."""
-
-    _STOP = object()
+    """Single-event-loop owner for independently completing requests."""
 
     def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
         self.detection_options = detection_options or DetectionOptions()
-        self._queue: queue.Queue = queue.Queue()
-        self._services = _PipelineServices(config, self.detection_options)
+        worker_config = _worker_config(config)
+        self._broker = AsyncWorkBroker(
+            thread_capacity=int(worker_config.get("stage_thread_capacity", 0) or 0),
+            max_pending_jobs=int(
+                worker_config.get("max_pending_stage_jobs", worker_config.get("max_queue_jobs", 4096)) or 4096
+            ),
+        )
+        self._services = _PipelineServices(config, self._broker, self.detection_options)
+        self._services.max_inflight_files = _max_inflight_files(config, self._broker)
         self._runtime = self._services
-        self._request_threads: set[threading.Thread] = set()
+        self._active_requests: dict[str, asyncio.Task] = {}
         self._request_runtime_factory = _RequestRuntime
-        self._thread: threading.Thread | None = None
-        self._lifecycle_lock = threading.Lock()
-        self._runtime_cache_lock = threading.RLock()
-        self._dispatch_condition = threading.Condition()
         self._path_leases = _PathLeaseRegistry()
-        self._cancel_pending_on_stop = False
-        self._password_source_lock = threading.Lock()
-        self._config_lock = threading.Lock()
-        self._recent_passwords_lock = threading.Lock()
         self._recent_passwords: list[str] = []
         self._user_passwords = tuple(config.get("user_passwords", []) or [])
         self._builtin_passwords = tuple(config.get("builtin_passwords", []) or [])
         self._started = False
-        self._accepting = False
         self._closed = False
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def recent_passwords(self) -> list[str]:
-        with self._recent_passwords_lock:
-            return list(self._recent_passwords)
+        return list(self._recent_passwords)
+
+    @property
+    def work_broker(self) -> AsyncWorkBroker:
+        return self._broker
 
     def is_idle(self) -> bool:
-        with self._dispatch_condition:
-            return not self._request_threads and self._queue.empty()
+        return not self._active_requests and self._broker.pending_jobs == 0 and self._broker.active_jobs == 0
 
-    def start(self) -> "PipelineEngine":
-        with self._lifecycle_lock:
-            if self._closed:
-                raise RuntimeError("PipelineEngine is closed")
-            if self._started:
-                return self
-            self._services.start()
-            self._started = True
-            self._accepting = True
-            self._thread = threading.Thread(target=self._dispatch_loop, name="sunpack-pipeline", daemon=True)
-            self._thread.start()
+    async def __aenter__(self) -> "PipelineEngine":
+        if self._closed:
+            raise RuntimeError("PipelineEngine is closed")
+        loop = asyncio.get_running_loop()
+        if self._owner_loop is not None and self._owner_loop is not loop:
+            raise RuntimeError("PipelineEngine belongs to a different event loop")
+        self._owner_loop = loop
+        self._broker.bind()
+        await self._services.start()
+        self._started = True
         return self
 
-    def submit(
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        await self.aclose(graceful=True)
+
+    async def run(
         self,
         targets: Iterable[str | PipelineTarget],
         *,
         direct: bool = False,
-        defer_postprocess: bool = False,
-    ) -> PipelineHandle:
+        output_committer: AsyncOutputCommitter | None = None,
+        request_config: dict | None = None,
+        stdout: TextIO | None = None,
+        stderr: TextIO | None = None,
+    ) -> PipelineResponse:
+        if not self._started or self._closed:
+            raise RuntimeError("PipelineEngine must be entered before run")
+        if asyncio.get_running_loop() is not self._owner_loop:
+            raise RuntimeError("PipelineEngine.run must execute on its owner event loop")
         normalized = tuple(self._normalize_target(target) for target in targets)
         if not normalized:
-            raise ValueError("PipelineEngine.submit requires at least one target")
-        with self._password_source_lock:
-            user_passwords = self._user_passwords
-            builtin_passwords = self._builtin_passwords
-        with self._config_lock:
-            request_config = copy.deepcopy(self.config)
+            raise ValueError("PipelineEngine.run requires at least one target")
+        request_config = copy.deepcopy(request_config if request_config is not None else self.config)
+        user_passwords = tuple(request_config.get("user_passwords", self._user_passwords) or [])
+        builtin_passwords = tuple(request_config.get("builtin_passwords", self._builtin_passwords) or [])
         request_config["user_passwords"] = list(user_passwords)
         request_config["builtin_passwords"] = list(builtin_passwords)
         submission = _Submission(
             request_id=uuid.uuid4().hex,
             targets=normalized,
             direct=bool(direct),
-            defer_postprocess=bool(defer_postprocess),
             user_passwords=user_passwords,
             builtin_passwords=builtin_passwords,
             config=request_config,
-            future=Future(),
+            stdout=stdout,
+            stderr=stderr,
         )
-        with self._runtime_cache_lock:
-            with self._lifecycle_lock:
-                if not self._started or not self._accepting:
-                    raise RuntimeError("PipelineEngine must be started before submit")
-                self._queue.put(submission)
-        return PipelineHandle(self, submission)
+        cancellation = CancellationToken()
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_requests[submission.request_id] = task
+        try:
+            target_paths = [target.path for target in submission.targets]
+            while not self._path_leases.try_acquire(submission.request_id, target_paths):
+                cancellation.raise_if_cancelled()
+                await asyncio.sleep(0.01)
+            runtime = self._request_runtime_factory(
+                self._services,
+                submission,
+                self.detection_options,
+                self._path_leases,
+            )
+            response = await runtime.execute_async(self._broker, cancellation)
+            self._remember_recent_passwords(response.recent_passwords)
+            committer = output_committer or DirectOutputCommitter(self._broker, stdout=stdout)
+            return await committer.commit(submission.config, response)
+        except asyncio.CancelledError:
+            cancellation.cancel()
+            raise
+        finally:
+            self._services.output_reservations.release(submission.request_id)
+            self._path_leases.release(submission.request_id)
+            self._active_requests.pop(submission.request_id, None)
 
-    def clear_runtime_caches(self) -> dict:
+    async def clear_runtime_caches(self) -> dict:
         """Clear process-wide runtime caches only while this engine is idle."""
 
-        with self._runtime_cache_lock:
-            if not self.is_idle():
-                return {"skipped": "engine_busy"}
+        if not self.is_idle():
+            return {"skipped": "engine_busy"}
+
+        def clear() -> dict:
             from sunpack.support.runtime_cache_cleanup import (
                 clear_all_runtime_caches,
                 runtime_cache_stats,
@@ -181,156 +225,41 @@ class PipelineEngine:
             after = runtime_cache_stats(inspection_services=services)
             return {"before": before, "cleared": cleared, "after": after}
 
+        return await self._broker.run("cache_cleanup", "engine", clear, request_id="engine")
+
     def update_password_sources(self, *, user_passwords: Iterable[str], builtin_passwords: Iterable[str]) -> None:
-        with self._password_source_lock:
-            self._user_passwords = tuple(user_passwords)
-            self._builtin_passwords = tuple(builtin_passwords)
+        self._user_passwords = tuple(user_passwords)
+        self._builtin_passwords = tuple(builtin_passwords)
 
     def reconfigure_request(self, config: dict) -> None:
         """Refresh the snapshot source for future requests only."""
-        with self._config_lock:
-            _replace_mapping_in_place(self.config, config)
+        _replace_mapping_in_place(self.config, config)
 
-    def finalize(
-        self,
-        response: PipelineResponse,
-        *,
-        output_path_map: Mapping[str, str] | None = None,
-    ) -> None:
-        with self._config_lock:
-            config = copy.deepcopy(self.config)
-        _finalize_response(config, response, output_path_map=output_path_map)
-
-    def _finalize_submission(
-        self,
-        submission: _Submission,
-        response: PipelineResponse,
-        *,
-        output_path_map: Mapping[str, str] | None = None,
-    ) -> None:
-        _finalize_response(submission.config, response, output_path_map=output_path_map)
-
-    def close(self, *, graceful: bool = True) -> None:
-        with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._accepting = False
-            thread = self._thread
-            self._cancel_pending_on_stop = not graceful
-            if self._started:
-                self._queue.put(self._STOP)
-        if thread is not None:
-            thread.join()
-        self._services.close()
-        with self._lifecycle_lock:
-            self._closed = True
-            self._started = False
-
-    def __enter__(self) -> "PipelineEngine":
-        return self.start()
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        self.close(graceful=True)
-
-    def _dispatch_loop(self) -> None:
-        pending: list[_Submission] = []
-        stopping = False
-        while True:
-            if not pending and not stopping:
-                item = self._queue.get()
-                if item is self._STOP:
-                    stopping = True
-                    self._queue.task_done()
-                else:
-                    pending.append(item)
-            while not stopping:
-                try:
-                    item = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if item is self._STOP:
-                    stopping = True
-                    self._queue.task_done()
-                    break
-                pending.append(item)
-            if stopping and self._cancel_pending_on_stop:
-                for submission in pending:
-                    submission.future.cancel()
-                    self._queue.task_done()
-                pending.clear()
-
-            scheduled = False
-            while pending:
-                index = next(
-                    (
-                        i for i, submission in enumerate(pending)
-                        if self._path_leases.try_acquire(
-                            submission.request_id,
-                            [target.path for target in submission.targets],
-                        )
-                    ),
-                    None,
-                )
-                if index is None:
-                    break
-                submission = pending.pop(index)
-                worker_thread = threading.Thread(
-                    target=self._execute_submission_thread,
-                    args=(submission,),
-                    name=f"sunpack-request-{submission.request_id[:8]}",
-                    daemon=True,
-                )
-                with self._dispatch_condition:
-                    self._request_threads.add(worker_thread)
-                worker_thread.start()
-                scheduled = True
-
-            if stopping and not pending and self._active_count() == 0:
-                return
-            if not scheduled:
-                with self._dispatch_condition:
-                    self._dispatch_condition.wait(timeout=0.05)
-
-    def _execute_submission(self, submission: _Submission) -> None:
-        try:
-            runtime = self._request_runtime_factory(
-                self._services,
-                submission,
-                self.detection_options,
-                self._path_leases,
+    async def aclose(self, *, graceful: bool = True) -> None:
+        if self._closed:
+            return
+        if not graceful:
+            current = asyncio.current_task()
+            for task in tuple(self._active_requests.values()):
+                if task is not current:
+                    task.cancel()
+        elif self._active_requests:
+            current = asyncio.current_task()
+            await asyncio.gather(
+                *(task for task in set(self._active_requests.values()) if task is not current),
+                return_exceptions=True,
             )
-            response = runtime.execute()
-            self._remember_recent_passwords(response.recent_passwords)
-            if not submission.future.done():
-                submission.future.set_result(response)
-        except Exception as exc:
-            if not submission.future.done():
-                submission.future.set_exception(exc)
-        finally:
-            self._services.output_reservations.release(submission.request_id)
-
-    def _execute_submission_thread(self, submission: _Submission) -> None:
-        try:
-            self._execute_submission(submission)
-        finally:
-            current = threading.current_thread()
-            self._path_leases.release(submission.request_id)
-            self._queue.task_done()
-            with self._dispatch_condition:
-                self._request_threads.discard(current)
-                self._dispatch_condition.notify_all()
-
-    def _active_count(self) -> int:
-        with self._dispatch_condition:
-            return len(self._request_threads)
+        await self._services.close(self._broker)
+        await self._broker.close(graceful=graceful)
+        self._closed = True
+        self._started = False
 
     def _remember_recent_passwords(self, passwords: Iterable[str]) -> None:
-        with self._recent_passwords_lock:
-            for password in reversed(list(passwords)):
-                if password in self._recent_passwords:
-                    self._recent_passwords.remove(password)
-                self._recent_passwords.insert(0, password)
-            del self._recent_passwords[20:]
+        for password in reversed(list(passwords)):
+            if password in self._recent_passwords:
+                self._recent_passwords.remove(password)
+            self._recent_passwords.insert(0, password)
+        del self._recent_passwords[20:]
 
     @staticmethod
     def _normalize_target(target: str | PipelineTarget) -> PipelineTarget:
@@ -341,42 +270,27 @@ class PipelineEngine:
 
 class _PathLeaseRegistry:
     def __init__(self):
-        self._condition = threading.Condition()
         self._owned: dict[str, set[str]] = {}
 
     def try_acquire(self, owner: str, paths: Iterable[str]) -> bool:
         normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
-        with self._condition:
-            if self._conflicts(owner, normalized):
-                return False
-            self._owned.setdefault(owner, set()).update(normalized)
-            return True
+        if self._conflicts(owner, normalized):
+            return False
+        self._owned.setdefault(owner, set()).update(normalized)
+        return True
 
-    def acquire(self, owner: str, paths: Iterable[str]) -> None:
+    def try_replace(self, owner: str, paths: Iterable[str]) -> bool:
         normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
-        with self._condition:
-            while self._conflicts(owner, normalized):
-                self._condition.wait()
-            self._owned.setdefault(owner, set()).update(normalized)
-
-    def replace(self, owner: str, paths: Iterable[str]) -> None:
-        """Replace a provisional top-level lease with a discovered member set.
-
-        Dropping the provisional lease before waiting prevents two different
-        split members from each holding one path while requesting the other.
-        """
-        normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
-        with self._condition:
-            self._owned.pop(owner, None)
-            self._condition.notify_all()
-            while self._conflicts(owner, normalized):
-                self._condition.wait()
-            self._owned[owner] = normalized
+        previous = self._owned.pop(owner, None)
+        if self._conflicts(owner, normalized):
+            if previous is not None:
+                self._owned[owner] = previous
+            return False
+        self._owned[owner] = normalized
+        return True
 
     def release(self, owner: str) -> None:
-        with self._condition:
-            self._owned.pop(owner, None)
-            self._condition.notify_all()
+        self._owned.pop(owner, None)
 
     def _conflicts(self, owner: str, candidates: set[str]) -> bool:
         for current_owner, current_paths in self._owned.items():
@@ -405,44 +319,64 @@ def _replace_mapping_in_place(target: dict, source: dict) -> None:
             target[key] = copy.deepcopy(value)
 
 
+def _worker_config(config: dict) -> dict:
+    performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
+    worker = performance.get("worker") if isinstance(performance.get("worker"), dict) else {}
+    return dict(worker)
+
+
+def _max_inflight_files(config: dict, broker: AsyncWorkBroker) -> int:
+    worker = _worker_config(config)
+    configured = int(worker.get("max_inflight_files", 0) or 0)
+    if configured > 0:
+        return configured
+    native_capacity = int(worker.get("thread_capacity", 0) or broker.thread_capacity)
+    return min(512, max(64, 4 * (broker.thread_capacity + max(1, native_capacity))))
+
+
 class _PipelineServices:
     """Thread-safe process services shared by all request runtimes."""
 
-    def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
+    def __init__(
+        self,
+        config: dict,
+        broker: AsyncWorkBroker,
+        detection_options: DetectionOptions | None = None,
+    ):
         self.config = config
+        self.broker = broker
+        self.max_inflight_files = 64
         self.output_reservations = OutputReservationRegistry()
-        analysis_config = config.get("analysis") if isinstance(config.get("analysis"), dict) else {}
-        module_workers = max(1, int(analysis_config.get("max_workers", 3) or 3))
-        self.analysis_capability_pool = ThreadPoolExecutor(
-            max_workers=module_workers,
-            thread_name_prefix="sunpack-analysis-capability",
-        )
         self.repair_inspection_service = RepairInspectionService(
             config,
-            executor_pool=self.analysis_capability_pool,
         )
-        performance_config = dict(
-            config.get("performance", {})
-            if isinstance(config.get("performance"), dict)
-            else {}
-        )
-        worker_config = dict(
-            performance_config.get("worker", {})
-            if isinstance(performance_config.get("worker"), dict)
-            else {}
-        )
+        worker_config = _worker_config(config)
         self.sevenzip_runner = SevenZipRunner(worker_config)
+        self._automatic_stage_capacity = int(worker_config.get("stage_thread_capacity", 0) or 0) == 0
 
-    def start(self) -> None:
-        return None
+    async def start(self) -> None:
+        self.sevenzip_runner.bind_event_loop(asyncio.get_running_loop())
+        handshake = await self.sevenzip_runner.start_asyncio()
+        if self._automatic_stage_capacity:
+            initial_limit = int(handshake.get("initial_active_limit", 0) or handshake.get("thread_capacity", 1) or 1)
+            self.broker.configure_thread_capacity(initial_limit)
+            self.max_inflight_files = min(512, max(64, 4 * initial_limit))
 
-    def close(self) -> None:
-        self.sevenzip_runner.close()
-        self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
-        from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
+    async def close(self, broker: AsyncWorkBroker) -> None:
+        await self.sevenzip_runner.aclose()
 
-        clear_all_runtime_caches(
-            inspection_services=(self.repair_inspection_service,),
+        def close_services() -> None:
+            from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
+
+            clear_all_runtime_caches(
+                inspection_services=(self.repair_inspection_service,),
+            )
+
+        await broker.run(
+            "service_close",
+            "engine",
+            close_services,
+            request_id="engine",
         )
 
 
@@ -466,8 +400,19 @@ class _RequestRuntime:
         self.quiet = bool(cli_config.get("quiet", False))
         self.verbose = bool(cli_config.get("verbose", False))
         self.context = RunContext()
-        self.reporter = RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)
-        self.postprocess = PostProcessActions(self.config, self.context, language=self.language)
+        self.reporter = RunReporter(
+            language=self.language,
+            quiet=self.quiet,
+            verbose=self.verbose,
+            stdout=submission.stdout,
+            stderr=submission.stderr,
+        )
+        self.postprocess = PostProcessActions(
+            self.config,
+            self.context,
+            language=self.language,
+            stdout=submission.stdout,
+        )
         self.space_guard = ExtractionSpaceGuard(self.context, self.postprocess)
         self.task_scanner = ArchiveTaskScanner(
             self.config,
@@ -476,7 +421,6 @@ class _RequestRuntime:
         )
         self.input_planning_stage = ArchiveInputPlanningStage(
             self.config,
-            module_executor_pool=services.analysis_capability_pool,
         )
         self.output_scan_policy = NestedOutputScanPolicy(self.config)
         self.nested_extraction_policy = NestedExtractionPolicy(self.config)
@@ -503,6 +447,7 @@ class _RequestRuntime:
                 "language": self.language,
             },
             sevenzip_runner=request_runner,
+            output_stream=submission.stdout,
         )
         self.extractor.ensure_space = self.space_guard.ensure_space
         self.extractor.set_progress_callback(self.reporter.task_progress)
@@ -542,45 +487,87 @@ class _RequestRuntime:
         if len(planned) != 1:
             return None
         replacement = planned[0]
-        self.path_leases.acquire(
-            self.submission.request_id,
-            replacement.all_parts or [replacement.main_path],
-        )
         return replacement
 
-    def execute(self) -> PipelineResponse:
+    async def execute_async(
+        self,
+        broker: AsyncWorkBroker,
+        cancellation: CancellationToken,
+    ) -> PipelineResponse:
         start_time = time.time()
         submission = self.submission
+        request_id = submission.request_id
         all_targets = [target.path for target in submission.targets]
         first_target = all_targets[0] if all_targets else os.getcwd()
         monitor_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
-        self.space_guard.bind_root(monitor_root)
+        await broker.run(
+            "space_bind",
+            request_id,
+            self.space_guard.bind_root,
+            monitor_root,
+            request_id=request_id,
+            cancellation=cancellation,
+        )
         ownership = _RequestOwnership([submission], self.config)
         recursion = self._new_recursion()
         round_index = 1
         current_roots = list(dict.fromkeys(all_targets))
-        current_tasks = self.task_scanner.direct_file_tasks(current_roots) if submission.direct else None
+        current_tasks = None
         current_scan_session = None
-        extractor_closed = False
+        if submission.direct:
+            current_tasks = await broker.run(
+                "discover",
+                request_id,
+                self.task_scanner.direct_file_tasks,
+                current_roots,
+                request_id=request_id,
+                cancellation=cancellation,
+            )
 
         try:
             while current_tasks if submission.direct else current_roots:
+                cancellation.raise_if_cancelled()
                 if submission.direct:
                     tasks = current_tasks or []
                 else:
                     self.reporter.scan_started(round_index)
-                    tasks = self.task_scanner.scan_targets(
+                    tasks = await broker.run(
+                        "discover_detect",
+                        request_id,
+                        self.task_scanner.scan_targets,
                         current_roots,
                         scan_session=current_scan_session,
                         is_recursive_scan=(round_index > 1),
+                        request_id=request_id,
+                        cancellation=cancellation,
                     )
-                authorization = self.nested_extraction_policy.authorize_batch(
+                authorization = await broker.run(
+                    "nested_policy",
+                    request_id,
+                    self.nested_extraction_policy.authorize_batch,
                     tasks,
                     current_roots,
                     current_scan_session or self.task_scanner.last_scan_session,
                     round_index=round_index,
+                    request_id=request_id,
+                    cancellation=cancellation,
                 )
-                tasks = self.input_planning_stage.plan_tasks(authorization.allowed_tasks)
+                async def plan_one(task):
+                    return await broker.run(
+                        "plan",
+                        task.key or task.main_path,
+                        self._plan_task_isolated,
+                        task,
+                        request_id=request_id,
+                        cancellation=cancellation,
+                    )
+
+                planned_groups = await map_bounded(
+                    authorization.allowed_tasks,
+                    self.services.max_inflight_files,
+                    plan_one,
+                )
+                tasks = [task for group in planned_groups for task in group]
                 self.context.policy_skips.extend(authorization.skipped)
                 ownership.remember_tasks(tasks)
                 member_paths = [
@@ -588,59 +575,92 @@ class _RequestRuntime:
                     for task in tasks
                     for path in (task.all_parts or [task.main_path])
                 ]
-                self.path_leases.replace(
-                    submission.request_id,
-                    [*all_targets, *member_paths],
-                )
+                lease_paths = [*all_targets, *member_paths]
+                while not self.path_leases.try_replace(request_id, lease_paths):
+                    cancellation.raise_if_cancelled()
+                    await asyncio.sleep(0.01)
                 self.batch_runner.set_progress_round(
                     round_index,
                     direct=submission.direct and round_index == 1,
                 )
                 before_results = len(self.context.target_results)
-                new_roots = self.batch_runner.execute(
+                new_roots = await self.batch_runner.execute_async(
                     tasks,
+                    broker=broker,
+                    cancellation=cancellation,
                     default_output_dir_for_task=ownership.output_dir_for_task,
                     missing_volume_retry=self._resolve_missing_volume_once,
+                    ensure_input_lease=self._ensure_task_lease,
                 )
                 next_scan_session = self.output_scan_policy.take_scan_session(new_roots)
                 ownership.remember_results(self.context.target_results[before_results:])
                 if not recursion.should_continue(round_index, bool(new_roots)):
                     break
-                if recursion.mode == "prompt" and not recursion.prompt_continue(round_index):
+                if recursion.mode == "prompt" and not await broker.run(
+                    "prompt",
+                    request_id,
+                    recursion.prompt_continue,
+                    round_index,
+                    request_id=request_id,
+                    cancellation=cancellation,
+                ):
                     break
                 current_roots = new_roots
                 current_scan_session = next_scan_session
-                current_tasks = (
-                    self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session, is_recursive_scan=True)
-                    if submission.direct
-                    else None
-                )
+                current_tasks = None
+                if submission.direct:
+                    current_tasks = await broker.run(
+                        "discover_detect",
+                        request_id,
+                        self.task_scanner.scan_targets,
+                        new_roots,
+                        scan_session=current_scan_session,
+                        is_recursive_scan=True,
+                        request_id=request_id,
+                        cancellation=cancellation,
+                    )
                 round_index += 1
 
             response = ownership.responses(
                 self.context,
                 recent_passwords=self.extractor.recent_passwords,
-            )[submission.request_id]
+            )[request_id]
             request_log_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
-            self.reporter.log_final_summary(
+            await broker.run(
+                "report",
+                request_id,
+                self.reporter.log_final_summary,
                 request_log_root,
                 start_time,
                 response.summary.success_count,
                 response.summary.failed_tasks,
                 recovered_outputs=response.summary.recovered_outputs,
                 failures=response.summary.failures,
+                request_id=request_id,
+                cancellation=cancellation,
             )
-            if not submission.defer_postprocess:
-                self.extractor.set_progress_callback(None)
-                self.extractor.close()
-                extractor_closed = True
-                _finalize_response(self.config, response)
             return response
         finally:
-            if not extractor_closed:
-                self.extractor.set_progress_callback(None)
-                self.extractor.close()
+            self.extractor.set_progress_callback(None)
+            await broker.run(
+                "extractor_close",
+                request_id,
+                self.extractor.close,
+                request_id=request_id,
+            )
             self.input_planning_stage.clear_report_cache()
+
+    async def _ensure_task_lease(self, task) -> None:
+        paths = task.all_parts or [task.main_path]
+        while not self.path_leases.try_acquire(self.submission.request_id, paths):
+            await asyncio.sleep(0.01)
+
+    def _plan_task_isolated(self, task):
+        stage = ArchiveInputPlanningStage(self.config)
+        try:
+            return stage.plan_task_to_tasks(task)
+        finally:
+            stage.clear_report_cache()
 
     def _new_recursion(self) -> RecursionController:
         config = self.config.get("recursive_extract", {"mode": "fixed", "max_rounds": 1})
@@ -658,6 +678,7 @@ def _finalize_response(
     response: PipelineResponse,
     *,
     output_path_map: Mapping[str, str] | None = None,
+    stdout=None,
 ) -> None:
     mapping = {path_key(old): os.path.abspath(new) for old, new in (output_path_map or {}).items()}
 
@@ -686,7 +707,7 @@ def _finalize_response(
     if flatten_enabled:
         for target in flatten_targets:
             release_archive_sessions_under(target)
-    PostProcessActions(config).apply(
+    PostProcessActions(config, stdout=stdout).apply(
         archives_to_clean=archives_to_clean,
         flatten_targets=flatten_targets,
     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import threading
 import time
 from types import SimpleNamespace
@@ -21,6 +23,12 @@ class FakeRunner:
     pass
 
 
+_TEST_LOOP = asyncio.new_event_loop()
+
+def _await(awaitable):
+    return _TEST_LOOP.run_until_complete(awaitable)
+
+
 def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -39,17 +47,20 @@ def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_pa
     monkeypatch.setattr(service_module, "read_watch_roots", lambda: [str(tmp_path)])
 
     class Engine:
-        def start(self):
-            pass
+        async def __aenter__(self):
+            return self
 
-        def close(self, graceful=True):
+        async def aclose(self, graceful=True):
             pass
 
     class Scheduler:
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def start(self):
+        async def start(self):
+            pass
+
+        async def stop(self):
             pass
 
     monkeypatch.setattr(service_module, "WatchScheduler", Scheduler)
@@ -59,33 +70,30 @@ def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_pa
         return Engine()
 
     service = WatchService(engine_factory=engine_factory)
-    service._start_scheduler()
+    _await(service._start_scheduler())
 
     assert captured["config"]["extraction"]["content_requirement"] == "complete"
     assert service.config["extraction"]["content_requirement"] == "allow_partial"
 
 
-def test_watch_runtime_uses_neutral_cwd_and_restores_caller_cwd(tmp_path, monkeypatch):
+def test_watch_runtime_does_not_change_process_cwd(tmp_path, monkeypatch):
     caller = tmp_path / "caller"
-    neutral = tmp_path / "neutral"
     caller.mkdir()
-    neutral.mkdir()
     observed = {}
     monkeypatch.chdir(caller)
-    monkeypatch.setattr(watch_runtime, "runtime_working_directory", lambda: str(neutral))
 
     class FakeService:
         def __init__(self, **_kwargs):
             observed["constructed"] = __import__("os").getcwd()
 
-        def run(self, *, once=False):
+        async def run(self, *, once=False):
             observed["run"] = (__import__("os").getcwd(), once)
             return 7
 
     monkeypatch.setattr(watch_runtime, "WatchService", FakeService)
 
-    assert watch_runtime.run_watch_service(tray_enabled=False, once=True) == 7
-    assert observed == {"constructed": str(neutral), "run": (str(neutral), True)}
+    assert _await(watch_runtime.run_watch_service(tray_enabled=False, once=True)) == 7
+    assert observed == {"constructed": str(caller), "run": (str(caller), True)}
     assert __import__("os").getcwd() == str(caller)
 
 
@@ -104,7 +112,7 @@ def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):
     args = SimpleNamespace(once=False, no_tray=False)
     ctx = SimpleNamespace(t=lambda key, **_kwargs: key)
 
-    code, result = watch_command._handle_start(args, ctx)
+    code, result = _await(watch_command._handle_start(args, ctx))
 
     assert code == 0
     assert result.summary == {"elevated_relaunch": True}
@@ -138,7 +146,7 @@ def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
 
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
-    assert service.run(once=True) == 0
+    assert _await(service.run(once=True)) == 0
     assert not _watch_running({"watch": {"state_dir": str(state_dir)}})
     assert not (state_dir / "watch.lock").exists()
 
@@ -159,7 +167,7 @@ def test_watch_service_keeps_active_named_mutex(tmp_path, monkeypatch):
     assert first._acquire_lock()
     try:
         result = []
-        thread = threading.Thread(target=lambda: result.append(second.run(once=True)))
+        thread = threading.Thread(target=lambda: result.append(asyncio.run(second.run(once=True))))
         thread.start()
         thread.join(timeout=2.0)
 
@@ -191,7 +199,7 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
             pass
 
         def wait(self, timeout_seconds):
-            assert timeout_seconds is None
+            assert timeout_seconds == 0.25
             waiting.set()
             assert wake.wait(timeout=1.0)
             return CONTROL_STOP
@@ -205,13 +213,15 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
 
     monkeypatch.setattr(service, "_acquire_lock", lambda: True)
     monkeypatch.setattr(service, "_release_lock", lambda: None)
-    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", None))
-    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    async def no_scheduler():
+        service.scheduler = None
+    monkeypatch.setattr(service, "_start_scheduler", no_scheduler)
+    monkeypatch.setattr(service, "_stop_scheduler", no_scheduler)
     monkeypatch.setattr(service, "_start_tray", lambda: None)
     monkeypatch.setattr(service, "_stop_tray", lambda: None)
     service.control_events = BlockingControlEvents()
     results = []
-    thread = threading.Thread(target=lambda: results.append(service.run()))
+    thread = threading.Thread(target=lambda: results.append(asyncio.run(service.run())))
     thread.start()
     assert waiting.wait(timeout=1.0)
 
@@ -228,12 +238,13 @@ def test_watch_service_config_observer_targets_program_files(tmp_path, monkeypat
     captured = {}
 
     class FakeConfigObserver:
-        def __init__(self, directory, filenames, callback, *, debounce_seconds):
+        def __init__(self, directory, filenames, callback, *, debounce_seconds, loop):
             captured.update(
                 directory=directory,
                 filenames=set(filenames),
                 callback=callback,
                 debounce_seconds=debounce_seconds,
+                loop=loop,
             )
 
         def start(self):
@@ -250,6 +261,7 @@ def test_watch_service_config_observer_targets_program_files(tmp_path, monkeypat
         lambda: {"watch": {"state_dir": str(state_dir), "tray_enabled": False}},
     )
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    service._loop = _TEST_LOOP
     wakeups = []
     service.control_events.wake_reload = lambda: wakeups.append("reload")
 
@@ -281,9 +293,12 @@ def test_watch_service_invalid_config_reload_preserves_running_service(tmp_path,
     written = []
     service.log.write = lambda event, **payload: written.append((event, payload))
     monkeypatch.setattr(service_module, "load_config", lambda: (_ for _ in ()).throw(ValueError("invalid json")))
-    monkeypatch.setattr(service, "_start_scheduler", lambda: scheduler_restarts.append(True))
+    async def start_scheduler():
+        scheduler_restarts.append(True)
 
-    service._reload_config()
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    _await(service._reload_config())
 
     assert service.config is original_config
     assert service.service_config is original_service_config
@@ -316,12 +331,15 @@ def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, m
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     starts = []
     tray_events = []
-    monkeypatch.setattr(service, "_start_scheduler", lambda: starts.append((service.config["revision"], service.roots)))
+    async def start_scheduler():
+        starts.append((service.config["revision"], service.roots))
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
     monkeypatch.setattr(service, "_stop_tray", lambda: tray_events.append("stop"))
     monkeypatch.setattr(service, "_start_tray", lambda: tray_events.append("start"))
     roots_path.write_text(str(second_root), encoding="utf-8")
 
-    service._reload_config()
+    _await(service._reload_config())
 
     assert service.config["revision"] == 2
     assert service.roots == [str(second_root.resolve())]
@@ -346,14 +364,14 @@ def test_watch_service_apply_failure_rolls_back_previous_config(tmp_path, monkey
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     starts = []
 
-    def start_scheduler():
+    async def start_scheduler():
         starts.append(service.config["revision"])
         if service.config["revision"] == 2:
             raise RuntimeError("new runtime failed")
 
     monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
 
-    service._reload_config()
+    _await(service._reload_config())
 
     assert service.config["revision"] == 1
     assert starts == [2, 1]
@@ -464,16 +482,16 @@ def test_default_watch_state_uses_program_directory_and_output_stays_relative(tm
             captured["out_dir"] = kwargs["out_dir"]
             captured["state_path"] = kwargs["state_path"]
 
-        def start(self):
+        async def start(self):
             pass
 
-        def stop(self):
+        async def stop(self):
             pass
 
     monkeypatch.setattr(service_module, "WatchScheduler", FakeScheduler)
 
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
-    service._start_scheduler()
+    _await(service._start_scheduler())
 
     assert service.state_dir == str((program_dir / ".sunpack_watch").resolve())
     assert captured["out_dir"] == "."
@@ -560,10 +578,10 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
             captured["kwargs"] = kwargs
             self.recursive = original_scheduler(config, roots, **kwargs).recursive
 
-        def start(self):
+        async def start(self):
             captured["started"] = True
 
-        def stop(self):
+        async def stop(self):
             pass
 
     monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
@@ -582,7 +600,7 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
     )
 
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
-    service._start_scheduler()
+    _await(service._start_scheduler())
 
     assert captured["roots"] == [str(watch_root.resolve())]
     assert "recursive" not in captured["kwargs"]
@@ -611,7 +629,7 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
     waits = []
 
     class FakeScheduler:
-        def run_once(self):
+        async def run_once(self):
             scheduler_runs.append(len(scheduler_runs))
             return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=0, errors=[])
 
@@ -628,17 +646,20 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
 
     monkeypatch.setattr(service, "_acquire_lock", lambda: True)
     monkeypatch.setattr(service, "_release_lock", lambda: None)
-    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", FakeScheduler()))
-    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    async def start_scheduler():
+        service.scheduler = FakeScheduler()
+
+    async def stop_scheduler():
+        service.scheduler = None
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+    monkeypatch.setattr(service, "_stop_scheduler", stop_scheduler)
     monkeypatch.setattr(service, "_start_tray", lambda: None)
     monkeypatch.setattr(service, "_stop_tray", lambda: None)
     service.control_events = FakeControlEvents()
-    times = iter([0.0, 5.0])
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
-
-    assert service.run() == 0
+    assert _await(service.run()) == 0
     assert len(scheduler_runs) == 1
-    assert waits == [None, None]
+    assert waits and all(value == 0.25 for value in waits)
 
 
 def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, monkeypatch):
@@ -657,7 +678,7 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
         def __init__(self):
             self.delay = 120.0
 
-        def run_once(self):
+        async def run_once(self):
             scheduler_runs.append(len(scheduler_runs))
             if len(scheduler_runs) == 2:
                 self.delay = 5.0
@@ -684,17 +705,20 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
 
     monkeypatch.setattr(service, "_acquire_lock", lambda: True)
     monkeypatch.setattr(service, "_release_lock", lambda: None)
-    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", scheduler))
-    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    async def start_scheduler():
+        service.scheduler = scheduler
+
+    async def stop_scheduler():
+        service.scheduler = None
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+    monkeypatch.setattr(service, "_stop_scheduler", stop_scheduler)
     monkeypatch.setattr(service, "_start_tray", lambda: None)
     monkeypatch.setattr(service, "_stop_tray", lambda: None)
     service.control_events = FakeControlEvents()
-    times = iter([0.0, 0.0, 1.0])
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
-
-    assert service.run() == 0
+    assert _await(service.run()) == 0
     assert len(scheduler_runs) == 2
-    assert waits == [120.0, 5.0]
+    assert waits and all(value == 0.25 for value in waits)
 
 
 def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_path, monkeypatch):
@@ -713,7 +737,7 @@ def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_p
         def __init__(self):
             self.delay = 120.0
 
-        def run_once(self):
+        async def run_once(self):
             scheduler_runs.append(len(scheduler_runs))
             return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[])
 
@@ -741,15 +765,21 @@ def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_p
 
     monkeypatch.setattr(service, "_acquire_lock", lambda: True)
     monkeypatch.setattr(service, "_release_lock", lambda: None)
-    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", scheduler))
-    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    async def start_scheduler():
+        service.scheduler = scheduler
+
+    async def stop_scheduler():
+        service.scheduler = None
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+    monkeypatch.setattr(service, "_stop_scheduler", stop_scheduler)
     monkeypatch.setattr(service, "_start_tray", lambda: None)
     monkeypatch.setattr(service, "_stop_tray", lambda: None)
     service.control_events = FakeControlEvents()
 
-    assert service.run() == 0
+    assert _await(service.run()) == 0
     assert len(scheduler_runs) == 2
-    assert waits == [120.0, None]
+    assert waits and waits[0] == 0.25
 
 
 def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatch):
@@ -776,7 +806,7 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
                 SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[]),
             ])
 
-        def run_once(self):
+        async def run_once(self):
             return next(self.results)
 
         def next_delay_seconds(self):
@@ -791,23 +821,28 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
 
         def wait(self, timeout_seconds):
             self.count += 1
-            return CONTROL_STOP if self.count == 4 else None
+            if self.count <= 3:
+                return CONTROL_SCHEDULER_WAKEUP
+            return CONTROL_STOP
 
         def close(self):
             pass
 
     monkeypatch.setattr(service, "_acquire_lock", lambda: True)
     monkeypatch.setattr(service, "_release_lock", lambda: None)
-    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", FakeScheduler()))
-    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    async def start_scheduler():
+        service.scheduler = FakeScheduler()
+
+    async def stop_scheduler():
+        service.scheduler = None
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+    monkeypatch.setattr(service, "_stop_scheduler", stop_scheduler)
     monkeypatch.setattr(service, "_start_tray", lambda: None)
     monkeypatch.setattr(service, "_stop_tray", lambda: None)
     service.control_events = FakeControlEvents()
     service.log = FakeLog()
-    times = iter([0.0, 5.0, 10.0, 15.0])
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
-
-    assert service.run() == 0
+    assert _await(service.run()) == 0
 
     tick_payloads = [payload for event, payload in written if event == "scheduler_tick"]
     assert tick_payloads == [

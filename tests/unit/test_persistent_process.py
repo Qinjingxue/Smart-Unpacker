@@ -1,39 +1,53 @@
 import io
+import asyncio
 import os
 import socket
+import struct
 import threading
 
 from sunpack.cli import persistent_process
 
 
-def test_streaming_execute_restores_cwd_and_forwards_output(tmp_path):
-    original = os.getcwd()
-    server, client = socket.socketpair()
+class _AsyncWriter:
+    def __init__(self, reader=None, input_line: bytes = b""):
+        self.wire = bytearray()
+        self.reader = reader
+        self.input_line = input_line
 
-    def fake_main(argv):
-        print(f"cwd={os.getcwd()}")
-        print("warning", file=__import__("sys").stderr)
+    def write(self, data):
+        self.wire.extend(data)
+        if self.reader is not None and data[:1] == b"\x03":
+            self.reader.feed_data(struct.pack("!I", len(self.input_line)) + self.input_line)
+
+    async def drain(self):
+        pass
+
+
+def test_streaming_execute_uses_request_local_cwd_and_streams(tmp_path, monkeypatch):
+    from sunpack.cli import cli
+
+    async def fake_main(argv, **context):
         assert argv == ["config", "validate"]
+        assert context["cwd"] == str(tmp_path)
+        print(f"cwd={context['cwd']}", file=context["stdout"])
+        print("warning", file=context["stderr"])
         return 7
 
-    try:
-        exit_code = persistent_process._execute_streaming_request(
-            fake_main,
-            {"cwd": str(tmp_path), "argv": ["config", "validate"]},
-            server,
-        )
-        server.shutdown(socket.SHUT_WR)
-        wire = bytearray()
-        while chunk := client.recv(4096):
-            wire.extend(chunk)
-    finally:
-        server.close()
-        client.close()
+    monkeypatch.setattr(cli, "async_main", fake_main)
 
+    async def scenario():
+        writer = _AsyncWriter()
+        code = await persistent_process._execute_streaming_request_async(
+            {"cwd": str(tmp_path), "argv": ["config", "validate"]},
+            asyncio.StreamReader(),
+            writer,
+        )
+        return code, bytes(writer.wire)
+
+    exit_code, wire = asyncio.run(scenario())
     assert exit_code == 7
     assert f"cwd={tmp_path}".encode() in wire
-    assert b"warning" in wire and wire.endswith(b"\n")
-    assert os.getcwd() == original
+    assert b"warning" in wire
 
 
 def test_submit_request_strips_server_side_pause(tmp_path, monkeypatch):
@@ -54,7 +68,7 @@ def test_submit_request_strips_server_side_pause(tmp_path, monkeypatch):
     assert "--pause" not in captured["argv"]
     assert "--no-pause" in captured["argv"]
     assert captured["cwd"] == request_cwd
-    assert captured["client_cwd"] == str(tmp_path)
+    assert captured["client_cwd"] == request_cwd
     assert os.getcwd() == request_cwd
     assert persistent_process.sys.stdout.getvalue() == "done\n"
 
@@ -108,46 +122,36 @@ def test_streaming_request_forwards_output_before_final_result(monkeypatch):
 
 
 def test_connection_stream_preserves_client_tty_capability():
-    server, client = socket.socketpair()
-    try:
-        stream = persistent_process._ConnectionTextStream(server, 1, is_tty=True)
+    async def scenario():
+        queue = asyncio.Queue()
+        stream = persistent_process._AsyncConnectionTextStream(asyncio.get_running_loop(), queue, 1, is_tty=True)
         assert stream.isatty()
         assert stream.supports_terminal_updates
         assert stream.write("progress") == 8
-        import struct
-
-        kind, size = struct.unpack("!BI", persistent_process._recv_exact(client, 5))
+        await asyncio.sleep(0)
+        frame = await queue.get()
+        kind, size = struct.unpack("!BI", frame[:5])
         assert (kind, size) == (1, 8)
-        assert persistent_process._recv_exact(client, size) == b"progress"
-    finally:
-        server.close()
-        client.close()
+        assert frame[5:] == b"progress"
+    asyncio.run(scenario())
 
 
-def test_streaming_request_round_trips_interactive_input():
-    server, client = socket.socketpair()
-    result = {}
+def test_streaming_request_round_trips_interactive_input(monkeypatch):
+    from sunpack.cli import cli
 
-    def execute():
-        result["code"] = persistent_process._execute_streaming_request(
-            lambda _argv: 0 if input("password: ") == "secret" else 1,
-            {"argv": ["extract"], "stdin_tty": True},
-            server,
+    async def fake_main(_argv, **context):
+        return 0 if (await context["input_reader"]("password: ")).strip() == "secret" else 1
+
+    monkeypatch.setattr(cli, "async_main", fake_main)
+
+    async def scenario():
+        reader = asyncio.StreamReader()
+        writer = _AsyncWriter(reader, b"secret\n")
+        return await persistent_process._execute_streaming_request_async(
+            {"argv": ["extract"], "stdin_tty": True}, reader, writer
         )
-        import struct
 
-        server.sendall(struct.pack("!BIi", 0, 4, result["code"]))
-        server.close()
-
-    thread = threading.Thread(target=execute)
-    thread.start()
-    try:
-        response = persistent_process._recv_stream(client, io.StringIO("secret\n"))
-    finally:
-        client.close()
-        thread.join()
-
-    assert response["exit_code"] == 0
+    assert asyncio.run(scenario()) == 0
 
 
 def test_shutdown_does_not_start_a_missing_server(monkeypatch):
@@ -227,18 +231,14 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
             self.config = config
             events.append(("init", config["output"]["root"]))
 
-        def start(self):
+        async def __aenter__(self):
             events.append(("start",))
             return self
-
-        def reconfigure_request(self, config):
-            self.config = config
-            events.append(("reconfigure", config["output"]["root"]))
 
         def is_idle(self):
             return True
 
-        def close(self, *, graceful=True):
+        async def aclose(self, *, graceful=True):
             events.append(("close", graceful))
 
     monkeypatch.setattr(persistent_runtime, "PipelineEngine", FakeEngine)
@@ -254,15 +254,17 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
         "cli": {"quiet": False},
         "performance": {"persistent_server_idle_seconds": 9},
     }
-    try:
-        with persistent_runtime.pipeline_engine(first) as first_engine:
+    async def scenario():
+        await persistent_runtime.close_persistent_runtime()
+        persistent_runtime.enable_persistent_runtime()
+        async with persistent_runtime.pipeline_engine(first) as first_engine:
             pass
-        with persistent_runtime.pipeline_engine(second) as second_engine:
+        async with persistent_runtime.pipeline_engine(second) as second_engine:
             pass
         assert first_engine is second_engine
         assert events[:2] == [("init", "one"), ("start",)]
-        assert ("reconfigure", "two") in events
         assert persistent_runtime.persistent_runtime_is_idle()
         assert persistent_runtime.persistent_server_idle_seconds() == 9
-    finally:
-        persistent_runtime.close_persistent_runtime()
+        await persistent_runtime.close_persistent_runtime()
+
+    asyncio.run(scenario())

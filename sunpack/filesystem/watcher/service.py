@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import asyncio
 import hashlib
 import os
+import threading
 import time
 from copy import deepcopy
 from contextlib import contextmanager, suppress
@@ -214,13 +216,18 @@ class WatchService:
         self._stop_requested = False
         self._lock_handle = None
         self._last_idle_tick_signature = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._control_queue: asyncio.Queue[str | None] | None = None
+        self._control_bridge_stop = threading.Event()
+        self._control_bridge_thread: threading.Thread | None = None
         self.log = WatchLogStore(os.path.join(self.state_dir, "events.jsonl"))
 
     @property
     def roots(self) -> list[str]:
         return existing_roots(list(self.service_config.get("roots") or []))
 
-    def run(self, *, once: bool = False) -> int:
+    async def run(self, *, once: bool = False) -> int:
+        self._loop = asyncio.get_running_loop()
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
         if not self._acquire_lock():
             self.log.write("service_lock_busy", lock_name=self.lock_name)
@@ -228,18 +235,23 @@ class WatchService:
         self.log.write("service_started", state_dir=self.state_dir, roots=self.roots, once=once)
         try:
             self.control_events.start()
-            self._start_scheduler()
+            self._start_control_bridge()
+            await self._start_scheduler()
             self._start_tray()
             if once:
                 if self.scheduler is None:
                     return 0
-                self.scheduler.run_once()
+                await self.scheduler.run_once()
                 return 0
             self._start_config_observer()
             next_scheduler_run: float | None = 0.0
             active_scheduler = None
             while not self._stop_requested:
-                now = time.monotonic()
+                # Use the event-loop clock for scheduling.  Keeping this clock
+                # separate from the legacy control-bridge module clock is
+                # important for async callers (and makes injected control
+                # event timing unable to perturb asyncio's own timers).
+                now = self._loop.time()
                 if self.scheduler is not None:
                     if self.scheduler is not active_scheduler:
                         active_scheduler = self.scheduler
@@ -247,7 +259,7 @@ class WatchService:
                         self._last_idle_tick_signature = None
                     if next_scheduler_run is not None and now >= next_scheduler_run:
                         try:
-                            result = self.scheduler.run_once()
+                            result = await self.scheduler.run_once()
                             if self._should_log_scheduler_tick(result):
                                 self.log.write(
                                     "scheduler_tick",
@@ -264,13 +276,17 @@ class WatchService:
                     sleep_seconds = None if next_scheduler_run is None else max(0.0, next_scheduler_run - now)
                 else:
                     sleep_seconds = None
-                control_event = self.control_events.wait(sleep_seconds)
+                timeout = 0.25 if sleep_seconds is None else max(0.0, sleep_seconds)
+                try:
+                    control_event = await asyncio.wait_for(self._control_queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    control_event = None
                 if control_event == CONTROL_SCHEDULER_WAKEUP and self.scheduler is not None:
                     # A pipeline completion wakes the service so run_once() can
                     # harvest the finished request.  Recomputing the delay here
                     # can return None while that request is still registered as
                     # inflight, leaving the completed request unharvested.
-                    next_scheduler_run = time.monotonic()
+                    next_scheduler_run = self._loop.time()
                 else:
                     self._handle_control_event(control_event)
             return 0
@@ -280,23 +296,54 @@ class WatchService:
         finally:
             self._stop_config_observer()
             self._stop_tray()
-            self._stop_scheduler()
+            await self._stop_scheduler()
+            self._stop_control_bridge()
             self.control_events.close()
             self._release_lock()
             self.log.write("service_stopped", state_dir=self.state_dir)
 
+    def _start_control_bridge(self) -> None:
+        if self._loop is None:
+            raise RuntimeError("watch control bridge requires an event loop")
+        self._control_queue = asyncio.Queue()
+        self._control_bridge_stop.clear()
+
+        def bridge() -> None:
+            while not self._control_bridge_stop.is_set():
+                event = self.control_events.wait(0.25)
+                if event is not None and self._loop is not None and self._control_queue is not None:
+                    self._loop.call_soon_threadsafe(self._control_queue.put_nowait, event)
+
+        self._control_bridge_thread = threading.Thread(
+            target=bridge,
+            name="sunpack-watch-control-bridge",
+            daemon=True,
+        )
+        self._control_bridge_thread.start()
+
+    def _stop_control_bridge(self) -> None:
+        self._control_bridge_stop.set()
+        thread = self._control_bridge_thread
+        self._control_bridge_thread = None
+        if thread is not None:
+            thread.join(timeout=1.0)
+
     def request_stop(self) -> None:
-        self._stop_requested = True
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(setattr, self, "_stop_requested", True)
+        else:
+            self._stop_requested = True
         try:
             self.control_events.wake_stop()
         except Exception as exc:
             self.log.write("service_stop_wakeup_error", error=str(exc), error_type=type(exc).__name__)
 
     def request_reload(self) -> None:
-        self._reload_config()
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config()))
 
-    def _start_scheduler(self) -> None:
-        self._stop_scheduler()
+    async def _start_scheduler(self) -> None:
+        await self._stop_scheduler()
         roots = self.roots
         if not roots:
             self.log.write("scheduler_not_started", reason="no_existing_roots", configured_roots=list(self.service_config.get("roots") or []))
@@ -312,7 +359,7 @@ class WatchService:
         pipeline_engine = self.engine_factory(run_config)
         scheduler = None
         try:
-            pipeline_engine.start()
+            await pipeline_engine.__aenter__()
             scheduler = WatchScheduler(
                 run_config,
                 roots,
@@ -330,24 +377,28 @@ class WatchService:
                 group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
                 wake_callback=self._wake_scheduler,
             )
-            scheduler.start()
+            await scheduler.start()
         except Exception:
             if scheduler is not None:
-                with suppress(Exception):
-                    scheduler.stop()
-            with suppress(Exception):
-                pipeline_engine.close(graceful=True)
+                try:
+                    await scheduler.stop()
+                except Exception:
+                    pass
+            try:
+                await pipeline_engine.aclose(graceful=True)
+            except Exception:
+                pass
             raise
         self.pipeline_engine = pipeline_engine
         self.scheduler = scheduler
         self.log.write("scheduler_attached", roots=roots, out_dir=out_dir, state_path=state_path)
 
-    def _stop_scheduler(self) -> None:
+    async def _stop_scheduler(self) -> None:
         if self.scheduler is not None:
-            self.scheduler.stop()
+            await self.scheduler.stop()
         self.scheduler = None
         if self.pipeline_engine is not None:
-            self.pipeline_engine.close(graceful=True)
+            await self.pipeline_engine.aclose(graceful=True)
         self.pipeline_engine = None
         self._last_idle_tick_signature = None
 
@@ -414,6 +465,7 @@ class WatchService:
             filenames,
             self._wake_config_reload,
             debounce_seconds=CONFIG_RELOAD_DEBOUNCE_SECONDS,
+            loop=self._loop or asyncio.get_running_loop(),
         )
         observer.start()
         self.config_observer = observer
@@ -438,7 +490,7 @@ class WatchService:
         except Exception as exc:
             self.log.write("config_reload_wakeup_error", error=str(exc), error_type=type(exc).__name__)
 
-    def _reload_config(self) -> None:
+    async def _reload_config(self) -> None:
         previous = (self.config, self.service_config, self.state_dir, self.log)
         try:
             new_config = load_config()
@@ -454,13 +506,13 @@ class WatchService:
         self.state_dir = new_state_dir
         self.log = WatchLogStore(os.path.join(new_state_dir, "events.jsonl"))
         try:
-            self._start_scheduler()
+            await self._start_scheduler()
         except Exception as exc:
             failed_log = self.log
             self.config, self.service_config, self.state_dir, self.log = previous
             failed_log.write("config_reload_failed", error=str(exc), error_type=type(exc).__name__, phase="apply")
             try:
-                self._start_scheduler()
+                await self._start_scheduler()
             except Exception as rollback_exc:
                 self.log.write(
                     "config_reload_rollback_failed",

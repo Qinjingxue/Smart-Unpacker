@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import json
 import os
 import threading
 import time
 import zipfile
-from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +103,12 @@ def test_unavailable_journal_keeps_same_stat_usn_change_conservative():
     assert scheduler_module._candidate_content_changed(previous, current)
 
 
+_TEST_LOOP = asyncio.new_event_loop()
+
+def _await(awaitable):
+    return _TEST_LOOP.run_until_complete(awaitable)
+
+
 class FakeObserver:
     started_count = 0
     stopped_count = 0
@@ -156,7 +163,7 @@ class WatchEvents:
 
     def run_after(self, seconds: float, *, processed: int):
         self.clock.advance(seconds)
-        result = self.watcher.run_once()
+        result = _await(self.watcher.run_once())
         assert result.processed == processed
         return result
 
@@ -197,19 +204,10 @@ def _write_zip(path: Path):
 class _DeferredHandle:
     def __init__(self, path: str):
         self.path = path
-        self.future = Future()
+        self.future = _TEST_LOOP.create_future()
 
     def done(self):
         return self.future.done()
-
-    def result(self, timeout=None):
-        return self.future.result(timeout=timeout)
-
-    def add_done_callback(self, callback):
-        self.future.add_done_callback(lambda _future: callback(self))
-
-    def finalize(self, output_path_map=None):
-        return self.result()
 
     def complete_no_tasks(self):
         summary = SimpleNamespace(
@@ -232,6 +230,7 @@ class _DeferredHandle:
 class _DeferredPipelineEngine:
     def __init__(self):
         self.handles = []
+        self.work_broker = FakePipelineEngine(lambda _config: None).work_broker
 
     def update_password_sources(self, *, user_passwords, builtin_passwords):
         return None
@@ -240,10 +239,10 @@ class _DeferredPipelineEngine:
     def recent_passwords(self):
         return []
 
-    def submit(self, targets, *, direct=False, defer_postprocess=False):
+    async def run(self, targets, *, direct=False, output_committer=None):
         handle = _DeferredHandle(targets[0].path)
         self.handles.append(handle)
-        return handle
+        return await handle.future
 
 
 def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path, monkeypatch):
@@ -264,34 +263,33 @@ def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path
 
     watcher.enqueue(str(archives[0]))
     watcher.enqueue(str(archives[1]))
-    submitted = watcher.run_once()
+    submitted = _await(watcher.run_once())
 
     assert submitted.processed == 0
     assert len(engine.handles) == 2
 
     engine.handles[1].complete_no_tasks()
-    harvested = watcher.run_once()
+    harvested = _await(watcher.run_once())
     assert harvested.processed == 1
     assert engine.handles[0].done() is False
 
     watcher.enqueue(str(archives[2]))
-    still_scheduling = watcher.run_once()
+    still_scheduling = _await(watcher.run_once())
     assert still_scheduling.processed == 0
     assert len(engine.handles) == 3
 
     engine.handles[0].complete_no_tasks()
     engine.handles[2].complete_no_tasks()
-    final = watcher.run_once()
+    final = _await(watcher.run_once())
     assert final.processed == 2
 
 
-def test_watch_completion_pool_does_not_let_slow_finalize_block_other_harvests(tmp_path, monkeypatch):
+def test_watch_candidate_coroutines_are_harvested_without_completion_pool(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     first = tmp_path / "first.zip"
     second = tmp_path / "second.zip"
     _write_zip(first)
     _write_zip(second)
-    release_first = threading.Event()
 
     class Runner:
         recent_passwords = []
@@ -309,10 +307,6 @@ def test_watch_completion_pool_does_not_let_slow_finalize_block_other_harvests(t
             self.context.flatten_candidates = {str(output)}
             return _watch_summary(self.path, OutcomeKind.COMPLETE_SUCCESS, {"decision_hint": "accept"})
 
-        def apply_deferred_postprocess(self, _output_path_map):
-            if Path(self.path).name == "first.zip":
-                assert release_first.wait(timeout=5)
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -325,12 +319,10 @@ def test_watch_completion_pool_does_not_let_slow_finalize_block_other_harvests(t
     watcher.enqueue(str(first))
     watcher.enqueue(str(second))
 
-    harvested = watcher.run_once()
-    assert harvested.succeeded == 1
-    release_first.set()
+    harvested = _await(watcher.run_once())
     deadline = time.monotonic() + 5
     while harvested.succeeded < 2 and time.monotonic() < deadline:
-        next_result = watcher.run_once()
+        next_result = _await(watcher.run_once())
         harvested.succeeded += next_result.succeeded
         time.sleep(0.01)
     assert harvested.succeeded == 2
@@ -347,11 +339,10 @@ def _watch_summary(path: str, kind: OutcomeKind, verification: dict):
     )
 
 
-def test_successful_watch_task_uses_pipeline_finalize_after_promotion(tmp_path, monkeypatch):
+def test_successful_watch_task_commits_postprocess_after_promotion(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    finalize_order = []
 
     class SuccessRunner:
         recent_passwords = []
@@ -365,10 +356,6 @@ def test_successful_watch_task_uses_pipeline_finalize_after_promotion(tmp_path, 
             (self.output_dir / "payload.bin").write_bytes(b"payload")
             return _watch_summary(paths[0], OutcomeKind.COMPLETE_SUCCESS, {"decision_hint": "accept"})
 
-        def apply_deferred_postprocess(self, output_path_map):
-            finalize_order.append("finalize")
-            assert all(Path(target).exists() for target in output_path_map.values())
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -379,17 +366,16 @@ def test_successful_watch_task_uses_pipeline_finalize_after_promotion(tmp_path, 
         pipeline_engine=FakePipelineEngine(SuccessRunner),
     )
     watcher.enqueue(str(archive))
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.succeeded == 1
-    assert finalize_order == ["finalize"]
+    assert list((tmp_path / "out").rglob("payload.bin"))
 
 
-def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
+def test_failed_watch_task_does_not_commit_probe_output(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    finalize_calls = []
 
     class FailureRunner:
         recent_passwords = []
@@ -412,9 +398,6 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
                 ],
             )
 
-        def apply_deferred_postprocess(self, output_path_map):
-            finalize_calls.append(dict(output_path_map))
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -425,10 +408,9 @@ def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
         pipeline_engine=FakePipelineEngine(FailureRunner),
     )
     watcher.enqueue(str(archive))
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.failed == 1
-    assert finalize_calls == []
     probe_root = tmp_path / ".sunpack_watch_probes"
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
@@ -439,7 +421,6 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
     calls = []
-    postprocess_maps = []
     outcomes = [OutcomeKind.PARTIAL_SUCCESS, OutcomeKind.COMPLETE_SUCCESS]
 
     class SequenceRunner:
@@ -462,10 +443,6 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
                 verification = {"decision_hint": "accept"}
             return _watch_summary(paths[0], kind, verification)
 
-        def apply_deferred_postprocess(self, output_path_map):
-            assert all(Path(target).exists() for target in output_path_map.values())
-            postprocess_maps.append(dict(output_path_map))
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -476,19 +453,18 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
         pipeline_engine=FakePipelineEngine(SequenceRunner),
     )
     watcher.enqueue(str(archive))
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
     probe_root = tmp_path / ".sunpack_watch_probes"
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
     with archive.open("ab") as stream:
         stream.write(b"changed")
     watcher.enqueue(str(archive), event_type="modified")
-    final = watcher.run_once()
+    final = _await(watcher.run_once())
 
     assert final.succeeded == 1
     assert (tmp_path / "out" / "sample" / "payload.bin").is_file()
-    assert len(postprocess_maps) == 1
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
 
@@ -497,7 +473,6 @@ def test_partial_result_is_rejected_and_probe_output_is_discarded(tmp_path, monk
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    postprocess_maps = []
 
     class PartialRunner:
         recent_passwords = []
@@ -516,9 +491,6 @@ def test_partial_result_is_rejected_and_probe_output_is_discarded(tmp_path, monk
                 {"decision_hint": "accept_partial", "archive_coverage": {"complete_files": 1}},
             )
 
-        def apply_deferred_postprocess(self, output_path_map):
-            postprocess_maps.append(dict(output_path_map))
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -530,18 +502,17 @@ def test_partial_result_is_rejected_and_probe_output_is_discarded(tmp_path, monk
     )
     watcher.enqueue(str(archive))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 1
     assert result.succeeded == 0
     assert result.failed == 1
     assert result.errors == ["watch extraction rejected partial content"]
     assert not (tmp_path / "out" / "sample" / "recovered.bin").exists()
-    assert not postprocess_maps
     probe_root = tmp_path / ".sunpack_watch_probes"
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
 
 
 def test_probe_promotion_keeps_nested_outputs_inside_outer_directory(tmp_path):
@@ -560,11 +531,11 @@ def test_probe_promotion_keeps_nested_outputs_inside_outer_directory(tmp_path):
     inner.mkdir(parents=True)
     (inner / "payload.bin").write_bytes(b"payload")
 
-    promoted, path_map = watcher._promote_probe_outputs(
+    promoted, path_map = _await(watcher._promote_probe_outputs(
         [str(outer), str(inner)],
         [str(watch_root / "outer")],
         str(workspace),
-    )
+    ))
 
     assert promoted == [str(watch_root / "outer")]
     assert path_map[str(inner)] == str(watch_root / "outer" / "inner")
@@ -599,13 +570,15 @@ def test_probe_promotion_retries_winerror_5_until_success(tmp_path, monkeypatch)
         real_replace(current, target)
 
     monkeypatch.setattr(scheduler_module.os, "replace", intermittently_denied)
-    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+    async def record_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", record_sleep)
 
-    promoted, _ = watcher._promote_probe_outputs(
+    promoted, _ = _await(watcher._promote_probe_outputs(
         [str(source)],
         [str(watch_root / "sample")],
         str(workspace),
-    )
+    ))
 
     assert promoted == [str(watch_root / "sample")]
     assert len(replace_attempts) == 3
@@ -630,14 +603,16 @@ def test_probe_promotion_does_not_retry_other_errors(tmp_path, monkeypatch):
     error = PermissionError("sharing violation")
     error.winerror = 32
     monkeypatch.setattr(scheduler_module.os, "replace", lambda *_args: (_ for _ in ()).throw(error))
-    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+    async def record_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", record_sleep)
 
     try:
-        watcher._promote_probe_outputs(
+        _await(watcher._promote_probe_outputs(
             [str(source)],
             [str(watch_root / "sample")],
             str(workspace),
-        )
+        ))
     except PermissionError as exc:
         assert exc is error
     else:
@@ -669,14 +644,16 @@ def test_probe_promotion_stops_after_100_winerror_5_retries(tmp_path, monkeypatc
         raise error
 
     monkeypatch.setattr(scheduler_module.os, "replace", always_denied)
-    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+    async def record_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", record_sleep)
 
     try:
-        watcher._promote_probe_outputs(
+        _await(watcher._promote_probe_outputs(
             [str(source)],
             [str(watch_root / "sample")],
             str(workspace),
-        )
+        ))
     except PermissionError as exc:
         assert exc.winerror == 5
     else:
@@ -718,10 +695,10 @@ def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, mon
     )
     watcher.enqueue(str(archive))
 
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
     assert watcher.pending_count == 1
     assert len(watcher.state.pending_snapshots()) == 1
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
     assert attempts == 2
 
 
@@ -745,13 +722,13 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
         initial_scan=True,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     assert watcher.pending_count == 1
     assert FakeObserver.started_count == 1
     assert (watch_root / ".sunpack-passwords.txt").read_text(encoding="utf-8") == ""
 
-    watcher.stop()
+    _await(watcher.stop())
     assert FakeObserver.stopped_count == 1
 
 
@@ -769,7 +746,7 @@ def test_watch_scheduler_observes_builtin_password_file_directory(tmp_path, monk
         initial_scan=False,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     scheduled = {(Path(path), recursive) for _handler, path, recursive in watcher._observer.scheduled}
     assert (watch_root.resolve(), True) in scheduled
@@ -791,7 +768,7 @@ def test_watch_scheduler_preserves_existing_directory_password_file(tmp_path, mo
         initial_scan=True,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     assert password_file.read_text(encoding="utf-8") == "existing-secret\n"
     assert watcher.pending_count == 0
@@ -811,11 +788,11 @@ def test_watch_scheduler_start_cleans_probe_contents_but_keeps_probe_root(tmp_pa
         initial_scan=False,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
-    watcher.stop()
+    _await(watcher.stop())
 
 
 def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_path, monkeypatch):
@@ -837,7 +814,7 @@ def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_pa
         initial_scan=True,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), False)
     pending_names = {Path(path).name for path in watcher._pending}
@@ -862,7 +839,7 @@ def test_watch_scheduler_uses_directory_scan_mode_for_recursive_watch(tmp_path, 
         initial_scan=True,
     )
 
-    watcher.start()
+    _await(watcher.start())
 
     assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), True)
     pending_names = {Path(path).name for path in watcher._pending}
@@ -890,7 +867,7 @@ def test_watch_scheduler_uses_stop_timeout_without_suffix_prefilter(tmp_path, mo
         observer_stop_timeout_seconds=1.25,
     )
 
-    watcher.start()
+    _await(watcher.start())
     watcher.enqueue(str(watch_root / "sample.rar"))
     watcher.enqueue(str(watch_root / "sample.zip"))
 
@@ -898,7 +875,7 @@ def test_watch_scheduler_uses_stop_timeout_without_suffix_prefilter(tmp_path, mo
     assert any(path.endswith("sample.rar") for path in pending_paths)
     assert any(path.endswith("sample.zip") for path in pending_paths)
 
-    watcher.stop()
+    _await(watcher.stop())
     assert FakeObserver.join_timeouts == [1.25]
 
 
@@ -1012,8 +989,8 @@ def test_watch_scheduler_reuses_filter_result_for_unchanged_pending_candidate(tm
 
     watcher.enqueue(str(archive))
     watcher.enqueue(str(archive), event_type="modified")
-    watcher.run_once()
-    watcher.run_once()
+    _await(watcher.run_once())
+    _await(watcher.run_once())
 
     assert len(filter_calls) == 1
     assert watcher.pending_count == 1
@@ -1047,7 +1024,7 @@ def test_event_burst_with_unchanged_usn_does_not_restart_quiet_window(tmp_path, 
 
     assert watcher.pending_count == 1
     assert watcher._active_states[str(archive)].generation == 1
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
 
 
 def test_candidate_deadline_changes_wake_watch_service(tmp_path, monkeypatch):
@@ -1114,7 +1091,7 @@ def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path,
         }
     })
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 0
     assert watcher.pending_count == 0
@@ -1150,7 +1127,7 @@ def test_watch_scheduler_processes_quiet_candidate_with_watch_root_common_root(t
     )
     watcher.enqueue(str(archive_path))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 1
     assert result.succeeded == 1
@@ -1188,7 +1165,7 @@ def test_watch_scheduler_sends_quiet_nonstandard_extension_to_main_pipeline(tmp_
     )
     watcher.enqueue(str(target))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 1
     assert result.succeeded == 1
@@ -1224,9 +1201,9 @@ def test_watch_scheduler_moved_file_uses_common_quiet_window(tmp_path, monkeypat
     watcher.enqueue(str(archive_path), event_type="moved", src_path=str(tmp_path / "sample.zip"))
 
     now[0] = 2000000009.9
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
     now[0] = 2000000010.1
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
 
 
 def test_watch_scheduler_timestamp_restore_does_not_reset_content_quiet_window(tmp_path, monkeypatch):
@@ -1270,9 +1247,9 @@ def test_watch_scheduler_timestamp_restore_does_not_reset_content_quiet_window(t
     watcher.enqueue(str(archive_path), event_type="modified")
 
     now[0] = 2000001010.1
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
     now[0] = 2000001010.3
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
 
 
 def test_watch_scheduler_growth_resets_the_common_quiet_window(tmp_path, monkeypatch):
@@ -1311,9 +1288,9 @@ def test_watch_scheduler_growth_resets_the_common_quiet_window(tmp_path, monkeyp
     watcher.enqueue(str(archive_path), event_type="modified")
 
     now[0] = 2000002002.0
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
     now[0] = 2000002010.3
-    assert watcher.run_once().processed == 1
+    assert _await(watcher.run_once()).processed == 1
 
 
 def test_watch_scheduler_does_not_log_duplicate_pending_candidate(tmp_path, monkeypatch):
@@ -1366,9 +1343,9 @@ def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_
     )
     watcher.enqueue(str(target))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
     watcher.enqueue(str(target))
-    unchanged = watcher.run_once()
+    unchanged = _await(watcher.run_once())
 
     assert result.processed == 1
     assert result.succeeded == 0
@@ -1431,7 +1408,7 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     )
     watcher.enqueue(str(archive_path))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 1
     assert result.succeeded == 1
@@ -1475,16 +1452,16 @@ def test_watch_scheduler_does_not_reprocess_unchanged_input_when_output_is_delet
     )
 
     watcher.enqueue(str(archive_path))
-    assert watcher.run_once().succeeded == 1
+    assert _await(watcher.run_once()).succeeded == 1
     assert len(runs) == 1
 
     watcher.enqueue(str(archive_path))
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
 
     output_dir.rmdir()
     watcher.enqueue(str(archive_path))
 
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
     assert len(runs) == 1
 
 
@@ -1520,7 +1497,7 @@ def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_ba
     )
     handler = scheduler_module._WatchEventHandler(watcher)
     watcher.enqueue(str(archive_path))
-    assert watcher.run_once().succeeded == 1
+    assert _await(watcher.run_once()).succeeded == 1
 
     archive_path.replace(outside_path)
     handler.on_moved(SimpleNamespace(src_path=str(archive_path), dest_path=str(outside_path), is_directory=False))
@@ -1528,7 +1505,7 @@ def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_ba
     handler.on_moved(SimpleNamespace(src_path=str(outside_path), dest_path=str(archive_path), is_directory=False))
 
     assert watcher.pending_count == 1
-    assert watcher.run_once().succeeded == 1
+    assert _await(watcher.run_once()).succeeded == 1
     assert len(runs) == 2
 
 
@@ -1556,12 +1533,12 @@ def test_watch_scheduler_processes_same_path_again_after_input_changes(tmp_path,
         pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
-    assert watcher.run_once().succeeded == 1
+    assert _await(watcher.run_once()).succeeded == 1
 
     archive_path.write_bytes(archive_path.read_bytes() + b"changed")
     watcher.enqueue(str(archive_path), event_type="modified")
 
-    assert watcher.run_once().succeeded == 1
+    assert _await(watcher.run_once()).succeeded == 1
     assert len(runs) == 2
 
 
@@ -1601,12 +1578,12 @@ def test_watch_scheduler_recovers_persisted_pending_input_after_restart(tmp_path
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
-    restarted.start()
+    _await(restarted.start())
 
-    assert restarted.run_once().succeeded == 1
+    assert _await(restarted.run_once()).succeeded == 1
     assert len(runs) == 1
     assert not restarted.state.pending_snapshots()
-    restarted.stop()
+    _await(restarted.stop())
 
 
 def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path, monkeypatch):
@@ -1640,7 +1617,7 @@ def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path,
     )
     watcher.enqueue(str(archive_path))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.succeeded == 1
     assert Path(captured["output"]["root"]).is_relative_to(second_root)
@@ -1678,7 +1655,7 @@ def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_ext
     )
     watcher.enqueue(str(archive_path))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.processed == 1
     assert watcher.pending_count == 0
@@ -1724,12 +1701,12 @@ def test_watch_scheduler_initial_scan_skips_known_outputs_when_output_root_match
         quiet_seconds=0,
         initial_scan=True,
     )
-    watcher.start()
+    _await(watcher.start())
 
     ready_names = {Path(candidate.path).name for candidate in watcher._pop_ready(float("inf"))}
     assert ready_names == {"fresh.zip"}
 
-    watcher.stop()
+    _await(watcher.stop())
 
 
 def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkeypatch):
@@ -1762,9 +1739,9 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
     )
     watcher.enqueue(str(archive_path))
 
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
     watcher.enqueue(str(archive_path))
-    unchanged = watcher.run_once()
+    unchanged = _await(watcher.run_once())
 
     assert result.failed == 1
     assert unchanged.processed == 0
@@ -1807,9 +1784,9 @@ def test_watch_scheduler_does_not_retry_password_inconclusive_after_password_sou
         pipeline_engine=FakePipelineEngine(InconclusiveRunner),
     )
     watcher.enqueue(str(archive_path))
-    first = watcher.run_once()
+    first = _await(watcher.run_once())
     watcher.notify_password_source_changed("test")
-    second = watcher.run_once()
+    second = _await(watcher.run_once())
 
     assert first.failed == 1
     assert second.processed == 0
@@ -1855,11 +1832,11 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
         pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
     )
     watcher.enqueue(str(archive_path))
-    first = watcher.run_once()
+    first = _await(watcher.run_once())
     watcher.enqueue(str(archive_path))
 
     watcher.notify_password_source_changed("test")
-    second = watcher.run_once()
+    second = _await(watcher.run_once())
 
     assert first.failed == 1
     assert second.succeeded == 1
@@ -1954,11 +1931,11 @@ def test_password_retry_bypasses_learned_quiet_for_unchanged_failed_archive(tmp_
     )
     watcher.enqueue(str(archive_path))
     watcher._active_states[str(archive_path)].last_event_at = 0.0
-    assert watcher.run_once().failed == 1
+    assert _await(watcher.run_once()).failed == 1
     watcher._quiet_trackers[str(archive_path)].quiet_seconds = 30.0
 
     watcher.notify_password_source_changed("test")
-    retried = watcher.run_once()
+    retried = _await(watcher.run_once())
 
     assert retried.succeeded == 1
     assert attempts["count"] == 2
@@ -1996,12 +1973,12 @@ def test_password_retry_preserves_quiet_when_failed_archive_changed(tmp_path, mo
     )
     watcher.enqueue(str(archive_path))
     watcher._active_states[str(archive_path)].last_event_at = 0.0
-    assert watcher.run_once().failed == 1
+    assert _await(watcher.run_once()).failed == 1
     watcher._quiet_trackers[str(archive_path)].quiet_seconds = 30.0
     archive_path.write_bytes(b"PK\x03\x04changed-payload")
 
     watcher.notify_password_source_changed("test")
-    retried = watcher.run_once()
+    retried = _await(watcher.run_once())
 
     assert retried.processed == 0
     assert watcher.pending_count == 1
@@ -2050,14 +2027,14 @@ def test_password_retry_debounce_uses_monotonic_clock_when_wall_clock_moves_back
     )
 
     watcher.enqueue(str(archive_path))
-    first = watcher.run_once()
+    first = _await(watcher.run_once())
     watcher.notify_password_source_changed("test")
 
     wall_clock.value = 10.0
     monotonic_clock["value"] = 104.9
-    before_debounce = watcher.run_once()
+    before_debounce = _await(watcher.run_once())
     monotonic_clock["value"] = 105.0
-    after_debounce = watcher.run_once()
+    after_debounce = _await(watcher.run_once())
 
     assert first.failed == 1
     assert before_debounce.processed == 0
@@ -2095,7 +2072,7 @@ def test_watch_scheduler_defaults_to_user_and_builtin_password_sources(tmp_path,
     )
 
     watcher.enqueue(str(archive_path))
-    watcher.run_once()
+    _await(watcher.run_once())
 
     assert captured[0]["user_passwords"] == ["user-secret"]
     assert captured[0]["builtin_passwords"] == ["builtin-secret"]
@@ -2142,12 +2119,12 @@ def test_watch_scheduler_clipboard_persistence_refreshes_candidates_and_retries(
         pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     watcher.enqueue(str(archive_path))
-    first = watcher.run_once()
+    first = _await(watcher.run_once())
 
     watcher._clipboard_monitor._handle_clipboard_update()
     generation = watcher.state.password_generation
     scheduler_module._WatchEventHandler(watcher)._handle_path(str(builtin_path), event_type="modified")
-    second = watcher.run_once()
+    second = _await(watcher.run_once())
 
     assert first.failed == 1
     assert second.succeeded == 1
@@ -2197,10 +2174,10 @@ def test_watch_scheduler_retries_on_builtin_password_file_watchdog_event(tmp_pat
         pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     watcher.enqueue(str(archive_path))
-    watcher.run_once()
+    _await(watcher.run_once())
 
     builtin_passwords.append("new-secret")
-    assert watcher.run_once().processed == 0
+    assert _await(watcher.run_once()).processed == 0
     handler = scheduler_module._WatchEventHandler(watcher)
     handler.on_moved(
         SimpleNamespace(
@@ -2209,7 +2186,7 @@ def test_watch_scheduler_retries_on_builtin_password_file_watchdog_event(tmp_pat
             is_directory=False,
         )
     )
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.succeeded == 1
     assert attempts == [["wrong"], ["wrong", "new-secret"]]
@@ -2251,7 +2228,7 @@ def test_watch_scheduler_retries_persisted_password_failure_when_config_password
         pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     first_watcher.enqueue(str(archive_path))
-    first_watcher.run_once()
+    _await(first_watcher.run_once())
 
     second_watcher = WatchScheduler(
         {"user_passwords": ["new-secret"], "watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
@@ -2262,7 +2239,7 @@ def test_watch_scheduler_retries_persisted_password_failure_when_config_password
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
-    result = second_watcher.run_once()
+    result = _await(second_watcher.run_once())
 
     assert result.succeeded == 1
     assert attempts == [["wrong"], ["new-secret"]]
@@ -2309,10 +2286,10 @@ def test_watch_scheduler_promotes_recent_success_password_and_retries_other_fail
         pipeline_engine=FakePipelineEngine(LearningRunner),
     )
     watcher.enqueue(str(failed_archive))
-    watcher.run_once()
+    _await(watcher.run_once())
     watcher.enqueue(str(teacher_archive))
-    learned = watcher.run_once()
-    retried = watcher.run_once()
+    learned = _await(watcher.run_once())
+    retried = _await(watcher.run_once())
 
     assert learned.succeeded == 1
     assert retried.succeeded == 1
@@ -2363,11 +2340,11 @@ def test_watch_scheduler_password_table_event_retries_password_failure(tmp_path,
         pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
     )
     watcher.enqueue(str(archive_path))
-    watcher.run_once()
+    _await(watcher.run_once())
 
     handler = scheduler_module._WatchEventHandler(watcher)
     handler._handle_path(str(password_table))
-    result = watcher.run_once()
+    result = _await(watcher.run_once())
 
     assert result.succeeded == 1
     assert attempts["count"] == 2
@@ -2403,7 +2380,7 @@ def test_watch_scheduler_writes_jsonl_log_for_failures(tmp_path, monkeypatch):
         pipeline_engine=FakePipelineEngine(FailingRunner),
     )
     watcher.enqueue(str(archive_path))
-    watcher.run_once()
+    _await(watcher.run_once())
 
     log_path = tmp_path / ".sunpack_watch" / "events.jsonl"
     text = log_path.read_text(encoding="utf-8")
@@ -2634,10 +2611,10 @@ def test_modified_event_retries_same_metadata_identity(tmp_path, monkeypatch):
     )
     events = WatchEvents(watcher, WatchClock(0.0))
     events.emit(archive_path, event_type="modified")
-    WatchState.assert_processed(events.watcher.run_once(), 1)
+    WatchState.assert_processed(_await(events.watcher.run_once()), 1)
 
     archive_path.write_bytes(b"B" * (256 * 1024))
     os.utime(archive_path, (original_mtime, original_mtime))
     events.emit(archive_path, event_type="modified")
-    WatchState.assert_processed(events.watcher.run_once(), 1)
+    WatchState.assert_processed(_await(events.watcher.run_once()), 1)
     assert len(attempts) == 2

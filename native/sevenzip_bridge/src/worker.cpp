@@ -1910,7 +1910,13 @@ int run_message(
 }
 
 int main() {
-    NativeJobExecutor executor(configured_native_worker_count());
+    const std::size_t worker_count = configured_native_worker_count();
+    const auto runtime_config = configured_native_runtime_config(worker_count);
+    NativeJobExecutor executor(worker_count);
+    print_json_line(
+        "{\"type\":\"worker_ready\",\"profile\":\"" + json_escape(native_worker_profile()) +
+        "\",\"thread_capacity\":" + std::to_string(worker_count) +
+        ",\"initial_active_limit\":" + std::to_string(runtime_config.initial_active_jobs) + "}");
     std::vector<std::future<int>> pending;
     std::string line;
     while (std::getline(std::cin, line)) {

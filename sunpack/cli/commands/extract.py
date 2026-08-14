@@ -13,9 +13,9 @@ from sunpack.cli.cli_runtime import (
     apply_runtime_config_overrides,
     build_password_summary,
     collect_clipboard_passwords,
-    collect_cli_passwords,
+    collect_cli_passwords_async,
     password_summary_item,
-    prompt_for_passwords,
+    prompt_for_passwords_async,
     resolve_common_root,
     resolve_target_paths,
     result_for_missing,
@@ -45,17 +45,18 @@ def register(subparsers, ctx):
     parser.add_argument("paths", nargs="+", help=ctx.t("cli.extract.paths"))
 
 
-def handle(args, ctx):
+async def handle(args, ctx):
     reporter = ctx.reporter
-    target_paths, missing_paths = resolve_target_paths(args.paths)
+    target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
 
     config = load_config()
     config_overrides = apply_runtime_config_overrides(config, args)
     try:
-        passwords = collect_cli_passwords(
+        passwords = await collect_cli_passwords_async(
             args,
+            ctx,
             prompt_text=ctx.t("cli.password_prompt"),
             input_prompt=ctx.t("cli.password_input_prompt"),
         )
@@ -93,21 +94,25 @@ def handle(args, ctx):
         if deep_detect
         else pipeline_engine(run_config)
     )
-    with engine_context as engine:
+    async with engine_context as engine:
         while True:
             password_summary = build_password_summary(
                 passwords,
                 use_builtin_passwords=not args.no_builtin_passwords,
                 clipboard_passwords=clipboard_passwords,
             )
-            engine.update_password_sources(
-                user_passwords=dedupe_passwords(password_summary.user_passwords + password_summary.clipboard_passwords),
-                builtin_passwords=password_summary.builtin_passwords,
+            run_config["user_passwords"] = dedupe_passwords(
+                password_summary.user_passwords + password_summary.clipboard_passwords
             )
-            summary = engine.submit(
+            run_config["builtin_passwords"] = list(password_summary.builtin_passwords)
+            response = await engine.run(
                 target_paths,
                 direct=bool(getattr(args, "direct_file", False)),
-            ).result().summary
+                request_config=run_config,
+                stdout=ctx.stderr if args.json else ctx.stdout,
+                stderr=ctx.stderr,
+            )
+            summary = response.summary
             failed_tasks = list(summary.failed_tasks)
             failures = list(summary.failures)
             processed_keys = list(summary.processed_keys)
@@ -123,10 +128,11 @@ def handle(args, ctx):
             _emit_verbose_recovery_details(reporter, summary, ctx)
             if not _should_retry_password_failure(args, failures):
                 break
-            if not _confirm_password_retry(ctx):
+            if not await _confirm_password_retry(ctx):
                 break
             try:
-                new_passwords = prompt_for_passwords(
+                new_passwords = await prompt_for_passwords_async(
+                    ctx,
                     prompt_text=ctx.t("cli.password_prompt"),
                     input_prompt=ctx.t("cli.password_input_prompt"),
                 )
@@ -290,17 +296,17 @@ def _should_retry_password_failure(args, failures: list[FailureInfo]) -> bool:
     )
 
 
-def _confirm_password_retry(ctx) -> bool:
+async def _confirm_password_retry(ctx) -> bool:
     while True:
         try:
-            answer = input(ctx.t("cli.password_retry_prompt")).strip().lower()
+            answer = (await ctx.readline(ctx.t("cli.password_retry_prompt"))).strip().lower()
         except EOFError:
             return False
         if answer in {"y", "yes"}:
             return True
         if answer in {"n", "no", ""}:
             return False
-        print(ctx.t("cli.answer_yes_no"), flush=True)
+        print(ctx.t("cli.answer_yes_no"), file=ctx.stdout, flush=True)
 
 
 _dedupe = dedupe_values
