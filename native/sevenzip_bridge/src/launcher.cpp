@@ -61,6 +61,161 @@ std::wstring wide_utf8(const std::string& value) {
     return result;
 }
 
+bool file_exists(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::string read_text_file(const std::wstring& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return buffer.str();
+}
+
+// Minimal JSON string helpers, mirroring the same helpers in worker.cpp.
+std::size_t skip_ws(const std::string& json, std::size_t pos) {
+    while (pos < json.size() && static_cast<unsigned char>(json[pos]) <= 0x20) {
+        ++pos;
+    }
+    return pos;
+}
+
+std::string parse_json_string_at(const std::string& json, std::size_t quote_pos, std::size_t* out_next = nullptr) {
+    std::string out;
+    if (quote_pos >= json.size() || json[quote_pos] != '"') {
+        return out;
+    }
+    for (std::size_t i = quote_pos + 1; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (ch == '"') {
+            if (out_next) {
+                *out_next = i + 1;
+            }
+            return out;
+        }
+        if (ch == '\\' && i + 1 < json.size()) {
+            const char escaped = json[++i];
+            switch (escaped) {
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            default: out.push_back(escaped); break;
+            }
+            continue;
+        }
+        out.push_back(ch);
+    }
+    return out;
+}
+
+// Reads the string value of field_key inside the object_key object. This avoids
+// matching an unrelated "language" field elsewhere in the config document.
+std::string json_string_field_in_object(const std::string& json, const std::string& object_key,
+                                        const std::string& field_key) {
+    const std::string object_needle = "\"" + object_key + "\"";
+    const std::size_t object_pos = json.find(object_needle);
+    if (object_pos == std::string::npos) return {};
+    const std::size_t object_colon = json.find(':', object_pos + object_needle.size());
+    if (object_colon == std::string::npos) return {};
+    const std::size_t open_brace = skip_ws(json, object_colon + 1);
+    if (open_brace >= json.size() || json[open_brace] != '{') return {};
+
+    const std::string field_needle = "\"" + field_key + "\"";
+    std::size_t depth = 1;
+    std::size_t index = open_brace + 1;
+    while (index < json.size() && depth != 0) {
+        const char ch = json[index];
+        if (depth != 0 && json.compare(index, field_needle.size(), field_needle) == 0) {
+            std::size_t before = index;
+            while (before > 0 && (json[before - 1] == ' ' || json[before - 1] == '\t' ||
+                                  json[before - 1] == '\r' || json[before - 1] == '\n')) {
+                --before;
+            }
+            const bool is_key = before > 0 && (json[before - 1] == '{' || json[before - 1] == ',');
+            if (is_key) {
+                const std::size_t colon = json.find(':', index + field_needle.size());
+                if (colon != std::string::npos) {
+                    const std::size_t quote = skip_ws(json, colon + 1);
+                    return parse_json_string_at(json, quote);
+                }
+            }
+        }
+        if (ch == '"') {
+            std::size_t next = 0;
+            parse_json_string_at(json, index, &next);
+            if (next == 0) return {};
+            index = next;
+            continue;
+        }
+        if (ch == '{') {
+            ++depth;
+        } else if (ch == '}') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++index;
+    }
+    return {};
+}
+
+std::string config_language(const std::wstring& path) {
+    return json_string_field_in_object(read_text_file(path), "cli", "language");
+}
+
+std::wstring join_config_path(const std::wstring& directory, const wchar_t* filename) {
+    if (directory.empty()) return filename;
+    return directory + L"\\" + filename;
+}
+
+std::wstring first_existing_config(const std::vector<std::wstring>& roots, const wchar_t* filename) {
+    for (const auto& root : roots) {
+        const std::wstring path = join_config_path(root, filename);
+        if (file_exists(path)) return path;
+    }
+    return {};
+}
+
+// Mirrors sunpack.i18n.context.normalize_language: only "zh" selects Chinese.
+std::string normalize_language(const std::string& raw) {
+    const std::size_t begin = raw.find_first_not_of(" \t\r\n");
+    const std::size_t end = raw.find_last_not_of(" \t\r\n");
+    std::string value = begin == std::string::npos ? std::string() : raw.substr(begin, end - begin + 1);
+    for (char& ch : value) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + ('a' - 'A'));
+    }
+    return value == "zh" ? "zh" : "en";
+}
+
+// Resolves cli.language the same way sunpack.config.cli_settings does:
+// sunpack_config.json wins over sunpack_advanced_config.json; config files are
+// searched next to the launcher, in the invocation directory, then in the
+// invocation directory's sunpack-2 sibling. Missing or unreadable config falls
+// back to English, matching the Python default.
+std::string cli_language_from_config(const std::wstring& launcher_dir, const std::wstring& invocation_cwd) {
+    std::vector<std::wstring> roots;
+    for (const std::wstring& root : {launcher_dir, invocation_cwd, join_config_path(invocation_cwd, L"sunpack-2")}) {
+        if (root.empty()) continue;
+        bool duplicate = false;
+        for (const auto& existing : roots) {
+            if (existing == root) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) roots.push_back(root);
+    }
+    const std::wstring simple_path = first_existing_config(roots, L"sunpack_config.json");
+    const std::wstring advanced_path = first_existing_config(roots, L"sunpack_advanced_config.json");
+    std::string language;
+    if (!simple_path.empty()) language = config_language(simple_path);
+    if (language.empty() && !advanced_path.empty()) language = config_language(advanced_path);
+    return normalize_language(language);
+}
+
 std::wstring state_path() {
     const std::wstring directory = executable_directory();
     const std::string encoded = utf8(directory);
@@ -283,6 +438,17 @@ void write_stream(DWORD handle_id, const std::string& text) {
     }
 }
 
+// Localized strings printed directly by this launcher. Keep in sync with the
+// sunpack/i18n/catalog.py keys cli.press_enter and cli.persistent_start_timeout.
+constexpr wchar_t kPressEnterEn[] = L"Press Enter to continue...";
+constexpr wchar_t kPressEnterZh[] = L"按回车键继续...";
+constexpr wchar_t kPersistentTimeoutEn[] = L"SunPack persistent process did not start in time.";
+constexpr wchar_t kPersistentTimeoutZh[] = L"SunPack 持久进程未能及时启动。";
+
+std::string localized(const std::string& language, const wchar_t* english, const wchar_t* chinese) {
+    return utf8(language == "zh" ? chinese : english);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -328,9 +494,15 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (!ok && shutdown) code = 0;
-    if (!ok && !shutdown) write_stream(STD_ERROR_HANDLE, "SunPack persistent process did not start in time.\n");
+    std::string language;
+    if (pause || (!ok && !shutdown)) {
+        language = cli_language_from_config(launcher_cwd, invocation_cwd);
+    }
+    if (!ok && !shutdown) {
+        write_stream(STD_ERROR_HANDLE, localized(language, kPersistentTimeoutEn, kPersistentTimeoutZh) + "\n");
+    }
     if (pause && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR) {
-        write_stream(STD_OUTPUT_HANDLE, "Press Enter to continue...");
+        write_stream(STD_OUTPUT_HANDLE, localized(language, kPressEnterEn, kPressEnterZh));
         wchar_t buffer[2]{};
         DWORD read = 0;
         ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), buffer, 1, &read, nullptr);

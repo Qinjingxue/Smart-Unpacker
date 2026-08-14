@@ -17,6 +17,7 @@ SHUTDOWN_ARG = "--persistent-shutdown"
 _REQUEST_MAGIC = b"SPK1"
 _STREAM_MAGIC = b"SPS1"
 _MAX_FIELD_BYTES = 16 * 1024 * 1024
+_TERMINAL_COLUMNS_ARG = "--_sunpack-terminal-columns="
 
 
 def handle_early_argv(argv: list[str]) -> int | None:
@@ -59,11 +60,13 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
         request_argv = [item for item in request_argv if item != "--pause"]
         if "--no-pause" not in request_argv:
             request_argv.append("--no-pause")
+    supports_terminal_updates = _client_supports_terminal_updates(sys.stdout)
     payload = {
         "argv": request_argv,
         "cwd": request_cwd,
         "shutdown": bool(shutdown),
-        "stdout_tty": bool(sys.stdout is not None and sys.stdout.isatty()),
+        "stdout_tty": supports_terminal_updates,
+        "stdout_columns": _client_terminal_columns(sys.stdout) if supports_terminal_updates else 0,
         "stdin_tty": bool(sys.stdin is not None and sys.stdin.isatty()),
     }
     response = _send_or_start(payload)
@@ -79,6 +82,25 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
         except (EOFError, KeyboardInterrupt):
             pass
     return int(response.get("exit_code", 1))
+
+
+def _client_supports_terminal_updates(stream) -> bool:
+    if stream is None:
+        return False
+    # This runs in the foreground client, where the real console handle lives.
+    # The persistent server has no console of its own and therefore cannot
+    # validate or enable Windows virtual-terminal processing on our behalf.
+    from sunpack.coordinator.reporting import _terminal_supports_updates
+
+    return _terminal_supports_updates(stream)
+
+
+def _client_terminal_columns(stream) -> int:
+    try:
+        columns = int(os.get_terminal_size(stream.fileno()).columns)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 80
+    return max(20, min(1000, columns))
 
 
 def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
@@ -123,7 +145,14 @@ def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         cwd = str(payload.get("cwd") or "").encode("utf-8", "surrogatepass")
-        argv = [str(item).encode("utf-8", "surrogatepass") for item in payload.get("argv") or []]
+        argv_values = [str(item) for item in payload.get("argv") or []]
+        try:
+            stdout_columns = int(payload.get("stdout_columns") or 0)
+        except (TypeError, ValueError):
+            stdout_columns = 0
+        if stdout_columns > 0:
+            argv_values.append(f"{_TERMINAL_COLUMNS_ARG}{max(20, min(1000, stdout_columns))}")
+        argv = [item.encode("utf-8", "surrogatepass") for item in argv_values]
         flags = ((1 if payload.get("shutdown") else 0)
                  | (2 if payload.get("stdout_tty") else 0)
                  | (4 if payload.get("stdin_tty") else 0))
@@ -319,12 +348,21 @@ class _AsyncConnectionTextStream:
     encoding = "utf-8"
     errors = "replace"
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, kind: int, *, is_tty: bool = False):
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+        kind: int,
+        *,
+        is_tty: bool = False,
+        terminal_columns: int | None = None,
+    ):
         self.loop = loop
         self.queue = queue
         self.kind = kind
         self._is_tty = is_tty
         self.supports_terminal_updates = is_tty
+        self.terminal_columns = terminal_columns
 
     def write(self, text: str) -> int:
         value = str(text)
@@ -378,11 +416,28 @@ async def _execute_streaming_request_async(
             raise ValueError("persistent input frame is too large")
         return (await reader.readexactly(size)).decode("utf-8", "replace")
 
-    stdout = _AsyncConnectionTextStream(loop, output_queue, 1, is_tty=bool(payload.get("stdout_tty")))
+    argv = []
+    terminal_columns = None
+    for item in payload.get("argv") or []:
+        value = str(item)
+        if value.startswith(_TERMINAL_COLUMNS_ARG):
+            try:
+                terminal_columns = max(20, min(1000, int(value[len(_TERMINAL_COLUMNS_ARG):])))
+            except ValueError:
+                terminal_columns = None
+            continue
+        argv.append(value)
+
+    stdout = _AsyncConnectionTextStream(
+        loop,
+        output_queue,
+        1,
+        is_tty=bool(payload.get("stdout_tty")),
+        terminal_columns=terminal_columns,
+    )
     stderr = _AsyncConnectionTextStream(loop, output_queue, 2, is_tty=False)
     pump = asyncio.create_task(pump_output(), name="persistent-output-pump")
     try:
-        argv = [str(item) for item in payload.get("argv") or []]
         return int(
             await async_main(
                 argv,

@@ -346,6 +346,7 @@ class RunReporter:
             "complete": "\033[32m",
         }
         label = f"{label:^8}"
+        plain_label = label
         if self._use_color:
             label = f"{colors.get(state, '')}{label}\033[0m"
         prefix = self._tree_prefix(depth)
@@ -357,8 +358,12 @@ class RunReporter:
             detail = f"：{detail}"
         else:
             detail = ""
-        fixed_width = len(prefix) + 8 + len(bar) + 12
-        available = max(12, shutil.get_terminal_size(fallback=(120, 30)).columns - fixed_width)
+        fixed = f"{prefix}[{plain_label}] [{bar}] {percent:3d}%  "
+        fixed_width = _display_width(fixed)
+        terminal_columns = getattr(self.stdout, "terminal_columns", None)
+        if not isinstance(terminal_columns, int) or terminal_columns <= 0:
+            terminal_columns = shutil.get_terminal_size(fallback=(120, 30)).columns
+        available = max(1, terminal_columns - fixed_width)
         suffix = _truncate_display(f"{_task_name(task)}{relation}{detail}", available)
         return f"{prefix}[{label}] [{bar}] {percent:3d}%  {suffix}"
 
@@ -427,21 +432,26 @@ def _terminal_supports_updates(stream: Any) -> bool:
 
 
 def _truncate_display(text: str, max_width: int) -> str:
-    if max_width <= 1:
-        return "…"[:max_width]
+    ellipsis = "…"
+    ellipsis_width = _display_width(ellipsis)
+    if max_width < ellipsis_width:
+        return ""
     width = 0
     chars = []
     for char in text:
         char_width = 2 if ord(char) > 0xFF else 1
         if width + char_width > max_width:
-            if chars:
-                while chars and width + 1 > max_width:
-                    removed = chars.pop()
-                    width -= 2 if ord(removed) > 0xFF else 1
-            return "".join(chars) + "…"
+            while chars and width + ellipsis_width > max_width:
+                removed = chars.pop()
+                width -= 2 if ord(removed) > 0xFF else 1
+            return "".join(chars) + ellipsis
         chars.append(char)
         width += char_width
     return text
+
+
+def _display_width(text: str) -> int:
+    return sum(2 if ord(char) > 0xFF else 1 for char in text)
 
 
 def _percent(value) -> str:

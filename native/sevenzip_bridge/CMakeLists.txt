@@ -111,6 +111,10 @@ if(WIN32)
     add_executable(sunpack_launcher src/launcher.cpp)
     apply_release_optimizations(sunpack_launcher)
     target_compile_definitions(sunpack_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    if(MSVC)
+        # launcher.cpp contains UTF-8 string literals (localized messages).
+        target_compile_options(sunpack_launcher PRIVATE /utf-8)
+    endif()
     target_link_libraries(sunpack_launcher PRIVATE Ws2_32 Shell32)
 endif()
 

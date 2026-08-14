@@ -35,28 +35,30 @@ class ArchiveCleanup:
             for path in parts:
                 self.cleanup_archive_file(path)
 
-    def cleanup_archive_file(self, path: str, reason: str = "[CLEAN]"):
+    def cleanup_archive_file(self, path: str, reason: str | None = None):
         archive_path = os.path.normpath(path)
         if not os.path.exists(archive_path):
             self._print(self.i18n.t("cleanup.file_missing", path=archive_path))
             return
 
         filename = os.path.basename(archive_path)
+        display_reason = reason if reason is not None else self.i18n.t("cleanup.label")
         if self.mode == "keep":
-            self._print(self.i18n.t("cleanup.keep_file", reason=reason, filename=filename))
+            self._print(self.i18n.t("cleanup.keep_file", reason=display_reason, filename=filename))
             return
 
         if self.mode == "delete":
-            self._delete_archive_files([archive_path], reason=reason)
+            self._delete_archive_files([archive_path], reason=display_reason)
             return
 
-        self._print(self.i18n.t("cleanup.recycle", reason=reason, filename=filename))
+        self._print(self.i18n.t("cleanup.recycle", reason=display_reason, filename=filename))
         try:
             send2trash(archive_path)
         except Exception as exc:
             self._print(self.i18n.t("cleanup.recycle_failed", filename=filename, error=exc))
 
-    def _delete_archive_files(self, paths: list[str], reason: str = "[CLEAN]"):
+    def _delete_archive_files(self, paths: list[str], reason: str | None = None):
+        display_reason = reason if reason is not None else self.i18n.t("cleanup.label")
         existing = []
         for path in paths:
             archive_path = os.path.normpath(path)
@@ -64,7 +66,7 @@ class ArchiveCleanup:
             if not os.path.exists(archive_path):
                 self._print(self.i18n.t("cleanup.file_missing", path=archive_path))
                 continue
-            self._print(self.i18n.t("cleanup.delete", reason=reason, filename=filename))
+            self._print(self.i18n.t("cleanup.delete", reason=display_reason, filename=filename))
             existing.append(archive_path)
         for item in _native_delete_files_batch(existing):
             if str(item.get("status") or "") != "error":

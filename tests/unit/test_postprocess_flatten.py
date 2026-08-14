@@ -38,3 +38,25 @@ def test_postprocess_flatten_output_uses_chinese_language(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "正在压平单子目录" in output
     assert "Flattening single-branch directories" not in output
+
+
+def test_postprocess_uses_config_language_and_prints_flatten_once(tmp_path, monkeypatch, capsys):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    calls = []
+    monkeypatch.setattr(
+        flatten_module,
+        "_native_flatten_single_branch_directories",
+        lambda base: calls.append(base) or {"moved": 0, "removed_dirs": 0, "errors": []},
+    )
+
+    PostProcessActions(normalize_config({"cli": {"language": "zh"}, "verification": {}})).apply(
+        cleanup_archives=False,
+        flatten_outputs=True,
+        flatten_targets=[str(first), str(first), str(second)],
+    )
+
+    output = capsys.readouterr().out
+    assert output.count("[清理] 正在压平单子目录...") == 1
+    assert "[CLEAN]" not in output
+    assert calls == [str(first), str(second)]

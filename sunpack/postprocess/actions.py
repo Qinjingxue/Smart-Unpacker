@@ -9,16 +9,25 @@ from sunpack.i18n import I18nContext
 
 
 class PostProcessActions:
-    def __init__(self, config: Dict[str, Any], context: RunContext | None = None, language: str = "en", *, stdout=None):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        context: RunContext | None = None,
+        language: str | None = None,
+        *,
+        stdout=None,
+    ):
         self.config = config
         self.context = context
-        self.i18n = I18nContext(language)
+        cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
+        self.i18n = I18nContext(language if language is not None else cli_config.get("language"))
+        self.language = self.i18n.language
         self.cleanup_mode = config.get("post_extract", {}).get("archive_cleanup_mode", "recycle")
         if self.cleanup_mode not in {"keep", "recycle", "delete"}:
             raise ValueError("archive_cleanup_mode must be normalized before PostProcessActions starts")
         self.stdout = stdout if stdout is not None else sys.stdout
-        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=language, stdout=self.stdout)
-        self.flattener = DirectoryFlattener(language=language, stdout=self.stdout)
+        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=self.language, stdout=self.stdout)
+        self.flattener = DirectoryFlattener(language=self.language, stdout=self.stdout)
 
     def apply(
         self,
@@ -33,10 +42,10 @@ class PostProcessActions:
         if flatten_outputs is None:
             flatten_outputs = self.config.get("post_extract", {}).get("flatten_single_directory", True)
         if flatten_outputs:
-            for target in self._consume_flatten_targets(flatten_targets):
-                self.flattener.flatten_dirs(target)
+            for index, target in enumerate(self._consume_flatten_targets(flatten_targets)):
+                self.flattener.flatten_dirs(target, announce=index == 0)
 
-    def cleanup_archive_file(self, path: str, reason: str = "[CLEAN]"):
+    def cleanup_archive_file(self, path: str, reason: str | None = None):
         self.cleanup.cleanup_archive_file(path, reason)
 
     def t(self, key: str, **params) -> str:
@@ -53,9 +62,15 @@ class PostProcessActions:
 
     def _consume_flatten_targets(self, flatten_targets: Iterable[str] | None) -> list[str]:
         if flatten_targets is not None:
-            return sorted(flatten_targets, key=lambda item: item.count(os.sep))
-        if self.context is None:
+            targets = flatten_targets
+        elif self.context is None:
             return []
-        targets = sorted(self.context.flatten_candidates, key=lambda item: item.count(os.sep))
-        self.context.flatten_candidates.clear()
-        return targets
+        else:
+            targets = list(self.context.flatten_candidates)
+            self.context.flatten_candidates.clear()
+
+        unique: dict[str, str] = {}
+        for target in targets:
+            value = str(target)
+            unique.setdefault(os.path.normcase(os.path.abspath(value)), value)
+        return sorted(unique.values(), key=lambda item: item.count(os.sep))

@@ -63,14 +63,33 @@ def test_submit_request_strips_server_side_pause(tmp_path, monkeypatch):
     monkeypatch.setattr(persistent_process, "runtime_working_directory", lambda: str(tmp_path))
     monkeypatch.setattr(persistent_process.sys, "stdout", io.StringIO())
     monkeypatch.setattr(persistent_process.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(persistent_process, "_client_supports_terminal_updates", lambda _stream: True)
+    monkeypatch.setattr(persistent_process, "_client_terminal_columns", lambda _stream: 93)
 
     assert persistent_process.submit_request(["extract", "sample.zip", "--pause"]) == 0
     assert "--pause" not in captured["argv"]
     assert "--no-pause" in captured["argv"]
     assert captured["cwd"] == request_cwd
     assert captured["client_cwd"] == request_cwd
+    assert captured["stdout_tty"] is True
+    assert captured["stdout_columns"] == 93
     assert os.getcwd() == request_cwd
     assert persistent_process.sys.stdout.getvalue() == "done\n"
+
+
+def test_submit_request_does_not_claim_unverified_terminal_updates(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_send(payload):
+        captured.update(payload)
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(persistent_process, "_send_or_start", fake_send)
+    monkeypatch.setattr(persistent_process, "_client_supports_terminal_updates", lambda _stream: False)
+    monkeypatch.setattr(persistent_process.sys.stdin, "isatty", lambda: False)
+
+    assert persistent_process.submit_request(["extract", str(tmp_path / "sample.zip")]) == 0
+    assert captured["stdout_tty"] is False
 
 
 def test_extract_is_submitted_to_persistent_server_by_default(monkeypatch):
@@ -124,9 +143,12 @@ def test_streaming_request_forwards_output_before_final_result(monkeypatch):
 def test_connection_stream_preserves_client_tty_capability():
     async def scenario():
         queue = asyncio.Queue()
-        stream = persistent_process._AsyncConnectionTextStream(asyncio.get_running_loop(), queue, 1, is_tty=True)
+        stream = persistent_process._AsyncConnectionTextStream(
+            asyncio.get_running_loop(), queue, 1, is_tty=True, terminal_columns=93
+        )
         assert stream.isatty()
         assert stream.supports_terminal_updates
+        assert stream.terminal_columns == 93
         assert stream.write("progress") == 8
         await asyncio.sleep(0)
         frame = await queue.get()
@@ -134,6 +156,29 @@ def test_connection_stream_preserves_client_tty_capability():
         assert (kind, size) == (1, 8)
         assert frame[5:] == b"progress"
     asyncio.run(scenario())
+
+
+def test_streaming_request_strips_terminal_columns_metadata(monkeypatch):
+    from sunpack.cli import cli
+
+    async def fake_main(argv, **context):
+        assert argv == ["extract", "sample.zip"]
+        assert context["stdout"].terminal_columns == 79
+        return 0
+
+    monkeypatch.setattr(cli, "async_main", fake_main)
+
+    async def scenario():
+        return await persistent_process._execute_streaming_request_async(
+            {
+                "argv": ["extract", "sample.zip", "--_sunpack-terminal-columns=79"],
+                "stdout_tty": True,
+            },
+            asyncio.StreamReader(),
+            _AsyncWriter(),
+        )
+
+    assert asyncio.run(scenario()) == 0
 
 
 def test_streaming_request_round_trips_interactive_input(monkeypatch):

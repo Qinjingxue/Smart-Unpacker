@@ -7,8 +7,9 @@ class DirectoryFlattener:
         self.i18n = I18nContext(language)
         self.stdout = stdout if stdout is not None else sys.stdout
 
-    def flatten_dirs(self, base: str):
-        print(self.i18n.t("cleanup.flatten"), file=self.stdout, flush=True)
+    def flatten_dirs(self, base: str, *, announce: bool = True):
+        if announce:
+            print(self.i18n.t("cleanup.flatten"), file=self.stdout, flush=True)
         result = _native_flatten_single_branch_directories(str(base))
         if isinstance(result, dict):
             for error in result.get("errors") or []:

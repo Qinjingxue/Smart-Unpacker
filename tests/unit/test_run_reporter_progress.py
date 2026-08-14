@@ -1,4 +1,5 @@
 import io
+import re
 from types import SimpleNamespace
 
 import sunpack.coordinator.reporting as reporting
@@ -103,6 +104,7 @@ def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsy
 
 def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, monkeypatch):
     stream = io.StringIO()
+    stream.terminal_columns = 72
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: True)
     monkeypatch.setattr(reporting.sys, "stdout", stream)
@@ -122,6 +124,25 @@ def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, 
     assert "正在修复" in output
     assert "\033[32m" in output and "完成" in output
     assert "\033[1A" in output
+    row = reporter._format_task_row(reporter._task_rows[id(task)])
+    plain_row = re.sub(r"\033\[[0-9;]*m", "", row)
+    assert reporting._display_width(plain_row) <= stream.terminal_columns
+
+
+def test_interactive_row_accounts_for_wide_status_and_archive_characters(tmp_path, monkeypatch):
+    stream = io.StringIO()
+    stream.terminal_columns = 80
+    monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: True)
+    reporter = RunReporter("zh", stdout=stream)
+    task = _task(tmp_path / ("很长的嵌套压缩包名称" * 8 + ".zip"))
+
+    reporter.begin_round(2, [task])
+    reporter.task_progress(task, {"completed_bytes": 50, "total_bytes": 100})
+
+    row = reporter._format_task_row(reporter._task_rows[id(task)])
+    plain_row = re.sub(r"\033\[[0-9;]*m", "", row)
+    assert reporting._display_width(plain_row) <= stream.terminal_columns
+    assert plain_row.endswith("…")
 
 
 def test_forwarded_terminal_capability_does_not_require_server_console():
