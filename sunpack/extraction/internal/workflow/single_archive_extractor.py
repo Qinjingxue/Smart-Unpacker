@@ -65,6 +65,110 @@ class SingleArchiveExtractor:
         phase_timer: Callable[..., Any] | None = None,
         phase_prefix: str = "extract",
     ) -> ExtractionResult:
+        state = self._extract_state_machine(
+            task,
+            out_dir,
+            split_info=split_info,
+            runtime_scheduler=runtime_scheduler,
+            allow_embedded_segments=allow_embedded_segments,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
+        )
+        try:
+            request = next(state)
+        except StopIteration as completed:
+            return completed.value
+        while True:
+            result = self.sevenzip_runner.run_extract(**request)
+            try:
+                request = state.send(result)
+            except StopIteration as completed:
+                return completed.value
+
+    def extract_async(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        split_info: Optional[SplitArchiveInfo] = None,
+        runtime_scheduler: Any = None,
+        *,
+        allow_embedded_segments: bool = True,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "extract",
+        on_complete: Callable[[ExtractionResult], None],
+    ) -> None:
+        """Run the Python attempt state machine around native callbacks.
+
+        Only the preparation, verification and retry continuations run on a
+        Python callback executor.  The extraction attempt itself is submitted
+        directly to the native persistent worker.
+        """
+        state = self._extract_state_machine(
+            task,
+            out_dir,
+            split_info=split_info,
+            runtime_scheduler=runtime_scheduler,
+            allow_embedded_segments=allow_embedded_segments,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
+        )
+
+        def finish(result: ExtractionResult) -> None:
+            try:
+                on_complete(result)
+            except Exception:
+                pass
+
+        def advance(sent: object = None, *, first: bool = False) -> None:
+            try:
+                request = next(state) if first else state.send(sent)
+            except StopIteration as completed:
+                finish(completed.value)
+                return
+            except Exception as exc:
+                finish(self._failed(
+                    task.main_path,
+                    out_dir,
+                    list(task.all_parts or []),
+                    str(exc),
+                    diagnostics={
+                        "failure_stage": "python_continuation",
+                        "failure_kind": "exception",
+                        "message": str(exc),
+                    },
+                ))
+                return
+            try:
+                future = self.sevenzip_runner.submit_extract(**request)
+            except Exception as exc:
+                self.sevenzip_runner.submit_continuation(
+                    advance,
+                    self.sevenzip_runner.failed_process_for_exception(exc, request),
+                )
+                return
+
+            def native_done(done) -> None:
+                try:
+                    native_result = done.result()
+                except Exception as exc:
+                    native_result = self.sevenzip_runner.failed_process_for_exception(exc, request)
+                self.sevenzip_runner.submit_continuation(advance, native_result)
+
+            future.add_done_callback(native_done)
+
+        self.sevenzip_runner.submit_continuation(advance, first=True)
+
+    def _extract_state_machine(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        split_info: Optional[SplitArchiveInfo] = None,
+        runtime_scheduler: Any = None,
+        *,
+        allow_embedded_segments: bool = True,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "extract",
+    ):
         if allow_embedded_segments:
             with _phase(phase_timer, f"{phase_prefix}_read_extractable_segments"):
                 segments = [
@@ -73,7 +177,7 @@ class SingleArchiveExtractor:
                     if isinstance(item, dict) and isinstance(item.get("archive_input"), dict)
                 ]
             if segments:
-                return self._extract_embedded_segments(
+                return (yield from self._extract_embedded_segments_state_machine(
                     task,
                     out_dir,
                     segments,
@@ -81,7 +185,7 @@ class SingleArchiveExtractor:
                     runtime_scheduler=runtime_scheduler,
                     phase_timer=phase_timer,
                     phase_prefix=f"{phase_prefix}_embedded",
-                )
+                ))
 
         archive = task.main_path
         split_info = split_info or task.split_info
@@ -220,20 +324,20 @@ class SingleArchiveExtractor:
                     err = test_err
                 else:
                     with _phase(phase_timer, f"{phase_prefix}_sevenzip_run_extract"):
-                        run_result = self.sevenzip_runner.run_extract(
-                            archive_path=run_archive,
-                            part_paths=run_parts,
-                            out_dir=out_dir,
-                            password=correct_pwd,
-                            password_candidates=list(resolution.candidate_passwords),
-                            selected_codepage=selected_codepage,
-                            decoded_names=filename_encoding.decoded_names,
-                            startupinfo=startupinfo,
-                            runtime_scheduler=runtime_scheduler,
-                            task=task,
-                            phase_timer=phase_timer,
-                            phase_prefix=f"{phase_prefix}_sevenzip",
-                        )
+                        run_result = yield {
+                            "archive_path": run_archive,
+                            "part_paths": run_parts,
+                            "out_dir": out_dir,
+                            "password": correct_pwd,
+                            "password_candidates": list(resolution.candidate_passwords),
+                            "selected_codepage": selected_codepage,
+                            "decoded_names": filename_encoding.decoded_names,
+                            "startupinfo": startupinfo,
+                            "runtime_scheduler": runtime_scheduler,
+                            "task": task,
+                            "phase_timer": phase_timer,
+                            "phase_prefix": f"{phase_prefix}_sevenzip",
+                        }
 
                     if run_result.returncode == 0:
                         selected_password = self._worker_selected_password(resolution, run_result)
@@ -744,7 +848,7 @@ class SingleArchiveExtractor:
             return False
         return bool(getattr(state, "patches", None))
 
-    def _extract_embedded_segments(
+    def _extract_embedded_segments_state_machine(
         self,
         task: ArchiveTask,
         out_dir: str,
@@ -832,7 +936,7 @@ class SingleArchiveExtractor:
                     # but extraction must always bind password verification to
                     # the currently active logical segment.
                     write_source_password_probe_input(task, descriptor.to_dict())
-                result = self.extract(
+                result = yield from self._extract_state_machine(
                     task,
                     segment_dir,
                     split_info=split_info,

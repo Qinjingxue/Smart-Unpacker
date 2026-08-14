@@ -116,7 +116,7 @@ def test_write_manifest_override_enables_extraction_manifest_files():
     assert config["extraction"]["write_progress_manifest"] is True
 
 
-def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
+def test_effective_config_includes_thresholds_native_scheduler_and_rule_pipeline():
     config = _payload()
     config["filesystem"] = {
         "directory_scan_mode": "-",
@@ -133,5 +133,6 @@ def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     assert effective["size_range_min_bytes"] == 1048576
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
     assert effective["scheduler"]["scheduler_profile"] == "auto"
-    assert effective["scheduler"]["resolved_scheduler_profile"] in {"conservative", "aggressive"}
+    assert effective["scheduler"]["controller"] == "native_worker"
+    assert effective["scheduler"]["machine_profile"] == "selected_by_worker"
     assert effective["detection"]["rule_pipeline"]["precheck"][0]["name"] == "embedded_payload_identity"

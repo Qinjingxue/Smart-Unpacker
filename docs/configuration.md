@@ -114,7 +114,6 @@ CLI 可用 `--recur` 临时覆盖。
 | --- | --- | --- | --- |
 | `batch_window_seconds` | `float` | `0` | 兼容字段；request-level 并发启用后不再生效。 |
 | `max_batch_requests` | `int` | `64` | 兼容字段；不同 submission 不再合并为微批。 |
-| `max_active_pipeline_requests` | `int/null` | `null` | 同时推进的请求数；`null` 自动取 `max(2, min(4, max_workers))`，`1` 可恢复串行。 |
 | `queue_capacity` | `int` | `4096` | 入口队列上限；达到上限时提交方产生背压。 |
 
 CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine、资源调度器和 7-Zip worker pool。入口队列、分析、预检、资源分析和解压共享同一份 CPU/IO/内存预算；调度反馈跨请求保留，到 Engine 关闭时统一保存。
@@ -203,13 +202,27 @@ CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持
 | `scheduler_idle_decay_seconds` | `int` / `float` | 流水线持续空闲多久后逐步将动态并发限制和短期反馈衰减到初始状态；不会清除持久 profile 校准。 |
 | `max_extract_task_seconds` | `int` / `float` | 单个解压任务总时长上限，`0` 表示不限。 |
 | `process_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
-| `process_sample_interval_ms` | `int` / `float` | worker 进程采样间隔。 |
-| `persistent_workers` | `bool` | 是否复用 worker 进程。 |
-| `profile_calibration_*` | 多种 | 并发调度 profile 的运行时反馈调节。 |
+| `process_sample_interval_ms` | `int` / `float` | worker 故障检测采样间隔；不参与 native 并发准入。 |
+| `persistent_workers` | `bool` | 是否复用单个 native worker 进程；默认开启，旧值仅作为兼容开关，不表示 worker 数量。 |
+| `native_extract_threads` | `int` | 每个 native worker 进程的 `IInArchive` 线程池最大容量；`0` 按机器能力自动设定，实际活动任务数由 native 自适应控制器动态准入。 |
+| `native_adaptive_enabled` | `bool` | 是否启用 native CPU/IO/内存采样和动态准入；关闭后退化为固定线程上限准入。 |
+| `native_initial_active_jobs` | `int` | native 自适应控制器初始活动任务数，`0` 按线程池容量自动选择。 |
+| `native_sample_interval_ms` | `int` | native 系统资源采样间隔，最小 100 ms。 |
+| `throughput_window_size` / `throughput_regression_ratio` | `int` / `float` | native 全局吞吐反馈窗口；并发扩张造成吞吐退化时暂停 scale-up。 |
+| `scale_up_backlog_threshold_mb_s` | `int` / `float` | backlog 较大时允许 IO scale-up 的较宽吞吐阈值。 |
+| `medium_backlog_threshold` / `high_backlog_threshold` | `int` | backlog 对应的动态并发下限档位。 |
+| `medium_floor_workers` / `high_floor_workers` | `int` | backlog 档位的 native 最低活动任务数。 |
+| `native_max_queue_jobs` | `int` | native 任务队列上限；达到上限时返回可重试的背压结果。 |
+| `native_priority_aging_quantum` | `int` | native 优先级老化步长，避免低优先级请求长期饥饿。 |
+| `native_backpressure_retries` | `int` | native 队列背压后的 transport 重试次数；不改变业务 retry 语义。 |
+| `native_async_writer_threads` | `int` | 每个 native worker 进程的统一写出线程数。 |
+| `native_memory_budget_bytes` | `int` | 每个 native worker 进程的估算内存准入预算；`0` 使用可用物理内存的默认比例。 |
+| `native_job_buffer_budget_bytes` | `int` | 单个 native 解压任务的输出 inflight 缓冲上限。 |
+| `profile_calibration_*` | 多种 | native profile 的运行时反馈调节和持久化；worker 自己读取、更新并原子写回 profile cache。 |
 | `resource_guard` | `dict` | 可选资源护栏，用 analysis 估算的文件数、解包大小、压缩比等限制任务。 |
 
-`auto` 会根据 CPU 和内存选择保守或激进档。配置文件中的超时会覆盖 profile 内置值。
-资源调度器只在存在 pipeline backlog、已注册 workload 或活跃 worker 时采集 CPU、内存和磁盘指标；Engine 空闲时会阻塞等待新工作，不进行周期采样。CLI、右键菜单和 watch 共用这一行为。
+`auto` 由 native worker 根据 CPU、物理内存和线程硬上限选择保守或激进初始档。配置文件中的超时会覆盖 profile 内置值。
+native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `scheduler_idle_decay_seconds` 后逐步恢复初始动态限制，但不清除已持久化的 profile 校准。Python 不再根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 worker holder。
 
 `resource_guard` 当前常用字段：
 
@@ -257,9 +270,7 @@ watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。�
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `enabled` | `bool` | 是否启用归档输入规划。 |
-| `task_parallel` | `bool` | 批量任务是否并行规划。 |
-| `task_max_workers` | `int` | 批量 input planning worker 上限。 |
-| `cache_size` | `int` | request 级中立 Analysis report 缓存数量。 |
+| `cache_size` | `int` | request 级中立 Analysis report 缓存数量。输入规划按任务顺序执行，不再由 Python 任务 worker 数量控制。 |
 
 `repair_inspection.cache_size` 控制 repair 状态报告缓存数量。cache identity 包含 source identity、分卷、patch digest 和 repair inspection request，避免不同修复状态互相污染。
 

@@ -227,7 +227,13 @@ ExtractArchiveResult extract_archive_internal(
 
     bool dry_run = false,
 
-    const std::vector<std::wstring>& canonical_names = {}
+    const std::vector<std::wstring>& canonical_names = {},
+
+    std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
+
+    std::size_t job_buffer_budget = 0,
+
+    std::shared_ptr<std::atomic<bool>> cancel_token = nullptr
 
 ) {
 
@@ -449,7 +455,10 @@ ExtractArchiveResult extract_archive_internal(
             std::move(progress),
             dry_run,
             &result.output_trace,
-            num_items);
+            num_items,
+            std::move(shared_writer),
+            job_buffer_budget,
+            std::move(cancel_token));
 
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
 
@@ -723,7 +732,13 @@ ExtractArchiveResult extract_archive_with_parts(
 
     bool dry_run,
 
-    const std::vector<std::wstring>& canonical_names
+    const std::vector<std::wstring>& canonical_names,
+
+    std::shared_ptr<AsyncFileWriter> shared_writer,
+
+    std::size_t job_buffer_budget,
+
+    std::shared_ptr<std::atomic<bool>> cancel_token
 
 ) {
 
@@ -777,7 +792,10 @@ ExtractArchiveResult extract_archive_with_parts(
 
         dry_run,
 
-        canonical_names);
+        canonical_names,
+        std::move(shared_writer),
+        job_buffer_budget,
+        std::move(cancel_token));
 
 #else
 
@@ -839,7 +857,13 @@ ExtractArchiveResult extract_archive_with_ranges(
 
     ExtractProgressCallback progress,
 
-    bool dry_run
+    bool dry_run,
+
+    std::shared_ptr<AsyncFileWriter> shared_writer,
+
+    std::size_t job_buffer_budget,
+
+    std::shared_ptr<std::atomic<bool>> cancel_token
 
 ) {
 
@@ -887,7 +911,11 @@ ExtractArchiveResult extract_archive_with_ranges(
 
         std::move(progress),
 
-        dry_run);
+        dry_run,
+        {},
+        std::move(shared_writer),
+        job_buffer_budget,
+        std::move(cancel_token));
 
 #else
 
@@ -953,7 +981,13 @@ ExtractArchiveResult extract_archive_with_patches(
 
     ExtractProgressCallback progress,
 
-    bool dry_run
+    bool dry_run,
+
+    std::shared_ptr<AsyncFileWriter> shared_writer,
+
+    std::size_t job_buffer_budget,
+
+    std::shared_ptr<std::atomic<bool>> cancel_token
 
 ) {
 
@@ -1005,7 +1039,11 @@ ExtractArchiveResult extract_archive_with_patches(
 
         std::move(progress),
 
-        dry_run);
+        dry_run,
+        {},
+        std::move(shared_writer),
+        job_buffer_budget,
+        std::move(cancel_token));
 
 #else
 

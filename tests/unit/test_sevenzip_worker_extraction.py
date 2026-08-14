@@ -11,7 +11,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInput
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker
+from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker, _apply_native_environment
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from tests.helpers.tool_config import get_test_tools
@@ -338,6 +338,28 @@ def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeyp
         _PersistentWorker("worker.exe", None)
 
     assert captured["cwd"] == str(tmp_path)
+
+
+def test_native_environment_zero_memory_budget_uses_native_auto_budget():
+    environment = {
+        "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES": "1",
+        "SUNPACK_NATIVE_EXTRACT_THREADS": "8",
+    }
+
+    _apply_native_environment(
+        environment,
+        {
+            "native_extract_threads": 0,
+            "native_memory_budget_bytes": 0,
+            "native_adaptive_enabled": True,
+            "scale_up_threshold_mb_s": 20,
+        },
+    )
+
+    assert "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES" not in environment
+    assert "SUNPACK_NATIVE_EXTRACT_THREADS" not in environment
+    assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
+    assert environment["SUNPACK_NATIVE_IO_SCALE_UP_BYTES"] == str(20 * 1024 * 1024)
 
 
 def test_compact_worker_manifest_is_parsed_into_native_storage():

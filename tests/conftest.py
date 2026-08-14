@@ -40,9 +40,6 @@ def isolate_builtin_password_file(tmp_path_factory):
     yield
     monkeypatch.undo()
 
-from sunpack.coordinator.scheduling import ConcurrencyScheduler
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -53,12 +50,10 @@ def repo_root() -> Path:
 
 @pytest.fixture
 def pipeline_resource_scheduler():
-    scheduler = ConcurrencyScheduler({}, current_limit=8, max_workers=8)
-    scheduler.start()
-    try:
-        yield scheduler
-    finally:
-        scheduler.stop()
+    # Extraction admission is owned by the native worker.  Keep this fixture
+    # as a compatibility argument for tests that construct the batch runner
+    # directly; it intentionally supplies no Python scheduler.
+    yield None
 
 
 def pytest_addoption(parser):

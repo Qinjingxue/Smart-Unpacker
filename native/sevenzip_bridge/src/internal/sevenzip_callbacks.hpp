@@ -28,6 +28,8 @@
 
 #include <optional>
 
+#include <mutex>
+
 #include <string>
 
 #include <unordered_set>
@@ -973,7 +975,13 @@ public:
 
         ExtractOutputTrace* output_trace = nullptr,
 
-        UInt32 estimated_items = 0
+        UInt32 estimated_items = 0,
+
+        std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
+
+        std::size_t job_buffer_budget = 0,
+
+        std::shared_ptr<std::atomic<bool>> cancel_token = nullptr
 
     ) : archive_(archive),
 
@@ -989,7 +997,11 @@ public:
 
         output_trace_(output_trace),
 
-        async_writer_(dry_run ? nullptr : std::make_shared<AsyncFileWriter>()),
+        async_writer_(dry_run ? nullptr : (shared_writer ? std::move(shared_writer) : std::make_shared<AsyncFileWriter>())),
+
+        cancel_token_(std::move(cancel_token)),
+
+        async_job_(async_writer_ ? async_writer_->make_job(job_buffer_budget, cancel_token_) : nullptr),
 
         output_root_(win32_extended_path(output_dir_)),
 
@@ -1032,7 +1044,7 @@ public:
             return;
         }
 
-        async_writer_->finish();
+        async_writer_->finish_job(async_job_);
         UInt64 total_written = 0;
         UInt32 completed_files = 0;
         for (const auto& state : async_files_) {
@@ -1146,6 +1158,12 @@ public:
 
     HRESULT STDMETHODCALLTYPE SetTotal(UInt64 total) override {
 
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
+        if (is_cancelled()) {
+            return E_ABORT;
+        }
+
         total_bytes_ = total;
 
         emit("total", 0, L"");
@@ -1155,6 +1173,12 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64* completeValue) override {
+
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
+        if (is_cancelled()) {
+            return E_ABORT;
+        }
 
         if (completeValue) {
 
@@ -1170,6 +1194,8 @@ public:
 
     HRESULT STDMETHODCALLTYPE GetStream(UInt32 index, ISequentialOutStream** outStream, Int32 askExtractMode) override {
 
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
         if (!outStream) {
 
             return E_POINTER;
@@ -1177,6 +1203,10 @@ public:
         }
 
         *outStream = nullptr;
+
+        if (is_cancelled()) {
+            return E_ABORT;
+        }
 
         current_index_ = index;
 
@@ -1368,7 +1398,7 @@ public:
         }
         const bool compute_crc = output_trace_ && current_trace_index_ < output_trace_->items.size() &&
             !output_trace_->items[current_trace_index_].has_source_crc32;
-        current_async_file_ = async_writer_->make_file(
+        current_async_file_ = async_writer_->make_file(async_job_,
             target.wstring(), name, index, current_trace_index_);
         async_files_.push_back(current_async_file_);
         *outStream = new AsyncFileOutStream(async_writer_, current_async_file_, compute_crc);
@@ -1380,6 +1410,12 @@ public:
     HRESULT STDMETHODCALLTYPE PrepareOperation(Int32) override { return S_OK; }
 
     HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 opRes) override {
+
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
+        if (is_cancelled()) {
+            return E_ABORT;
+        }
 
         if (current_async_file_) {
             current_async_file_->operation_result = opRes;
@@ -1421,10 +1457,10 @@ public:
         emit(opRes == kOpOk ? "item_done" : "item_failed", current_index_, current_item_);
 
         if (async_writer_) {
-            const HRESULT writer_error = async_writer_->current_error();
+            const HRESULT writer_error = async_writer_->current_error(async_job_);
             if (writer_error != S_OK) {
                 output_error_ = true;
-                mark_current_item_failure(writer_error, async_writer_->current_win32_error());
+                mark_current_item_failure(writer_error, async_writer_->current_win32_error(async_job_));
                 return writer_error;
             }
         }
@@ -1433,6 +1469,8 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* password) override {
+
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
 
         if (!password) {
 
@@ -1621,6 +1659,8 @@ private:
 
     void emit(const std::string& event, UInt32 item_index, const std::wstring& item_path) {
 
+        std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
         if (!progress_) {
 
             return;
@@ -1663,9 +1703,19 @@ private:
 
     std::shared_ptr<AsyncFileWriter> async_writer_;
 
+    std::shared_ptr<std::atomic<bool>> cancel_token_;
+
+    AsyncFileWriter::JobStatePtr async_job_;
+
+    mutable std::recursive_mutex state_mutex_;
+
     std::vector<AsyncFileWriter::FileStatePtr> async_files_;
 
     AsyncFileWriter::FileStatePtr current_async_file_;
+
+    bool is_cancelled() const noexcept {
+        return cancel_token_ && cancel_token_->load(std::memory_order_acquire);
+    }
 
     std::filesystem::path output_root_;
 

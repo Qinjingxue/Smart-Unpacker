@@ -19,7 +19,6 @@
   "pipeline": {
     "batch_window_seconds": 0,
     "max_batch_requests": 64,
-    "max_active_pipeline_requests": null,
     "queue_capacity": 4096
   },
   "post_extract": {
@@ -80,6 +79,16 @@
     "process_no_progress_timeout_seconds": 180,
     "process_sample_interval_ms": 500,
     "persistent_workers": true,
+    "native_extract_threads": 0,
+    "native_adaptive_enabled": true,
+    "native_initial_active_jobs": 0,
+    "native_sample_interval_ms": 500,
+    "native_max_queue_jobs": 4096,
+    "native_priority_aging_quantum": 32,
+    "native_backpressure_retries": 120,
+    "native_async_writer_threads": 4,
+    "native_memory_budget_bytes": 0,
+    "native_job_buffer_budget_bytes": 33554432,
     "persistent_server_idle_seconds": 15,
     "profile_calibration_window_size": 4,
     "profile_regression_ratio": 0.8,
@@ -136,8 +145,6 @@
   },
   "input_planning": {
     "enabled": true,
-    "task_parallel": true,
-    "task_max_workers": 4,
     "cache_size": 512
   },
   "repair_inspection": {

@@ -2,7 +2,6 @@ import json
 import os
 import threading
 from contextlib import nullcontext
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from typing import Any, Callable
 
@@ -37,14 +36,9 @@ class ArchiveInputPlanningStage:
         self,
         config: dict[str, Any] | None = None,
         *,
-        executor_pool=None,
         module_executor_pool=None,
-        workload_executor=None,
     ):
         self.config = config or {}
-        self.executor_pool = executor_pool
-        self.module_executor_pool = module_executor_pool
-        self.workload_executor = workload_executor
         planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}
         self.enabled = bool(planning_config.get("enabled", True))
         self._report_cache: dict[tuple, ArchiveAnalysisReport] = {}
@@ -59,58 +53,11 @@ class ArchiveInputPlanningStage:
         if not self.enabled or self.analyzer is None:
             return tasks
         groups = self._planning_task_groups(tasks)
-        max_workers = self._task_max_workers(len(groups))
-        if max_workers > 1:
-            grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
-            if self.workload_executor is not None:
-                completed_groups = self.workload_executor(
-                    groups,
-                    self._plan_task_group,
-                    max_workers=max_workers,
-                    workload_label="input-planning-task",
-                )
-                for group_result in completed_groups:
-                    for index, task_results in group_result:
-                        grouped_results[index] = task_results
-                return [
-                    task_result
-                    for task_results in grouped_results
-                    for task_result in task_results
-                ]
-            executor_context = (
-                nullcontext(self.executor_pool)
-                if self.executor_pool is not None
-                else ThreadPoolExecutor(max_workers=max_workers)
-            )
-            with executor_context as executor:
-                futures = {
-                    executor.submit(self._plan_task_group, group): group
-                    for group in groups
-                }
-                for future in as_completed(futures):
-                    for index, task_results in future.result():
-                        grouped_results[index] = task_results
-            return [
-                task_result
-                for task_results in grouped_results
-                for task_result in task_results
-            ]
         expanded_tasks: list[ArchiveTask] = []
         for group in groups:
             for _index, task_results in self._plan_task_group(group):
                 expanded_tasks.extend(task_results)
         return expanded_tasks
-
-    def _task_max_workers(self, task_count: int) -> int:
-        if task_count <= 1:
-            return 1
-        planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}
-        if not bool(planning_config.get("task_parallel", True)):
-            return 1
-        configured = planning_config.get("task_max_workers")
-        if configured is None:
-            configured = min(4, os.cpu_count() or 1)
-        return max(1, min(int(configured or 1), task_count))
 
     def _remember_report(self, cache_key: tuple, report: ArchiveAnalysisReport) -> None:
         planning_config = self.config.get("input_planning") if isinstance(self.config.get("input_planning"), dict) else {}

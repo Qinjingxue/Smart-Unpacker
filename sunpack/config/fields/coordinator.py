@@ -34,10 +34,6 @@ def normalize_pipeline_config(value: Any) -> dict[str, Any]:
         config["batch_window_seconds"] = max(0.0, float(config["batch_window_seconds"]))
         config["max_batch_requests"] = max(1, int(config["max_batch_requests"]))
         config["queue_capacity"] = max(1, int(config["queue_capacity"]))
-        active_requests = config.get("max_active_pipeline_requests")
-        config["max_active_pipeline_requests"] = (
-            None if active_requests is None else max(1, int(active_requests))
-        )
     except (TypeError, ValueError) as exc:
         raise ValueError("pipeline concurrency fields must be numeric") from exc
     return config

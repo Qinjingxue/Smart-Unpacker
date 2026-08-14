@@ -21,13 +21,6 @@ from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.reporting import RunReporter
-from sunpack.coordinator.scheduling import (
-    ConcurrencyScheduler,
-    TaskExecutor,
-    build_scheduler_profile_config,
-    resolve_max_workers,
-)
-from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.space_guard import ExtractionSpaceGuard
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.coordinator.target_groups import relation_group_to_fact_bag
@@ -94,16 +87,11 @@ class PipelineEngine:
         self.detection_options = detection_options or DetectionOptions()
         pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
         queue_capacity = max(1, int(pipeline_config["queue_capacity"]))
-        configured_active = pipeline_config.get("max_active_pipeline_requests")
-        self.max_active_pipeline_requests = (
-            max(1, int(configured_active))
-            if configured_active is not None
-            else max(2, min(4, resolve_max_workers()))
-        )
         self._queue: queue.Queue = queue.Queue(maxsize=queue_capacity)
         self._services = _PipelineServices(config, self.detection_options)
         self._runtime = self._services
-        self._request_pool: ThreadPoolExecutor | None = None
+        self._request_pool = None
+        self._request_threads: set[threading.Thread] = set()
         self._request_runtime_factory = _RequestRuntime
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
@@ -127,10 +115,6 @@ class PipelineEngine:
         self._closed = False
 
     @property
-    def resource_scheduler(self) -> ConcurrencyScheduler:
-        return self._services.resource_scheduler
-
-    @property
     def recent_passwords(self) -> list[str]:
         with self._recent_passwords_lock:
             return list(self._recent_passwords)
@@ -149,10 +133,6 @@ class PipelineEngine:
             if self._started:
                 return self
             self._services.start()
-            self._request_pool = ThreadPoolExecutor(
-                max_workers=self.max_active_pipeline_requests,
-                thread_name_prefix="sunpack-request",
-            )
             self._started = True
             self._accepting = True
             self._thread = threading.Thread(target=self._dispatch_loop, name="sunpack-pipeline", daemon=True)
@@ -254,8 +234,6 @@ class PipelineEngine:
                 self._queue.put(self._STOP)
         if thread is not None:
             thread.join()
-        if self._request_pool is not None:
-            self._request_pool.shutdown(wait=True, cancel_futures=False)
         self._services.close()
         with self._lifecycle_lock:
             self._closed = True
@@ -299,7 +277,7 @@ class PipelineEngine:
                 self._set_pending_request_count(0)
 
             scheduled = False
-            while pending and self._active_count() < self.max_active_pipeline_requests:
+            while pending:
                 index = next(
                     (
                         i for i, submission in enumerate(pending)
@@ -314,13 +292,20 @@ class PipelineEngine:
                     break
                 submission = pending.pop(index)
                 self._set_pending_request_count(len(pending))
-                assert self._request_pool is not None
-                worker_future = self._request_pool.submit(self._execute_submission, submission)
+                worker_future = Future()
+                worker_thread = threading.Thread(
+                    target=self._execute_submission_thread,
+                    args=(submission, worker_future),
+                    name=f"sunpack-request-{submission.request_id[:8]}",
+                    daemon=True,
+                )
+                self._request_threads.add(worker_thread)
                 with self._dispatch_condition:
                     self._active_request_futures[worker_future] = submission
                     active = len(self._active_request_futures)
                 self._set_active_request_count(active)
                 worker_future.add_done_callback(self._request_finished)
+                worker_thread.start()
                 scheduled = True
 
             if stopping and not pending and self._active_count() == 0:
@@ -348,6 +333,15 @@ class PipelineEngine:
         finally:
             self._services.output_reservations.release(submission.request_id)
 
+    def _execute_submission_thread(self, submission: _Submission, worker_future: Future) -> None:
+        try:
+            self._execute_submission(submission)
+        finally:
+            if not worker_future.done():
+                worker_future.set_result(None)
+            current = threading.current_thread()
+            self._request_threads.discard(current)
+
     def _request_finished(self, worker_future: Future) -> None:
         with self._dispatch_condition:
             submission = self._active_request_futures.pop(worker_future, None)
@@ -374,25 +368,17 @@ class PipelineEngine:
     def _set_active_request_count(self, count: int) -> None:
         with self._pressure_lock:
             self._active_request_count = max(0, int(count or 0))
-            pressure = self._outstanding_request_count
-        self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     def _set_pending_request_count(self, count: int) -> None:
         with self._pressure_lock:
             self._pending_request_count = max(0, int(count or 0))
-            pressure = self._outstanding_request_count
-        self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     def _change_outstanding_request_count(self, delta: int) -> None:
         with self._pressure_lock:
             self._outstanding_request_count = max(0, self._outstanding_request_count + int(delta))
-            pressure = self._outstanding_request_count
-        self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     def _sync_pipeline_pressure(self) -> None:
-        with self._pressure_lock:
-            pressure = self._outstanding_request_count
-        self.resource_scheduler.set_pipeline_request_backlog(pressure)
+        return None
 
     @staticmethod
     def _normalize_target(target: str | PipelineTarget) -> PipelineTarget:
@@ -473,30 +459,8 @@ class _PipelineServices:
     def __init__(self, config: dict, detection_options: DetectionOptions | None = None):
         self.config = config
         self.output_reservations = OutputReservationRegistry()
-        planning_config = config.get("input_planning") if isinstance(config.get("input_planning"), dict) else {}
         analysis_config = config.get("analysis") if isinstance(config.get("analysis"), dict) else {}
-        planning_workers = max(1, int(planning_config.get("task_max_workers", 4) or 4))
         module_workers = max(1, int(analysis_config.get("max_workers", 3) or 3))
-        max_workers = resolve_max_workers()
-        performance = advanced_config_value(("performance",))
-        if isinstance(config.get("performance"), dict):
-            performance.update(config["performance"])
-        scheduler_config = build_scheduler_profile_config(performance.get("scheduler_profile", "auto"))
-        scheduler_config.update({
-            key: value
-            for key, value in performance.items()
-            if key != "scheduler_profile" and value is not None
-        })
-        initial_limit = scheduler_config.get("initial_concurrency_limit", max_workers)
-        self.resource_scheduler = ConcurrencyScheduler(
-            scheduler_config,
-            current_limit=initial_limit,
-            max_workers=max_workers,
-        )
-        self.input_planning_executor_pool = ThreadPoolExecutor(
-            max_workers=planning_workers,
-            thread_name_prefix="sunpack-input-planning-task",
-        )
         self.analysis_capability_pool = ThreadPoolExecutor(
             max_workers=module_workers,
             thread_name_prefix="sunpack-analysis-capability",
@@ -505,22 +469,18 @@ class _PipelineServices:
             config,
             executor_pool=self.analysis_capability_pool,
         )
-        self.executor_pool = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="sunpack-task",
+        performance_config = dict(
+            config.get("performance", {})
+            if isinstance(config.get("performance"), dict)
+            else {}
         )
-        performance_config = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
         self.sevenzip_runner = SevenZipRunner(performance_config)
 
     def start(self) -> None:
-        self.resource_scheduler.start()
+        return None
 
     def close(self) -> None:
-        self.resource_scheduler.set_pipeline_request_backlog(0)
-        self.resource_scheduler.stop()
         self.sevenzip_runner.close()
-        self.executor_pool.shutdown(wait=True, cancel_futures=False)
-        self.input_planning_executor_pool.shutdown(wait=True, cancel_futures=False)
         self.analysis_capability_pool.shutdown(wait=True, cancel_futures=False)
         from sunpack.support.runtime_cache_cleanup import clear_all_runtime_caches
 
@@ -559,9 +519,7 @@ class _RequestRuntime:
         )
         self.input_planning_stage = ArchiveInputPlanningStage(
             self.config,
-            executor_pool=services.input_planning_executor_pool,
             module_executor_pool=services.analysis_capability_pool,
-            workload_executor=self._execute_input_planning_workload,
         )
         self.output_scan_policy = NestedOutputScanPolicy(self.config)
         self.nested_extraction_policy = NestedExtractionPolicy(self.config)
@@ -570,6 +528,8 @@ class _RequestRuntime:
             submission.request_id,
         )
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
+        request_runner = services.sevenzip_runner.fork()
+        request_runner.request_id = submission.request_id
         self.extractor = ExtractionScheduler(
             cli_passwords=submission.user_passwords,
             builtin_passwords=submission.builtin_passwords,
@@ -580,7 +540,7 @@ class _RequestRuntime:
                 **(self.config.get("extraction", {}) if isinstance(self.config.get("extraction"), dict) else {}),
                 "language": self.language,
             },
-            sevenzip_runner=services.sevenzip_runner.fork(),
+            sevenzip_runner=request_runner,
         )
         self.extractor.ensure_space = self.space_guard.ensure_space
         self.extractor.set_progress_callback(self.reporter.task_progress)
@@ -588,30 +548,14 @@ class _RequestRuntime:
             self.context,
             self.extractor,
             self.output_scan_policy,
-            services.resource_scheduler,
+            None,
             self.rename_scheduler,
             self.config,
             repair_inspection_service=services.repair_inspection_service,
             progress_reporter=self.reporter,
-            executor_pool=services.executor_pool,
+            executor_pool=None,
             request_id=submission.request_id,
         )
-
-    def _execute_input_planning_workload(
-        self,
-        tasks,
-        worker,
-        *,
-        max_workers: int,
-        workload_label: str,
-    ):
-        executor = TaskExecutor(
-            self.services.resource_scheduler,
-            max_workers=max_workers,
-            executor_pool=self.services.input_planning_executor_pool,
-            request_id=self.submission.request_id,
-        )
-        return executor.execute_all(tasks, worker, workload_label=workload_label)
 
     def _resolve_missing_volume_once(self, task, _outcome):
         current_paths = list(task.all_parts or [task.main_path])

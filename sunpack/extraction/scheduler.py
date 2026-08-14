@@ -84,6 +84,33 @@ class ExtractionScheduler:
             phase_prefix=phase_prefix,
         )
 
+    def extract_async(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        split_info: Optional[SplitArchiveInfo] = None,
+        runtime_scheduler: Any = None,
+        phase_timer: Any = None,
+        phase_prefix: str = "extract",
+        on_complete: Callable[[ExtractionResult], None] | None = None,
+    ) -> None:
+        if on_complete is None:
+            raise ValueError("ExtractionScheduler.extract_async requires on_complete")
+        # Keep test/dry-run adapters that replace the instance's synchronous
+        # extractor compatible with the callback API.
+        if "extract" in self.__dict__:
+            on_complete(self.extract(task, out_dir, runtime_scheduler=runtime_scheduler))
+            return
+        self._single_archive_extractor().extract_async(
+            task,
+            out_dir,
+            split_info=split_info,
+            runtime_scheduler=runtime_scheduler,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
+            on_complete=on_complete,
+        )
+
     def close(self) -> None:
         self.sevenzip_runner.close()
 

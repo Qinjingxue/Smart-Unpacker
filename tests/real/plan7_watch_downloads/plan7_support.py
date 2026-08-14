@@ -131,7 +131,6 @@ def plan7_watch_config(passwords: list[str] | None = None) -> dict:
     config["performance"] = {
         **(config.get("performance") or {}),
         "persistent_workers": True,
-        "persistent_worker_count": 2,
     }
     config["user_passwords"] = [f"wrong-{index:02d}" for index in range(WRONG_PASSWORD_COUNT)]
     config["user_passwords"].extend(passwords or [PASSWORD])

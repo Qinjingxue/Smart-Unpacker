@@ -1,9 +1,10 @@
 import os
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Callable, List
 
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
@@ -30,12 +31,6 @@ from sunpack.repair.stage import ArchiveRepairStage
 from sunpack.coordinator.resource_preflight import ResourcePreflightInspector
 from sunpack.relations.stage import ArchiveRelationStage
 from sunpack.coordinator.verification_stage import verify_and_project
-from sunpack.coordinator.scheduling import (
-    ConcurrencyScheduler,
-    TaskExecutor,
-    build_scheduler_profile_config,
-    resolve_max_workers,
-)
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.support.output_inventory import OutputInventory
 from sunpack.contracts.extraction import ExtractionResult
@@ -128,25 +123,6 @@ class BatchExtractionOutcome:
 
 
 @dataclass
-class _IndexedStageTask:
-    index: int
-    task: ArchiveTask
-    resource_token_cost: int = 1
-
-    @property
-    def fact_bag(self):
-        return self.task.fact_bag
-
-    @property
-    def main_path(self) -> str:
-        return self.task.main_path
-
-    @property
-    def all_parts(self) -> list[str]:
-        return self.task.all_parts
-
-
-@dataclass
 class _BeamRepairEvaluation:
     candidate: RepairCandidate
     result: ExtractionResult
@@ -167,7 +143,7 @@ class ExtractionBatchRunner:
         context: RunContext,
         extractor: ExtractionScheduler,
         output_scan_policy: NestedOutputScanPolicy,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
         repair_inspection_service: RepairInspectionService | None = None,
@@ -184,8 +160,6 @@ class ExtractionBatchRunner:
         self.content_policy = ContentRecoveryPolicy.from_config(self.config)
         cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
         self.i18n = I18nContext(cli_config.get("language"))
-        self.scheduler_config = self._build_scheduler_config(self.config)
-        self.max_workers = resolve_max_workers()
         self.repair_inspection_service = repair_inspection_service or RepairInspectionService(self.config)
         self.progress_reporter = progress_reporter
         self.executor_pool = executor_pool
@@ -200,6 +174,10 @@ class ExtractionBatchRunner:
         performance = advanced_config_value(("performance",))
         if isinstance(self.config.get("performance"), dict):
             performance.update(self.config["performance"])
+        # Kept as a read-only compatibility projection for callers and
+        # diagnostics.  Native extraction no longer consults this mapping for
+        # admission or concurrency decisions.
+        self.scheduler_config = dict(performance)
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
             rename_scheduler=self.rename_scheduler,
@@ -325,29 +303,57 @@ class ExtractionBatchRunner:
         if not ready_tasks:
             return skipped_results
 
-        executor = TaskExecutor(
-            self.runtime_scheduler,
-            max_workers=self.max_workers,
-            executor_pool=self.executor_pool,
-            request_id=self.request_id,
+        return skipped_results + self._execute_native_ready_tasks(
+            ready_tasks,
+            output_dir_resolver,
+            missing_volume_retry=missing_volume_retry,
         )
-        def execute_one(task, runtime_scheduler):
-            planned_out_dir = output_dir_resolver(task)
-            outcome = self._extract_verify_with_retries(
-                task,
-                planned_out_dir,
-                runtime_scheduler,
-                missing_volume_retry=missing_volume_retry,
-            )
+
+    def _execute_native_ready_tasks(
+        self,
+        tasks: list[ArchiveTask],
+        output_dir_resolver,
+        *,
+        missing_volume_retry=None,
+    ) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
+        """Submit all ready attempts; native owns extraction admission.
+
+        The request thread waits for the batch-level business result, not for
+        one Python worker per archive.  Native completion callbacks resume the
+        verification/retry state machine and the final result is collected
+        here for the existing pipeline API.
+        """
+        if not tasks:
+            return []
+        condition = threading.Condition()
+        completed: dict[int, tuple[ArchiveTask, BatchExtractionOutcome]] = {}
+
+        def complete(task: ArchiveTask, planned_out_dir: str, outcome: BatchExtractionOutcome) -> None:
             outcome.planned_out_dir = planned_out_dir
             self._report_task_finished(task, outcome)
-            return task, outcome
+            with condition:
+                completed[id(task)] = (task, outcome)
+                condition.notify_all()
 
-        return skipped_results + executor.execute_all(
-            ready_tasks,
-            execute_one,
-            workload_label="extraction",
-        )
+        for task in tasks:
+            planned_out_dir = output_dir_resolver(task)
+            try:
+                self._extract_verify_with_retries_async(
+                    task,
+                    planned_out_dir,
+                    self.runtime_scheduler,
+                    missing_volume_retry=missing_volume_retry,
+                    on_complete=lambda outcome, current=task, out_dir=planned_out_dir: complete(
+                        current, out_dir, outcome
+                    ),
+                )
+            except Exception:
+                raise
+
+        with condition:
+            while len(completed) < len(tasks):
+                condition.wait()
+        return [completed[id(task)] for task in tasks]
 
     def _report_task_started(self, task: ArchiveTask) -> None:
         if self.progress_reporter is not None:
@@ -422,116 +428,97 @@ class ExtractionBatchRunner:
         guard = performance.get("resource_guard") if isinstance(performance.get("resource_guard"), dict) else {}
         return dict(guard)
 
-    def _build_scheduler_config(self, config: dict) -> dict:
-        performance = advanced_config_value(("performance",))
-        if isinstance(config.get("performance"), dict):
-            performance.update(config["performance"])
-        scheduler_config = build_scheduler_profile_config(performance.get("scheduler_profile", "auto"))
-        scheduler_config.update({
-            key: value
-            for key, value in performance.items()
-            if key != "scheduler_profile" and value is not None
-        })
-        return scheduler_config
-
     def _inspect_tasks_before_extract(self, tasks: list[ArchiveTask], output_dir_resolver) -> list[tuple[int, ArchiveTask, str, Any]]:
-        max_workers = self._stage_max_workers(
-            enabled_key="parallel_preflight_inspect",
-            workers_key="preflight_inspect_max_workers",
-            task_count=len(tasks),
-            default_workers=4,
-        )
-        if max_workers <= 1:
-            results = []
-            for index, task in enumerate(tasks):
-                self._report_task_started(task)
-                out_dir = output_dir_resolver(task)
-                results.append((index, task, out_dir, self.extractor.inspect(task, out_dir)))
-            return results
-
-        indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
-
-        def inspect_one(item: _IndexedStageTask):
-            self._report_task_started(item.task)
-            out_dir = output_dir_resolver(item.task)
-            return item.index, item.task, out_dir, self.extractor.inspect(item.task, out_dir)
-
-        results = self._execute_indexed_stage(
-            indexed,
-            max_workers=max_workers,
-            worker=inspect_one,
-            workload_label="preflight-inspect",
-        )
-        return sorted(results, key=lambda item: item[0])
+        results = []
+        for index, task in enumerate(tasks):
+            self._report_task_started(task)
+            out_dir = output_dir_resolver(task)
+            results.append((index, task, out_dir, self.extractor.inspect(task, out_dir)))
+        return results
 
     def _inspect_resource_profiles(self, tasks: list[ArchiveTask]) -> None:
-        max_workers = self._stage_max_workers(
-            enabled_key="parallel_resource_preflight",
-            workers_key="resource_preflight_max_workers",
-            task_count=len(tasks),
-            default_workers=4,
-        )
-        if max_workers <= 1:
-            for task in tasks:
-                self.resource_inspector.inspect(task)
-            return
-
-        indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
-        self._execute_indexed_stage(
-            indexed,
-            max_workers=max_workers,
-            worker=lambda item: (item.index, self.resource_inspector.inspect(item.task)),
-            workload_label="resource-preflight",
-        )
-
-    def _execute_indexed_stage(
-        self,
-        tasks: list[_IndexedStageTask],
-        *,
-        max_workers: int,
-        worker,
-        workload_label: str,
-    ) -> list[Any]:
-        executor = TaskExecutor(
-            self.runtime_scheduler,
-            max_workers=max_workers,
-            executor_pool=self.executor_pool,
-            request_id=self.request_id,
-        )
-        return executor.execute_all(tasks, worker, workload_label=workload_label)
-
-    def _stage_max_workers(
-        self,
-        *,
-        enabled_key: str,
-        workers_key: str,
-        task_count: int,
-        default_workers: int,
-    ) -> int:
-        if task_count <= 1 or self.max_workers <= 1:
-            return 1
-        performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
-        profile = str(performance.get("scheduler_profile") or self.scheduler_config.get("scheduler_profile") or "").lower()
-        resolved_profile = str(self.scheduler_config.get("resolved_scheduler_profile") or "").lower()
-        if profile == "single" or resolved_profile == "single":
-            return 1
-        if not bool(performance.get(enabled_key, True)):
-            return 1
-        configured = performance.get(workers_key)
-        try:
-            worker_limit = int(configured) if configured is not None else int(default_workers)
-        except (TypeError, ValueError):
-            worker_limit = int(default_workers)
-        return max(1, min(int(task_count), int(self.max_workers), max(1, worker_limit)))
+        for task in tasks:
+            self.resource_inspector.inspect(task)
 
     def _extract_verify_with_retries(
         self,
         task: ArchiveTask,
         out_dir: str,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any = None,
         *,
         missing_volume_retry=None,
     ) -> BatchExtractionOutcome:
+        state = self._extract_verify_state_machine(
+            task,
+            out_dir,
+            runtime_scheduler,
+            missing_volume_retry=missing_volume_retry,
+        )
+        try:
+            request = next(state)
+        except StopIteration as completed:
+            return completed.value
+        while True:
+            result = self.extractor.extract(
+                request["task"],
+                request["out_dir"],
+                runtime_scheduler=request["runtime_scheduler"],
+            )
+            try:
+                request = state.send(result)
+            except StopIteration as completed:
+                return completed.value
+
+    def _extract_verify_with_retries_async(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        runtime_scheduler: Any,
+        *,
+        missing_volume_retry=None,
+        on_complete: Callable[[BatchExtractionOutcome], None],
+    ) -> None:
+        state = self._extract_verify_state_machine(
+            task,
+            out_dir,
+            runtime_scheduler,
+            missing_volume_retry=missing_volume_retry,
+        )
+
+        def advance(result=None, *, first: bool = False) -> None:
+            try:
+                request = next(state) if first else state.send(result)
+            except StopIteration as completed:
+                on_complete(completed.value)
+                return
+            except Exception as exc:
+                on_complete(BatchExtractionOutcome(
+                    result=ExtractionResult(
+                        success=False,
+                        archive=task.main_path,
+                        out_dir=out_dir,
+                        all_parts=list(task.all_parts or []),
+                        error=str(exc),
+                    ),
+                ))
+                return
+            self.extractor.extract_async(
+                request["task"],
+                request["out_dir"],
+                runtime_scheduler=request["runtime_scheduler"],
+                on_complete=advance,
+            )
+
+        self.extractor.sevenzip_runner.submit_continuation(advance, first=True)
+
+    def _extract_verify_state_machine(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        runtime_scheduler: Any = None,
+        *,
+        missing_volume_retry=None,
+    ):
         task.fact_bag.set(REPAIR_ENTERED_FACT, False)
         verification_config = self.verifier.config
         max_verification_retries = max(0, int(verification_config.get("max_retries", 0) or 0))
@@ -545,7 +532,11 @@ class ExtractionBatchRunner:
         attempt_sequence = 0
         while attempt_index < attempts:
             self._report_task_status(task, "extracting")
-            result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
+            result = yield {
+                "task": task,
+                "out_dir": out_dir,
+                "runtime_scheduler": runtime_scheduler,
+            }
             write_extraction_result(task, result)
             current_sequence = attempt_sequence
             attempt_sequence += 1
@@ -958,7 +949,7 @@ class ExtractionBatchRunner:
         result: ExtractionResult,
         verification: VerificationResult,
         out_dir: str,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any,
         loop_state: RepairLoopState,
         incumbent_outcome: BatchExtractionOutcome | None,
         round_index: int,
@@ -1026,7 +1017,7 @@ class ExtractionBatchRunner:
         result: ExtractionResult,
         verification: VerificationResult,
         out_dir: str,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any,
     ) -> _BeamRepairEvaluation | _BeamRepairTerminal | None:
         scheduler = self.repair_stage.scheduler
         if scheduler is None:
@@ -1415,7 +1406,7 @@ class ExtractionBatchRunner:
         task: ArchiveTask,
         item: RepairBeamCandidate,
         out_dir: str,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any,
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
     ) -> VerificationResult:
         temp_dir = f"{out_dir}.beam_{len(evaluated) + 1:02d}_{item.candidate.module_name}"

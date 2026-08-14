@@ -7,7 +7,6 @@ from sunpack.cli.cli_types import CliCommandResult, CliPasswordSummary
 from sunpack.config.loader import apply_config_overrides
 from sunpack.config.schema import normalize_config_value
 from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
-from sunpack.coordinator.scheduling import build_scheduler_profile_config
 from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
 from sunpack.passwords.internal.clipboard import read_clipboard_passwords
 
@@ -22,16 +21,23 @@ def build_effective_config(config: dict) -> dict[str, Any]:
             size_range_min_bytes = size_rule["gte"]
         elif "greater_than_or_equal" in size_rule:
             size_range_min_bytes = size_rule["greater_than_or_equal"]
+    requested_scheduler_profile = (
+        config.get("performance", {}).get("scheduler_profile", "auto")
+        if isinstance(config.get("performance"), dict)
+        else "auto"
+    )
     return {
         "thresholds": {
             "archive_score_threshold": thresholds.get("archive_score_threshold", 6),
             "maybe_archive_threshold": thresholds.get("maybe_archive_threshold", 3),
         },
         "size_range_min_bytes": size_range_min_bytes,
-        "scheduler_profile": config.get("performance", {}).get("scheduler_profile"),
-        "scheduler": build_scheduler_profile_config(
-            config.get("performance", {}).get("scheduler_profile", "auto")
-        ),
+        "scheduler_profile": requested_scheduler_profile,
+        "scheduler": {
+            "controller": "native_worker",
+            "scheduler_profile": requested_scheduler_profile,
+            "machine_profile": "selected_by_worker",
+        },
         "detection": {
             "enabled": bool(config.get("detection", {}).get("enabled", True)),
             "rule_pipeline": {

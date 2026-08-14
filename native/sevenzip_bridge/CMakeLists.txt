@@ -57,7 +57,7 @@ target_include_directories(sunpack_sevenzip_core
 
 if(WIN32)
     target_compile_definitions(sunpack_sevenzip_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUP7Z_BUILD_DLL)
-    target_link_libraries(sunpack_sevenzip_core PUBLIC OleAut32)
+    target_link_libraries(sunpack_sevenzip_core PUBLIC OleAut32 Ole32)
 endif()
 
 add_library(sunpack_sevenzip SHARED
@@ -79,7 +79,7 @@ target_include_directories(sunpack_sevenzip
 
 if(WIN32)
     target_compile_definitions(sunpack_sevenzip PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUP7Z_BUILD_DLL)
-    target_link_libraries(sunpack_sevenzip PRIVATE OleAut32)
+    target_link_libraries(sunpack_sevenzip PRIVATE OleAut32 Ole32)
 endif()
 
 add_executable(sunpack_sevenzip_smoke

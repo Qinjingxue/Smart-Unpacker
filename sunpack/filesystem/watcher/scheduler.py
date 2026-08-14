@@ -193,15 +193,7 @@ class WatchScheduler:
         self._pending: dict[str, WatchCandidate] = {}
         self._inflight_requests: list[_ActivePipelineRequest] = []
         self._completion_requests: list[_ActiveCompletion] = []
-        pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
-        configured_completions = pipeline_config.get("max_active_pipeline_requests")
-        self._completion_workers = (
-            max(1, int(configured_completions))
-            if configured_completions is not None
-            else max(2, min(4, os.cpu_count() or 1))
-        )
         self._completion_pool = ThreadPoolExecutor(
-            max_workers=self._completion_workers,
             thread_name_prefix="sunpack-watch-completion",
         )
         self._active_states: dict[str, _ActiveCandidateState] = {}
@@ -284,7 +276,6 @@ class WatchScheduler:
             return
         if getattr(self._completion_pool, "_shutdown", False):
             self._completion_pool = ThreadPoolExecutor(
-                max_workers=self._completion_workers,
                 thread_name_prefix="sunpack-watch-completion",
             )
         self._ensure_directory_password_files()

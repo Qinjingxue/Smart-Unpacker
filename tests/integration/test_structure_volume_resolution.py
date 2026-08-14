@@ -498,7 +498,7 @@ def test_encrypted_plain_and_sfx_volume_matrix_with_shared_stem_and_noisy_suffix
             {
                 "repair": {"enabled": False},
                 "verification": {"enabled": False, "methods": []},
-                "process": {"persistent_worker_count": 1},
+                "process": {},
             },
             precheck=[
                 {"name": "size_range", "enabled": True, "gte": 0},
@@ -539,7 +539,7 @@ def test_encrypted_plain_and_sfx_volume_matrix_with_shared_stem_and_noisy_suffix
     DirectoryPasswordContextStore(config).annotate(planned_tasks)
     extractor = ExtractionScheduler(
         max_retries=1,
-        process_config={"persistent_worker_count": 1},
+        process_config={},
         extraction_config=config.get("extraction"),
     )
     try:

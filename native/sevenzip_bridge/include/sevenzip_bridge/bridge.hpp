@@ -3,8 +3,12 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <memory>
+#include <atomic>
 
 namespace sunpack::sevenzip {
+
+class AsyncFileWriter;
 
 enum class PasswordTestStatus {
     Ok,
@@ -210,7 +214,10 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = nullptr,
     bool dry_run = false,
-    const std::vector<std::wstring>& canonical_names = {}
+    const std::vector<std::wstring>& canonical_names = {},
+    std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
+    std::size_t job_buffer_budget = 0,
+    std::shared_ptr<std::atomic<bool>> cancel_token = nullptr
 );
 
 ExtractArchiveResult extract_archive_with_ranges(
@@ -223,7 +230,10 @@ ExtractArchiveResult extract_archive_with_ranges(
     const std::wstring& codepage,
     const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = {},
-    bool dry_run = false
+    bool dry_run = false,
+    std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
+    std::size_t job_buffer_budget = 0,
+    std::shared_ptr<std::atomic<bool>> cancel_token = nullptr
 );
 
 ExtractArchiveResult extract_archive_with_patches(
@@ -238,7 +248,10 @@ ExtractArchiveResult extract_archive_with_patches(
     const std::wstring& codepage,
     const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = {},
-    bool dry_run = false
+    bool dry_run = false,
+    std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
+    std::size_t job_buffer_budget = 0,
+    std::shared_ptr<std::atomic<bool>> cancel_token = nullptr
 );
 
 const char* status_name(PasswordTestStatus status);

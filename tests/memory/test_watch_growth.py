@@ -53,17 +53,9 @@ def _watch_memory_config() -> dict:
     config["performance"] = {
         **(config.get("performance") or {}),
         "persistent_workers": True,
-        "persistent_worker_count": 2,
+        "native_max_queue_jobs": 64,
     }
-    config["pipeline"] = {
-        **(config.get("pipeline") or {}),
-        "max_active_pipeline_requests": env_int(
-            "SUNPACK_WATCH_MEMORY_MAX_ACTIVE_PIPELINES",
-            1,
-            minimum=1,
-        ),
-        "queue_capacity": 64,
-    }
+    config["pipeline"] = {**(config.get("pipeline") or {}), "queue_capacity": 64}
     return config
 
 

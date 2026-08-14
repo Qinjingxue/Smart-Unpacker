@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from sunpack.coordinator.scheduling import ConcurrencyScheduler
 from sunpack.coordinator.task_scan import _group_explicit_split_paths, direct_file_task
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 
@@ -47,27 +46,3 @@ def test_direct_file_arguments_group_explicit_zero_based_split_volumes_without_d
     assert task.main_path == str(parts[0])
     assert task.all_parts == [str(part) for part in parts]
     assert task.split_info.is_split
-
-
-def test_scheduler_uses_current_backlog_floor_and_scale_up_step():
-    scheduler = ConcurrencyScheduler(
-        {
-            "initial_concurrency_limit": 2,
-            "scale_up_threshold_mb_s": 10,
-            "scale_up_backlog_threshold_mb_s": 20,
-            "scale_down_threshold_mb_s": 100,
-            "scale_up_streak_required": 1,
-            "scale_down_streak_required": 1,
-            "medium_backlog_threshold": 2,
-            "high_backlog_threshold": 4,
-            "medium_floor_workers": 3,
-            "high_floor_workers": 5,
-        },
-        current_limit=2,
-        max_workers=8,
-    )
-    scheduler.pending_task_estimate = 40
-    scheduler.adjust_once(0)
-
-    assert scheduler.dynamic_floor_workers == 5
-    assert scheduler.current_limit == 5
