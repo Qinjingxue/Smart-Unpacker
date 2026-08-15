@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import asyncio
+import functools
 import os
 import random
 import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -16,7 +18,7 @@ from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from sunpack.filesystem.watcher.scheduler import WatchRunResult, WatchScheduler
 from tests.helpers.watch_memory import WatchMemorySampler as MemorySampler
-from tests.helpers.marker_utils import marker_was_extracted
+from tests.helpers.marker_utils import marker_scan_state
 from tests.helpers.real_archives import (
     ArchiveCase,
     ArchiveFixtureFactory,
@@ -46,6 +48,80 @@ SFX_FORMATS = ("7z", "zip", "rar")
 SPLIT_FORMATS = ("7z", "zip", "rar")
 
 FACTORY = ArchiveFixtureFactory()
+
+
+class Plan7Timing:
+    """按阶段记录一个 plan7 测试内部的耗时，用于定位测试慢的原因。"""
+
+    def __init__(self) -> None:
+        self._phases: dict[str, list[float]] = {}
+
+    def record(self, phase: str, seconds: float) -> None:
+        self._phases.setdefault(phase, []).append(seconds)
+
+    @contextmanager
+    def measure(self, phase: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(phase, time.perf_counter() - started)
+
+    def summary(self) -> dict[str, dict[str, float]]:
+        return {
+            name: {
+                "calls": len(values),
+                "total": round(sum(values), 4),
+                "max": round(max(values), 4),
+            }
+            for name, values in self._phases.items()
+        }
+
+    def report(self, title: str = "plan7 timing") -> str:
+        rows = sorted(
+            (
+                (name, len(values), sum(values), max(values))
+                for name, values in self._phases.items()
+            ),
+            key=lambda row: row[2],
+            reverse=True,
+        )
+        lines = [f"== {title} =="]
+        for name, calls, total, peak in rows:
+            lines.append(f"  {name:<42s} {calls:>4d}x  {total:9.3f}s  (max {peak:9.3f}s)")
+        return "\n".join(lines)
+
+
+# 归档夹具生成耗时（build_*_cases 在 start_watch 之前执行，单独累计）。
+FIXTURE_BUILD_TIMING: dict[str, float] = {}
+_FIXTURE_TIMING_LAST_PRINTED: dict[str, float] = {}
+
+
+def fixture_build_deltas() -> dict[str, float]:
+    """FIXTURE_BUILD_TIMING 自上次调用以来的增量（按 pytest 进程内测试划分）。"""
+    deltas = {
+        key: round(value - _FIXTURE_TIMING_LAST_PRINTED.get(key, 0.0), 3)
+        for key, value in FIXTURE_BUILD_TIMING.items()
+    }
+    _FIXTURE_TIMING_LAST_PRINTED.update(FIXTURE_BUILD_TIMING)
+    return deltas
+
+
+def _recorded_fixture_build(key: str):
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                FIXTURE_BUILD_TIMING[key] = (
+                    FIXTURE_BUILD_TIMING.get(key, 0.0) + time.perf_counter() - started
+                )
+
+        return wrapper
+
+    return decorate
 
 
 @dataclass
@@ -79,30 +155,39 @@ class WatchHarness:
     loop: asyncio.AbstractEventLoop | None = None
     delegate: PipelineEngine | None = None
     async_stop: Any = None
+    run_durations: list[float] = field(default_factory=list)
+    timer: Plan7Timing = field(default_factory=Plan7Timing)
+    label: str = "watch"
 
     def close(self) -> None:
         if self.loop is None:
             return
-        if self.async_stop is not None:
-            self.loop.run_until_complete(self.async_stop())
-        if self.delegate is not None:
-            self.loop.run_until_complete(self.delegate.aclose())
-        self.loop.close()
-        self.loop = None
+        with self.timer.measure("watch_close"):
+            if self.async_stop is not None:
+                self.loop.run_until_complete(self.async_stop())
+            if self.delegate is not None:
+                self.loop.run_until_complete(self.delegate.aclose())
+            self.loop.close()
+            self.loop = None
+        print(self.timer.report(f"plan7 timing ({self.label})"))
 
 
 class _TimedPipelineEngine:
-    """记录 pipeline 提交次数，用于断言每个完成的归档恰好提交一次。"""
+    """记录 pipeline 提交次数与每次提交耗时，用于断言与耗时分析。"""
 
     def __init__(
         self,
         delegate: PipelineEngine,
         submit_times: list[float],
         submission_events: list[SubmissionEvent],
+        run_durations: list[float],
+        timer: Plan7Timing,
     ):
         self.delegate = delegate
         self.submit_times = submit_times
         self.submission_events = submission_events
+        self.run_durations = run_durations
+        self.timer = timer
 
     async def run(self, *args, **kwargs):
         submitted_at = time.perf_counter()
@@ -115,7 +200,13 @@ class _TimedPipelineEngine:
                 for target in targets
             ),
         ))
-        return await self.delegate.run(*args, **kwargs)
+        started = time.perf_counter()
+        try:
+            return await self.delegate.run(*args, **kwargs)
+        finally:
+            duration = time.perf_counter() - started
+            self.run_durations.append(duration)
+            self.timer.record("pipeline_run", duration)
 
     def __getattr__(self, name):
         return getattr(self.delegate, name)
@@ -179,6 +270,7 @@ def wrong_password_list() -> list[str]:
     return [f"wrong-{index:02d}" for index in range(WRONG_PASSWORD_COUNT)]
 
 
+@_recorded_fixture_build("plain_sfx")
 def build_plain_sfx_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     """普通压缩包（zip/rar/7z 加密 + tar/流格式）与 SFX 压缩包。"""
     cases: dict[str, Plan7Case] = {}
@@ -216,6 +308,7 @@ def build_plain_sfx_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     return cases, skipped
 
 
+@_recorded_fixture_build("split")
 def build_split_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     """各种形式分卷压缩包与 SFX 分卷压缩包（全部加密）。"""
     cases: dict[str, Plan7Case] = {}
@@ -245,6 +338,7 @@ def build_split_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     return cases, skipped
 
 
+@_recorded_fixture_build("variants")
 def build_encryption_variant_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     """Build watch cases for encryption/header and RAR generation variants."""
     root = Path(root)
@@ -322,6 +416,7 @@ def build_encryption_variant_cases(root: Path) -> tuple[dict[str, Plan7Case], li
     return cases, skipped
 
 
+@_recorded_fixture_build("disguised")
 def build_disguised_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     """Build extension-disguised and carrier-prefixed watch inputs."""
     cases: dict[str, Plan7Case] = {}
@@ -351,6 +446,7 @@ def build_disguised_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     return cases, skipped
 
 
+@_recorded_fixture_build("embedded")
 def build_embedded_watch_cases(root: Path) -> tuple[dict[str, Plan7Case], list[str]]:
     """Build three independent files, each containing one archive format."""
     cases: dict[str, Plan7Case] = {}
@@ -407,28 +503,39 @@ def start_watch(
     config["post_extract"]["archive_cleanup_mode"] = cleanup_mode
     submit_times: list[float] = []
     submission_events: list[SubmissionEvent] = []
+    run_durations: list[float] = []
+    timer = Plan7Timing()
     loop = asyncio.new_event_loop()
     delegate = PipelineEngine(config)
-    loop.run_until_complete(delegate.__aenter__())
-    engine = _TimedPipelineEngine(delegate, submit_times, submission_events)
-    watcher = WatchScheduler(
-        config,
-        [str(watch_root)],
-        out_dir=str(output_root),
-        state_path=str(state_path or (tmp_path / label / "state.json")),
-        quiet_seconds=quiet_seconds,
-        initial_scan=initial_scan,
-        pipeline_engine=engine,
-        group_coordinator=WatchGroupCoordinator(config),
-    )
+    with timer.measure("watch_engine_start"):
+        loop.run_until_complete(delegate.__aenter__())
+    engine = _TimedPipelineEngine(delegate, submit_times, submission_events, run_durations, timer)
+    with timer.measure("watch_scheduler_init"):
+        watcher = WatchScheduler(
+            config,
+            [str(watch_root)],
+            out_dir=str(output_root),
+            state_path=str(state_path or (tmp_path / label / "state.json")),
+            quiet_seconds=quiet_seconds,
+            initial_scan=initial_scan,
+            pipeline_engine=engine,
+            group_coordinator=WatchGroupCoordinator(config),
+        )
     async_run_once = watcher.run_once
     async_start = watcher.start
     async_stop = watcher.stop
-    watcher.run_once = lambda: loop.run_until_complete(async_run_once())
+
+    async def _timed_run_once() -> WatchRunResult:
+        with timer.measure("watch_tick"):
+            return await async_run_once()
+
+    watcher.run_once = lambda: loop.run_until_complete(_timed_run_once())
     watcher.start = lambda: loop.run_until_complete(async_start())
     watcher.stop = lambda: loop.run_until_complete(async_stop())
+    watcher._plan7_timer = timer
     if initial_scan:
-        watcher.start()
+        with timer.measure("watch_initial_scan"):
+            watcher.start()
     return WatchHarness(
         watch_root=watch_root,
         output_root=output_root,
@@ -437,9 +544,13 @@ def start_watch(
         watcher=watcher,
         submit_times=submit_times,
         submission_events=submission_events,
+        stable_at_by_name={},
         loop=loop,
         delegate=delegate,
         async_stop=async_stop,
+        run_durations=run_durations,
+        timer=timer,
+        label=label,
     )
 
 
@@ -460,21 +571,30 @@ def arrive_slowly(
     write_path = tmp if write_mode == "rename_commit" else destination
     existing_size = write_path.stat().st_size if resume and write_path.exists() else 0
     open_mode = "ab" if existing_size else "wb"
+    arrived_at = time.perf_counter()
     with source.open("rb") as reader, write_path.open(open_mode) as writer:
         if existing_size:
             reader.seek(existing_size)
         chunks_seen = 0
         while chunk := reader.read(DOWNLOAD_CHUNK_SIZE):
+            write_started_at = time.perf_counter()
             writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
+            harness.timer.record("arrive_write", time.perf_counter() - write_started_at)
             chunks_seen += 1
+            enqueue_started_at = time.perf_counter()
             harness.watcher.enqueue(str(write_path), event_type="modified")
+            harness.timer.record("arrive_enqueue", time.perf_counter() - enqueue_started_at)
             tick_started_at = time.perf_counter()
             harness.watcher.run_once()
             if tick_latencies is not None:
                 tick_latencies.append(time.perf_counter() - tick_started_at)
             if interrupt_after_chunks is not None and chunks_seen >= interrupt_after_chunks:
+                harness.timer.record(
+                    f"arrive:{source.name}",
+                    time.perf_counter() - arrived_at,
+                )
                 return WatchRunResult(pending=harness.watcher.pending_count)
             time.sleep(CHUNK_DELAY_SECONDS)
     if write_mode == "rename_commit":
@@ -491,6 +611,7 @@ def arrive_slowly(
     result = harness.watcher.run_once()
     if tick_latencies is not None:
         tick_latencies.append(time.perf_counter() - tick_started_at)
+    harness.timer.record(f"arrive:{source.name}", time.perf_counter() - arrived_at)
     return result
 
 
@@ -515,6 +636,7 @@ def arrive_interleaved(
             "tmp": tmp,
             "destination": destination,
             "write_mode": write_mode,
+            "started_at": time.perf_counter(),
         })
     stable: dict[str, float] = {}
     try:
@@ -523,11 +645,15 @@ def arrive_interleaved(
             for state in list(active):
                 chunk = state["reader"].read(DOWNLOAD_CHUNK_SIZE)
                 if chunk:
+                    write_started_at = time.perf_counter()
                     state["writer"].write(chunk)
                     state["writer"].flush()
                     os.fsync(state["writer"].fileno())
+                    harness.timer.record("arrive_write", time.perf_counter() - write_started_at)
                     path = state["tmp"] if write_mode == "rename_commit" else state["destination"]
+                    enqueue_started_at = time.perf_counter()
                     harness.watcher.enqueue(str(path), event_type="modified")
+                    harness.timer.record("arrive_enqueue", time.perf_counter() - enqueue_started_at)
                     tick_started_at = time.perf_counter()
                     harness.watcher.run_once()
                     if tick_latencies is not None:
@@ -546,6 +672,10 @@ def arrive_interleaved(
                 stable_at = time.perf_counter()
                 stable[state["destination"].name] = stable_at
                 harness.stable_at_by_name[state["destination"].name] = stable_at
+                harness.timer.record(
+                    f"arrive:{state['source'].name}",
+                    stable_at - state["started_at"],
+                )
                 harness.watcher.enqueue(
                     str(state["destination"]),
                     event_type=event_type,
@@ -609,12 +739,18 @@ def marker_text_extracted(
     *,
     retries: int = 4,
 ) -> bool:
-    """marker_was_extracted 的容错版：解压完成瞬间文件可能仍被占用，重试读取。"""
+    """marker_was_extracted 的容错版：只在候选 marker 文件存在但读取失败时重试。
+
+    解压完成瞬间文件可能仍被占用（读失败），此时短暂重试。文件不存在则立即
+    返回 False、不 sleep——否则轮询阶段每 10ms 一次的条件检查会反复阻塞驱动
+    事件循环的线程，饿死正在后台执行的 pipeline 任务。
+    """
     for _ in range(retries):
-        if marker_was_extracted(root, marker_name, marker_text):
-            return True
+        state = marker_scan_state(root, marker_name, marker_text)
+        if state != "locked":
+            return state == "found"
         time.sleep(0.05)
-    return marker_was_extracted(root, marker_name, marker_text)
+    return marker_scan_state(root, marker_name, marker_text) == "found"
 
 
 def drive_watch_until(
@@ -624,6 +760,7 @@ def drive_watch_until(
     timeout_seconds: float = MAX_COMPLETION_LATENCY_SECONDS,
 ) -> WatchRunResult:
     """轮询 run_once 直到条件成立且无在途/待收尾请求。"""
+    timer = getattr(watcher, "_plan7_timer", None)
     deadline = time.perf_counter() + timeout_seconds
     combined = WatchRunResult()
     while time.perf_counter() < deadline:
@@ -635,7 +772,11 @@ def drive_watch_until(
         combined.errors.extend(result.errors)
         with watcher._lock:
             inflight = bool(watcher._inflight_requests)
-        if condition() and watcher.pending_count == 0 and not inflight:
+        condition_started_at = time.perf_counter()
+        settled = condition()
+        if timer is not None:
+            timer.record("drive_condition", time.perf_counter() - condition_started_at)
+        if settled and watcher.pending_count == 0 and not inflight:
             return combined
         time.sleep(0.01)
     pytest.fail(
@@ -657,10 +798,11 @@ def assert_plan7_success(
 ) -> None:
     """第 7 条主断言：全部归档完成、无失败、不重复提交，且内存随到达数量被记录。"""
     root = harness.output_root
-    for plan7_case in cases.values():
-        assert marker_text_extracted(root, plan7_case.case.marker_name, plan7_case.case.marker_text), (
-            f"marker missing for {plan7_case.key}: {plan7_case.case.marker_name}"
-        )
+    with harness.timer.measure("assert_marker_checks"):
+        for plan7_case in cases.values():
+            assert marker_text_extracted(root, plan7_case.case.marker_name, plan7_case.case.marker_text), (
+                f"marker missing for {plan7_case.key}: {plan7_case.case.marker_name}"
+            )
     assert not any(harness.watcher.state.entries.values()), "watch state must not retain failures"
     assert harness.submit_times, "pipeline never submitted any archive"
 
@@ -704,7 +846,9 @@ def assert_plan7_success(
             if path.name == ".sunpack-passwords.txt":
                 continue
             harness.watcher.enqueue(str(path))
+    replay_started_at = time.perf_counter()
     replay = drive_watch_until(harness.watcher, lambda: True, timeout_seconds=10)
+    harness.timer.record("replay_drive", time.perf_counter() - replay_started_at)
     assert replay.processed == 0, replay
     assert len(harness.submit_times) == submissions_after_success, harness.submit_times
 
@@ -721,6 +865,9 @@ def assert_plan7_success(
         error_info.update({
             "completed_archives": completed_count,
             "pipeline_submissions": len(harness.submit_times),
+            "pipeline_run_seconds": [round(duration, 3) for duration in harness.run_durations],
+            "fixture_build_seconds": dict(FIXTURE_BUILD_TIMING),
+            "timing": harness.timer.summary(),
             "tick_count": len(tick_latencies),
             "max_tick_latency_ms": round(max(tick_latencies) * 1000, 3),
             "completion_latencies": {
@@ -740,6 +887,18 @@ def assert_plan7_success(
     if record_property is not None:
         record_property("archive_count", completed_count)
         record_property("pipeline_submissions", len(harness.submit_times))
+        record_property(
+            "pipeline_run_seconds",
+            json.dumps([round(duration, 3) for duration in harness.run_durations], ensure_ascii=False),
+        )
+        record_property(
+            "fixture_build_seconds",
+            json.dumps(FIXTURE_BUILD_TIMING, ensure_ascii=False),
+        )
+        record_property(
+            "plan7_timing",
+            json.dumps(harness.timer.summary(), ensure_ascii=False),
+        )
         record_property(
             "reaction_latencies",
             json.dumps({
@@ -766,6 +925,16 @@ def assert_plan7_success(
                 for item in timeline
             )
         )
+    print(
+        f"\nplan7 pipeline runs ({len(harness.run_durations)} submissions): "
+        + ", ".join(f"{duration:.2f}s" for duration in harness.run_durations)
+    )
+    build_deltas = fixture_build_deltas()
+    if build_deltas:
+        print(
+            "plan7 fixture build: "
+            + ", ".join(f"{key}={seconds:.2f}s" for key, seconds in build_deltas.items())
+        )
 
 
 __all__ = [
@@ -779,6 +948,9 @@ __all__ = [
     "SFX_FORMATS",
     "SPLIT_FORMATS",
     "Plan7Case",
+    "Plan7Timing",
+    "FIXTURE_BUILD_TIMING",
+    "fixture_build_deltas",
     "WatchHarness",
     "SubmissionEvent",
     "MemorySampler",
