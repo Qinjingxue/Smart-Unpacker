@@ -422,11 +422,19 @@ class _AsyncNativeWorkerProcess:
             return
         self.worker_epoch = uuid.uuid4().hex
         environment = _apply_native_environment(os.environ.copy(), self.process_config)
+        # The native worker reports each finished job as a single JSON line on
+        # stdout whose size grows with the extracted file count.  asyncio's
+        # default StreamReader limit is 64 KiB; a result line that exceeds it
+        # raises LimitOverrunError inside readline(), silently killing the
+        # stdout dispatcher and leaving every pending job future unresolved.
+        # Raise the per-line cap so large archives (thousands of entries) can
+        # complete instead of hanging the pipeline after extraction finishes.
         self.process = await asyncio.create_subprocess_exec(
             self.worker_path,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=64 * 1024 * 1024,
             startupinfo=self.startupinfo,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             cwd=runtime_working_directory(),

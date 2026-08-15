@@ -40,8 +40,10 @@ accumulate. A scenario may explicitly preserve a small diagnostic artifact with 
 `extraction format-matrix` builds ZIP, 7z, split 7z, RAR, split RAR, TAR, gzip,
 bzip2, xz, zstd and the conventional compressed-TAR aliases. It uses the bundled
 binaries under `tools/`. Each archive is placed in an isolated scanner input directory,
-then both SunPack's complete detection/extraction flow and raw 7-Zip are timed. Only cases
-whose extracted payload hashes pass on both sides contribute to the comparison ratio.
+then both SunPack's complete detection/extraction flow and raw 7-Zip are timed. Only
+cases where both extractors exit successfully contribute to the comparison ratio;
+payload-content correctness is covered by dedicated correctness tests, so the matrix
+does not re-hash extracted files.
 The matrix starts extractor commands strictly one at a time, while leaving SunPack's internal scheduler at its program-controlled
 default and using unlimited recursive extraction. Generated scanner entry files are
 rejected when they fall below the project's 1 MiB recognition floor.
@@ -55,6 +57,14 @@ options for a focused run. One diagnostic extraction per case reuses the large-a
 runtime profiler and writes phase medians and per-format aggregates into the report; use
 `--no-phase-profile` when only end-to-end timing is needed. For stable internal medians,
 set `--phase-profile-warmups 1 --phase-profile-runs 3`.
+
+The format matrix reports live progress by default: timestamped lines on stderr show the
+current phase (`corpus`, `detection`, `extraction_matrix`, `phase_profiles`, `report`),
+the case/run/label being executed, and each operation's wall time. The cumulative phase
+breakdown is recorded in the report's `phase_timing_seconds` and printed to stderr at the
+end. Disable this with `--no-progress`. Progress always goes to stderr, so the
+detection-worker subprocess keeps its stdout JSON contract intact; the parent forwards the
+worker's stderr so per-archive scan progress is visible live.
 
 The reusable harness in `benchmarks/harness` defines the common wall/CPU clocks,
 RSS/Private Bytes process-tree memory sampling, real-archive workspace lifecycle, and

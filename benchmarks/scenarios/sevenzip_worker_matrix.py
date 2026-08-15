@@ -65,10 +65,8 @@ def _volume_paths(item: dict[str, Any]) -> list[Path]:
 
 
 def _payload_bytes(item: dict[str, Any]) -> int | None:
-    expected = item.get("expected_payload")
-    if not isinstance(expected, list):
-        return None
-    return sum(int(row.get("bytes", 0)) for row in expected if isinstance(row, dict))
+    value = item.get("expected_payload_bytes")
+    return int(value) if isinstance(value, (int, float)) and value > 0 else None
 
 
 def _output_summary(path: Path) -> dict[str, int]:

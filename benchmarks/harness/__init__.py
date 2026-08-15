@@ -1,6 +1,7 @@
 from .memory import ProcessSample, ProcessSampler, bytes_to_mib
 from .native import metrics_delta
 from .pressure import AdaptivePressureGate, PressureWait
+from .progress import PhaseReporter
 from .reporting import BenchmarkReport, render_report, report_from_payload, write_report
 from .timing import Measurement, measure
 from .workspace import BenchmarkWorkspace, WorkspacePaths
@@ -10,6 +11,7 @@ __all__ = [
     "BenchmarkWorkspace",
     "AdaptivePressureGate",
     "Measurement",
+    "PhaseReporter",
     "ProcessSample",
     "ProcessSampler",
     "PressureWait",

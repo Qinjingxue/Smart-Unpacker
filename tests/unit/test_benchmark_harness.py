@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 
 from benchmarks.cli import main
-from benchmarks.harness import AdaptivePressureGate, BenchmarkReport, BenchmarkWorkspace, ProcessSampler, measure, render_report
+from benchmarks.harness import (
+    AdaptivePressureGate,
+    BenchmarkReport,
+    BenchmarkWorkspace,
+    PhaseReporter,
+    ProcessSampler,
+    measure,
+    render_report,
+)
 from benchmarks.scenarios.extraction_format_matrix import _cached_corpus, _phase_aggregates
 
 
@@ -118,6 +126,47 @@ def test_phase_aggregates_report_slowest_phases_by_format():
     assert aggregate["zip"]["top_phases"][0] == {"phase": "extract_total", "median_seconds": 2.0}
 
 
+def test_phase_reporter_times_phases_and_emits_timestamped_lines():
+    import io
+
+    stream = io.StringIO()
+    reporter = PhaseReporter(stream=stream)
+
+    with reporter.phase("first"):
+        pass
+    with reporter.phase("second"):
+        pass
+    reporter.record("second", 0.25)
+
+    totals = reporter.totals()
+    assert set(totals) == {"first", "second"}
+    assert totals["first"] > 0
+    assert totals["second"] > 0.25
+    summary = reporter.render_summary()
+    assert "first" in summary and "second" in summary
+
+    output = stream.getvalue()
+    assert "first: done in" in output
+    assert "second: done in" in output
+    import re
+
+    assert re.search(r"^\[\d{2}:\d{2}:\d{2}\] first: done in", output, re.MULTILINE)
+
+
+def test_phase_reporter_disabled_emits_nothing():
+    import io
+
+    stream = io.StringIO()
+    reporter = PhaseReporter(enabled=False, stream=stream)
+
+    with reporter.phase("first"):
+        pass
+    reporter.note("ignored")
+
+    assert stream.getvalue() == ""
+    assert reporter.totals() == {}
+
+
 def test_format_matrix_corpus_cache_reuses_generated_archives(tmp_path, monkeypatch):
     calls = []
 
@@ -127,7 +176,7 @@ def test_format_matrix_corpus_cache_reuses_generated_archives(tmp_path, monkeypa
         archive.parent.mkdir(parents=True)
         archive.write_bytes(b"cached archive")
         return ({"many_small:zip": {
-            "workload": "many_small", "format": "zip", "path": archive, "expected_payload": [],
+            "workload": "many_small", "format": "zip", "path": archive, "expected_payload_bytes": 14,
         }}, {})
 
     monkeypatch.setattr("benchmarks.scenarios.extraction_format_matrix.create_corpus", fake_create)
