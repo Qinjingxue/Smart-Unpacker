@@ -243,6 +243,27 @@ impl AnalysisBinaryView {
             } else if index == 1 {
                 result.set_item("block_walk_ok", true)?;
             }
+            // A validated plaintext main header that declares MHD_PASSWORD
+            // (0x0080) means every following header is encrypted, so the block
+            // walk cannot continue without the password.  Mirror the RAR5
+            // encryption-header handling: this is strong structural evidence
+            // of a password-protected archive, and reporting a truncated
+            // chain here would misclassify a valid encrypted archive.  Stop at
+            // the end of the main header (segment_end == 0 tells the caller to
+            // derive the segment end from the next archive boundary) and let
+            // extraction retry with the password.
+            if index == 0 && header_flags & 0x0080 != 0 {
+                evidence.append("rar4:encryption_header")?;
+                result.set_item("plausible", true)?;
+                result.set_item("strong_accept", true)?;
+                result.set_item("header_encrypted", true)?;
+                result.set_item("password_required", true)?;
+                result.set_item("block_walk_ok", true)?;
+                result.set_item("blocks_checked", 1usize)?;
+                result.set_item("segment_end", 0u64)?;
+                result.set_item("evidence", evidence)?;
+                return Ok(());
+            }
             if header_type == 0x7B {
                 evidence.append("rar4:end_block")?;
                 result.set_item("plausible", true)?;

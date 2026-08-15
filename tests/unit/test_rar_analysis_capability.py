@@ -4,8 +4,8 @@ from binascii import crc32
 from sunpack.analysis import ArchiveAnalyzer, RarProbeOptions
 
 
-def _rar4_block(header_type: int) -> bytes:
-    body = bytes([header_type]) + struct.pack("<HH", 0, 7)
+def _rar4_block(header_type: int, flags: int = 0) -> bytes:
+    body = bytes([header_type]) + struct.pack("<HH", flags, 7)
     return struct.pack("<H", crc32(body) & 0xFFFF) + body
 
 
@@ -80,3 +80,31 @@ def test_public_rar_capability_reports_truncated_block_chain(tmp_path):
     assert raw["error"] == "rar4_block_size_out_of_range"
     assert "probably_truncated" in raw["damage_flags"]
     assert observation.boundary_confidence == "low"
+
+
+def test_public_rar_capability_accepts_header_encrypted_rar4_main_header(tmp_path):
+    """RAR4 header encryption (-hp) leaves the main header plaintext but sets
+    MHD_PASSWORD (0x0080): every following header is encrypted, so the probe
+    must stop at the end of the main header and report a password-protected
+    archive instead of misreading the encrypted file header as a truncated
+    block chain (regression for embedded rar4-header segments being dropped).
+    """
+    path = tmp_path / "header_encrypted.rar"
+    main_block = _rar4_block(0x73, flags=0x0080)
+    encrypted_file_header = b"\xd6\xd3\x77\xb9\xf7\x5d\xe8"  # ciphertext fields
+    path.write_bytes(b"Rar!\x1a\x07\x00" + main_block + encrypted_file_header)
+
+    raw = ArchiveAnalyzer().probe_rar(str(path)).to_raw_dict()
+
+    assert raw["magic_matched"] is True
+    assert raw["version"] == 4
+    assert raw["first_header_type"] == 0x73
+    assert raw["header_crc_checked"] is True
+    assert raw["header_crc_ok"] is True
+    assert raw["header_encrypted"] is True
+    assert raw["password_required"] is True
+    assert raw["block_walk_ok"] is True
+    assert raw["strong_accept"] is True
+    assert raw["error"] == ""
+    assert raw["segment_end"] == 0
+    assert raw["blocks_checked"] == 1
