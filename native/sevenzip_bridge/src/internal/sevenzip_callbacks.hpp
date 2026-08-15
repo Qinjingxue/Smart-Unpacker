@@ -1044,7 +1044,20 @@ public:
             return;
         }
 
-        async_writer_->finish_job(async_job_);
+        const HRESULT writer_error = async_writer_->finish_job(async_job_);
+        if (writer_error != S_OK) {
+            output_error_ = true;
+            const int win32_error = async_writer_->current_win32_error(async_job_);
+            mark_current_item_failure(writer_error, win32_error);
+            if (output_trace_) {
+                output_trace_->last_hresult = static_cast<int>(writer_error);
+                output_trace_->last_win32_error = win32_error;
+            }
+            if (operation_result_ == kOpOk) {
+                operation_result_ = kOpDataError;
+            }
+            return;
+        }
         UInt64 total_written = 0;
         UInt32 completed_files = 0;
         for (const auto& state : async_files_) {

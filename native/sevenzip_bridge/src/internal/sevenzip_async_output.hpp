@@ -29,18 +29,14 @@ public:
             : max_inflight_bytes(budget),
               cancel_token(std::move(external_cancel)) {}
 
-        std::atomic<HRESULT> first_error{S_OK};
-        std::atomic<int> first_win32_error{0};
-        std::atomic<std::size_t> inflight_bytes{0};
-        std::atomic<std::size_t> pending_jobs{0};
-        std::atomic<bool> cancelled{false};
+        // All scheduler state is protected by AsyncFileWriter::mutex_.
+        HRESULT first_error = S_OK;
+        int first_win32_error = 0;
+        std::size_t inflight_bytes = 0;
+        std::size_t pending_jobs = 0;
+        bool cancelled = false;
         const std::size_t max_inflight_bytes;
         std::shared_ptr<std::atomic<bool>> cancel_token;
-
-        bool is_cancelled() const noexcept {
-            return cancelled.load(std::memory_order_acquire) ||
-                (cancel_token && cancel_token->load(std::memory_order_acquire));
-        }
     };
 
     using JobStatePtr = std::shared_ptr<JobState>;
@@ -90,7 +86,7 @@ public:
         UInt32 item_index = 0;
         std::size_t trace_index = 0;
         std::atomic<UInt64> accepted_bytes{0};
-        std::atomic<std::size_t> inflight_bytes{0};
+        std::size_t inflight_bytes = 0;
         UInt64 written_bytes = 0;
         UInt32 output_crc32 = 0;
         Int32 operation_result = 0;
@@ -167,7 +163,11 @@ public:
         if (max_inflight_bytes == 0) {
             max_inflight_bytes = kDefaultJobInFlightBytes;
         }
-        return std::make_shared<JobState>(max_inflight_bytes, std::move(cancel_token));
+        auto job = std::make_shared<JobState>(max_inflight_bytes, std::move(cancel_token));
+        std::lock_guard<std::mutex> lock(mutex_);
+        synchronize_cancellation_locked(job);
+        active_jobs_.push_back(job);
+        return job;
     }
 
     FileStatePtr make_file(
@@ -210,26 +210,21 @@ public:
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 producer_cv_.wait(lock, [this, &job, &file] {
-                    return job->first_error.load(std::memory_order_acquire) != S_OK ||
-                        job->is_cancelled() ||
-                        stopping_ ||
-                        (!free_buffers_.empty() && queued_jobs_ < kMaxQueuedJobs &&
-                         job->inflight_bytes.load(std::memory_order_acquire) < job->max_inflight_bytes &&
-                         file->inflight_bytes.load(std::memory_order_acquire) < kDefaultFileInFlightBytes);
+                    return terminal_result_locked(job) != S_OK || can_accept_locked(job, file);
                 });
-                const HRESULT error = job->first_error.load(std::memory_order_acquire);
-                if (error != S_OK || job->is_cancelled() || stopping_) {
+                const HRESULT error = terminal_result_locked(job);
+                if (error != S_OK) {
                     if (processed_size) {
                         *processed_size = consumed;
                     }
-                    return error != S_OK ? error : E_ABORT;
+                    return error;
                 }
                 buffer = free_buffers_.front();
                 free_buffers_.pop_front();
                 const std::size_t job_available = job->max_inflight_bytes -
-                    (std::min)(job->inflight_bytes.load(std::memory_order_relaxed), job->max_inflight_bytes);
+                    (std::min)(job->inflight_bytes, job->max_inflight_bytes);
                 const std::size_t file_available = kDefaultFileInFlightBytes -
-                    (std::min)(file->inflight_bytes.load(std::memory_order_relaxed), kDefaultFileInFlightBytes);
+                    (std::min)(file->inflight_bytes, kDefaultFileInFlightBytes);
                 chunk_size = (std::min)({
                     static_cast<std::size_t>(size - consumed),
                     kBufferSize,
@@ -240,6 +235,8 @@ public:
                     free_buffers_.push_front(buffer);
                     continue;
                 }
+                job->inflight_bytes += chunk_size;
+                file->inflight_bytes += chunk_size;
             }
 
             const auto chunk = static_cast<UInt32>(chunk_size);
@@ -247,24 +244,44 @@ public:
             buffer->size = chunk;
             buffer->file = file;
 
+            HRESULT enqueue_result = S_OK;
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                const HRESULT error = job->first_error.load(std::memory_order_acquire);
-                if (error != S_OK || job->is_cancelled() || stopping_) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                const HRESULT error = terminal_result_locked(job);
+                if (error != S_OK) {
+                    job->inflight_bytes -= chunk;
+                    file->inflight_bytes -= chunk;
                     buffer->file.reset();
                     buffer->size = 0;
                     free_buffers_.push_back(buffer);
-                    producer_cv_.notify_all();
                     if (processed_size) {
                         *processed_size = consumed;
                     }
-                    return error != S_OK ? error : E_ABORT;
+                    enqueue_result = error;
+                } else {
+                    try {
+                        enqueue_file_job_locked(file, WorkItem::data(buffer));
+                    } catch (...) {
+                        job->inflight_bytes -= chunk;
+                        file->inflight_bytes -= chunk;
+                        buffer->file.reset();
+                        buffer->size = 0;
+                        free_buffers_.push_back(buffer);
+                        set_job_error_locked(job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+                        if (processed_size) {
+                            *processed_size = consumed;
+                        }
+                        enqueue_result = E_OUTOFMEMORY;
+                    }
                 }
-                enqueue_file_job_locked(file, WorkItem::data(buffer));
-                ++queued_jobs_;
-                ++job->pending_jobs;
-                job->inflight_bytes.fetch_add(chunk, std::memory_order_release);
-                file->inflight_bytes.fetch_add(chunk, std::memory_order_release);
+                if (enqueue_result == S_OK) {
+                    ++queued_jobs_;
+                    ++job->pending_jobs;
+                }
+            }
+            if (enqueue_result != S_OK) {
+                producer_cv_.notify_all();
+                return enqueue_result;
             }
             consumed += chunk;
             file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
@@ -286,18 +303,20 @@ public:
         if (!file) {
             return;
         }
-        file->output_crc32 = output_crc32;
-        file->has_output_crc32 = has_output_crc32;
-        file->magic = std::move(magic);
         try {
             std::unique_lock<std::mutex> lock(mutex_);
+            synchronize_cancellation_locked(file->job);
             producer_cv_.wait(lock, [this, &file] {
-                return stopping_ || file->job->is_cancelled() || queued_jobs_ < kMaxQueuedJobs;
+                return terminal_result_locked(file->job) != S_OK || queued_jobs_ < kMaxQueuedJobs;
             });
-            if (stopping_ || file->job->is_cancelled()) {
-                mark_file_failure(file, E_ABORT, ERROR_OPERATION_ABORTED);
+            const HRESULT error = terminal_result_locked(file->job);
+            if (error != S_OK) {
+                mark_file_failure_locked(file, error, current_win32_error_locked(file->job));
                 return;
             }
+            file->output_crc32 = output_crc32;
+            file->has_output_crc32 = has_output_crc32;
+            file->magic = std::move(magic);
             enqueue_file_job_locked(file, WorkItem::close(file));
             ++queued_jobs_;
             ++file->job->pending_jobs;
@@ -308,47 +327,73 @@ public:
         }
     }
 
-    void finish_job(const JobStatePtr& job) noexcept {
+    HRESULT finish_job(const JobStatePtr& job) noexcept {
         if (!job) {
-            return;
+            return E_FAIL;
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        synchronize_cancellation_locked(job);
         producer_cv_.wait(lock, [&job] {
-            return job->pending_jobs.load(std::memory_order_acquire) == 0;
+            return job->pending_jobs == 0;
         });
+        const HRESULT result = terminal_result_locked(job);
+        unregister_job_locked(job);
+        return result;
     }
 
     void cancel_job(const JobStatePtr& job) noexcept {
         if (!job) {
             return;
         }
-        job->cancelled.store(true, std::memory_order_release);
-        HRESULT expected = S_OK;
-        job->first_error.compare_exchange_strong(
-            expected, E_ABORT, std::memory_order_acq_rel, std::memory_order_acquire);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cancel_job_locked(job);
+        }
         producer_cv_.notify_all();
     }
 
-    // The worker owns the external cancellation token, while producers only
-    // wait on producer_cv_.  Wake all producer/finish waiters after the token
-    // changes so a Write() blocked on a full global/job/file budget observes
-    // cancellation immediately instead of waiting for the next IO release.
     void wake_waiters() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = active_jobs_.begin(); it != active_jobs_.end();) {
+                if (const auto job = it->lock()) {
+                    synchronize_cancellation_locked(job);
+                    ++it;
+                } else {
+                    it = active_jobs_.erase(it);
+                }
+            }
+        }
         producer_cv_.notify_all();
     }
 
-    HRESULT current_error(const JobStatePtr& job) const noexcept {
-        return job ? job->first_error.load(std::memory_order_acquire) : E_FAIL;
+    HRESULT current_error(const JobStatePtr& job) noexcept {
+        if (!job) {
+            return E_FAIL;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        synchronize_cancellation_locked(job);
+        return terminal_result_locked(job);
     }
 
-    int current_win32_error(const JobStatePtr& job) const noexcept {
-        return job ? job->first_win32_error.load(std::memory_order_acquire) : ERROR_INVALID_STATE;
+    int current_win32_error(const JobStatePtr& job) noexcept {
+        if (!job) {
+            return ERROR_INVALID_STATE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        synchronize_cancellation_locked(job);
+        return current_win32_error_locked(job);
     }
 
     void finish() noexcept {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
+            for (const auto& weak_job : active_jobs_) {
+                if (const auto job = weak_job.lock()) {
+                    cancel_job_locked(job);
+                }
+            }
         }
         work_cv_.notify_all();
         producer_cv_.notify_all();
@@ -375,14 +420,80 @@ private:
         return (std::min)(static_cast<std::size_t>(configured), kMaxWriterCount);
     }
 
-    void enqueue_file_job_locked(const FileStatePtr& file, WorkItem item) noexcept {
+    void set_job_error_locked(const JobStatePtr& job, HRESULT hr, int win32_error) noexcept {
+        if (job && job->first_error == S_OK) {
+            job->first_error = hr;
+            job->first_win32_error = win32_error;
+        }
+    }
+
+    void cancel_job_locked(const JobStatePtr& job) noexcept {
+        if (!job) {
+            return;
+        }
+        job->cancelled = true;
+        set_job_error_locked(job, E_ABORT, ERROR_OPERATION_ABORTED);
+    }
+
+    void synchronize_cancellation_locked(const JobStatePtr& job) noexcept {
+        if (job && job->cancel_token && job->cancel_token->load(std::memory_order_acquire)) {
+            cancel_job_locked(job);
+        }
+    }
+
+    HRESULT terminal_result_locked(const JobStatePtr& job) const noexcept {
+        if (!job) {
+            return E_FAIL;
+        }
+        if (job->first_error != S_OK) {
+            return job->first_error;
+        }
+        return (job->cancelled || stopping_) ? E_ABORT : S_OK;
+    }
+
+    int current_win32_error_locked(const JobStatePtr& job) const noexcept {
+        if (!job) {
+            return ERROR_INVALID_STATE;
+        }
+        if (job->first_win32_error != 0) {
+            return job->first_win32_error;
+        }
+        return (job->cancelled || stopping_) ? ERROR_OPERATION_ABORTED : 0;
+    }
+
+    bool can_accept_locked(const JobStatePtr& job, const FileStatePtr& file) const noexcept {
+        return job && file && !free_buffers_.empty() && queued_jobs_ < kMaxQueuedJobs &&
+            job->inflight_bytes < job->max_inflight_bytes &&
+            file->inflight_bytes < kDefaultFileInFlightBytes;
+    }
+
+    void unregister_job_locked(const JobStatePtr& job) noexcept {
+        for (auto it = active_jobs_.begin(); it != active_jobs_.end();) {
+            const auto candidate = it->lock();
+            if (!candidate || candidate.get() == job.get()) {
+                it = active_jobs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (last_writer_job_ == job.get()) {
+            last_writer_job_ = nullptr;
+        }
+    }
+
+    void enqueue_file_job_locked(const FileStatePtr& file, WorkItem item) {
         if (!file) {
             return;
         }
         file->pending.push_back(std::move(item));
         if (!file->ready && !file->writing) {
+            try {
+                ready_files_.push_back(file);
+            } catch (...) {
+                file->pending.pop_back();
+                throw;
+            }
             file->ready = true;
-            ready_files_.push_back(file);
         }
     }
 
@@ -414,6 +525,7 @@ private:
         for (;;) {
             WorkItem item;
             FileStatePtr file;
+            bool capacity_available = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 work_cv_.wait(lock, [this] { return stopping_ || !ready_files_.empty(); });
@@ -433,6 +545,9 @@ private:
                 item = std::move(file->pending.front());
                 file->pending.pop_front();
                 --queued_jobs_;
+                capacity_available = true;
+            }
+            if (capacity_available) {
                 producer_cv_.notify_all();
             }
 
@@ -448,8 +563,8 @@ private:
                 if (file) {
                     file->writing = false;
                     if (!file->pending.empty() && !file->ready) {
-                        file->ready = true;
                         ready_files_.push_back(file);
+                        file->ready = true;
                     }
                 }
             }
@@ -490,12 +605,10 @@ private:
         }
         const auto& file = buffer->file;
         const auto job = file->job;
-        if (job && job->is_cancelled() && !file->failed) {
-            mark_file_failure(file, E_ABORT, ERROR_OPERATION_ABORTED);
-        }
-        const HRESULT global_error = job ? job->first_error.load(std::memory_order_acquire) : E_FAIL;
-        if (global_error != S_OK && !file->failed) {
-            mark_file_failure(file, global_error, job ? job->first_win32_error.load(std::memory_order_acquire) : 0);
+        const HRESULT global_error = current_error(job);
+        if (global_error != S_OK) {
+            record_failure(file, global_error, current_win32_error(job));
+            return;
         }
         if (!open_file(file)) {
             return;
@@ -528,12 +641,9 @@ private:
             return;
         }
         const auto job = file->job;
-        if (job && job->is_cancelled() && !file->failed) {
-            mark_file_failure(file, E_ABORT, ERROR_OPERATION_ABORTED);
-        }
-        const HRESULT global_error = job ? job->first_error.load(std::memory_order_acquire) : E_FAIL;
-        if (global_error != S_OK && !file->failed) {
-            mark_file_failure(file, global_error, job ? job->first_win32_error.load(std::memory_order_acquire) : 0);
+        const HRESULT global_error = current_error(job);
+        if (global_error != S_OK) {
+            record_failure(file, global_error, current_win32_error(job));
         }
         if (!file->failed && file->handle == INVALID_HANDLE_VALUE) {
             open_file(file);
@@ -557,9 +667,12 @@ private:
                 record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
             }
         }
-        file->closed = true;
-        if (job) {
-            job->pending_jobs.fetch_sub(1, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            file->closed = true;
+            if (job && job->pending_jobs != 0) {
+                --job->pending_jobs;
+            }
         }
         producer_cv_.notify_all();
     }
@@ -570,36 +683,36 @@ private:
         }
         const auto file = buffer->file;
         const auto job = file ? file->job : nullptr;
-        if (file) {
-            file->inflight_bytes.fetch_sub(buffer->size, std::memory_order_release);
-        }
-        if (job) {
-            job->inflight_bytes.fetch_sub(buffer->size, std::memory_order_release);
-            job->pending_jobs.fetch_sub(1, std::memory_order_release);
-        }
-        buffer->file.reset();
-        buffer->size = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (file) {
+                file->inflight_bytes -= buffer->size;
+            }
+            if (job) {
+                job->inflight_bytes -= buffer->size;
+                if (job->pending_jobs != 0) {
+                    --job->pending_jobs;
+                }
+            }
+            buffer->file.reset();
+            buffer->size = 0;
             free_buffers_.push_back(buffer);
         }
         producer_cv_.notify_all();
     }
 
     void record_failure(const FileStatePtr& file, HRESULT hr, int win32_error) noexcept {
-        mark_file_failure(file, hr, win32_error);
-        if (!file || !file->job) {
-            return;
-        }
-        HRESULT expected = S_OK;
-        if (file->job->first_error.compare_exchange_strong(
-                expected, hr, std::memory_order_acq_rel, std::memory_order_acquire)) {
-            file->job->first_win32_error.store(win32_error, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            mark_file_failure_locked(file, hr, win32_error);
+            if (file && file->job) {
+                set_job_error_locked(file->job, hr, win32_error);
+            }
         }
         producer_cv_.notify_all();
     }
 
-    static void mark_file_failure(const FileStatePtr& file, HRESULT hr, int win32_error) noexcept {
+    static void mark_file_failure_locked(const FileStatePtr& file, HRESULT hr, int win32_error) noexcept {
         if (!file || file->failed) {
             return;
         }
@@ -612,6 +725,7 @@ private:
     std::deque<Buffer*> free_buffers_;
     std::vector<std::thread> workers_;
     std::deque<FileStatePtr> ready_files_;
+    std::vector<std::weak_ptr<JobState>> active_jobs_;
     mutable std::mutex mutex_;
     std::condition_variable producer_cv_;
     std::condition_variable work_cv_;
