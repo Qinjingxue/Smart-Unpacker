@@ -60,37 +60,51 @@ def parse_args() -> argparse.Namespace:
         help="IOCP scan workers; repeat to sweep values (default: 2).",
     )
     parser.add_argument("--sample-interval", type=float, default=0.1)
+    parser.add_argument("--cli-timeout", type=float, default=600.0, help="Wall-clock timeout for the CLI scan subprocess.")
     parser.add_argument("--results-root", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
     return parser.parse_args()
 
 
-def benchmark_cli(path: Path) -> dict:
+def benchmark_cli(path: Path, timeout_seconds: float) -> dict:
     environment = os.environ.copy()
     started = time.perf_counter_ns()
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "sunpack",
-            "scan",
-            "--json",
-            "--quiet",
-            "--no-pause",
-            str(path),
-        ],
-        cwd=REPO_ROOT,
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "sunpack",
+                "scan",
+                "--json",
+                "--quiet",
+                "--no-pause",
+                str(path),
+            ],
+            cwd=REPO_ROOT,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "wall_ms": round((time.perf_counter_ns() - started) / 1_000_000, 3),
+            "exit_code": -124,
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+        }
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     if completed.returncode:
         raise RuntimeError(
             f"sunpack scan failed ({completed.returncode}):\n{completed.stderr}"
         )
-    return {"wall_ms": round(elapsed_ms, 3), "exit_code": completed.returncode}
+    return {
+        "wall_ms": round(elapsed_ms, 3),
+        "exit_code": completed.returncode,
+        "timed_out": False,
+    }
 
 
 def benchmark_native(
@@ -210,7 +224,7 @@ def run_report(path: Path, args: argparse.Namespace, config: dict[str, object]) 
     return {
         "path": str(path),
         "size_bytes": path.stat().st_size,
-        "cli_scan": None if args.skip_cli else benchmark_cli(path),
+        "cli_scan": None if args.skip_cli else benchmark_cli(path, float(config.get("cli_timeout", 600.0))),
         "native_embedded_scan": benchmark_native(
             path,
             args.rounds,
@@ -235,6 +249,7 @@ def main() -> None:
             "iocp_chunk_mib": chunk,
             "iocp_buffers": buffers,
             "iocp_workers": workers,
+            "cli_timeout": args.cli_timeout,
         }
         for chunk in iocp_chunks
         for buffers in iocp_buffers

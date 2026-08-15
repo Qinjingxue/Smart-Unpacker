@@ -51,14 +51,22 @@ def output_summary(root: Path) -> dict:
 
 
 def sunpack_service_processes() -> list[psutil.Process]:
+    """Find the long-lived persistent server and the native 7z worker.
+
+    ``sunpack extract`` now delegates to a persistent server process; the CLI
+    client only waits for the streamed response.  The benchmark therefore has
+    to include the server (and its seven-zip worker child) in RSS accounting
+    explicitly, because the server may outlive the client process.
+    """
     members = []
     for process in psutil.process_iter(("name", "cmdline")):
         try:
             name = (process.info["name"] or "").lower()
             command = " ".join(process.info["cmdline"] or []).lower()
-            if name == "sunpack_sevenzip_worker.exe" or (
+            is_server = (
                 "sunpack.py" in command and "--persistent-server" in command
-            ):
+            ) or ("-m sunpack" in command and "--persistent-server" in command)
+            if name == "sunpack_sevenzip_worker.exe" or is_server:
                 members.append(process)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -81,8 +89,44 @@ def rss_for(processes: list[psutil.Process]) -> tuple[int, int]:
     return rss, live
 
 
-def run_measured(command: list[str], output_dir: Path, sample_ms: int) -> dict:
-    idle_service_rss, idle_service_count = rss_for(sunpack_service_processes())
+def _shutdown_persistent_server() -> None:
+    """Best-effort shutdown of the persistent server after a timed-out run."""
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "sunpack", "--persistent-shutdown"],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+        )
+    except Exception:
+        pass
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    try:
+        root = psutil.Process(process.pid)
+        for child in root.children(recursive=True):
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        root.kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def run_measured(command: list[str], output_dir: Path, sample_ms: int, timeout_seconds: float) -> dict:
+    # The first psutil walk with per-process cmdline can take >1s on a busy
+    # host (hundreds of processes), so it runs once here, before the client is
+    # spawned and outside the measured window.  The sampling loop below then
+    # only does cheap pid-liveness checks on the known service set.
+    services_baseline = sunpack_service_processes()
+    idle_service_rss, idle_service_count = rss_for(services_baseline)
     started = time.perf_counter()
     process = subprocess.Popen(
         command,
@@ -95,15 +139,23 @@ def run_measured(command: list[str], output_dir: Path, sample_ms: int) -> dict:
     peak_tree_rss = 0
     peak_process_count = 0
     samples = 0
+    timed_out = False
 
     while process.poll() is None:
+        if time.perf_counter() - started > timeout_seconds:
+            timed_out = True
+            break
         try:
             members = [root_process, *root_process.children(recursive=True)]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             members = []
-        services = sunpack_service_processes()
-        members.extend(services)
-        for service in services:
+        for service in services_baseline:
+            try:
+                if not service.is_running():
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            members.append(service)
             try:
                 members.extend(service.children(recursive=True))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -115,8 +167,16 @@ def run_measured(command: list[str], output_dir: Path, sample_ms: int) -> dict:
         time.sleep(sample_ms / 1000)
 
     elapsed = time.perf_counter() - started
+    if timed_out:
+        _terminate_process_tree(process)
+        process.wait(timeout=5)
+        # The extraction ran in the persistent server; shut it down so the
+        # next run starts from a clean, measurable baseline.
+        _shutdown_persistent_server()
     return {
-        "exit_code": process.returncode,
+        "exit_code": -124 if timed_out else process.returncode,
+        "timed_out": timed_out,
+        "timeout_seconds": timeout_seconds,
         "elapsed_seconds": elapsed,
         "peak_tree_rss_bytes": peak_tree_rss,
         "peak_tree_rss_mib": peak_tree_rss / 1024**2,
@@ -166,6 +226,7 @@ def main() -> int:
     parser.add_argument("--recursive", default="*", help="SunPack recursive extraction mode (default: *)")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--sample-ms", type=int, default=10)
+    parser.add_argument("--timeout", type=float, default=600.0, help="Per-run wall-clock timeout in seconds.")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--work-dir", type=Path)
     args = parser.parse_args()
@@ -173,6 +234,8 @@ def main() -> int:
     archive = args.archive.resolve()
     if not archive.is_file():
         parser.error(f"archive does not exist: {archive}")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     owned_temp = None
     if args.work_dir:
         work = args.work_dir.resolve()
@@ -191,6 +254,7 @@ def main() -> int:
                 command_for(archive, output, args.password, args.recursive),
                 output,
                 max(1, args.sample_ms),
+                args.timeout,
             )
             row["run"] = run + 1
             rows.append(row)
@@ -208,11 +272,13 @@ def main() -> int:
             "platform": sys.platform,
             "cpu_count": os.cpu_count(),
             "rss_sample_interval_ms": max(1, args.sample_ms),
+            "per_run_timeout_seconds": args.timeout,
         },
         "runs": {"sunpack": rows},
         "summary": {
             "sunpack": {
                 "successful_runs": sum(row["exit_code"] == 0 for row in rows),
+                "timed_out_runs": sum(bool(row.get("timed_out")) for row in rows),
                 "median_elapsed_seconds": median_success(rows, "elapsed_seconds"),
                 "median_peak_tree_rss_mib": median_success(rows, "peak_tree_rss_mib"),
                 "median_incremental_peak_rss_mib": median_success(rows, "incremental_peak_rss_mib"),

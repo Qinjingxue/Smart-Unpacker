@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
+import inspect
 import json
 import os
 import shutil
@@ -41,6 +43,14 @@ def _measure(timings: TimingMap, label: str, function: Callable[..., Any], *args
         timings[label].append(time.perf_counter() - started)
 
 
+async def _measure_async(timings: TimingMap, label: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    started = time.perf_counter()
+    try:
+        return await function(*args, **kwargs)
+    finally:
+        timings[label].append(time.perf_counter() - started)
+
+
 def _wrap(
     owner: Any,
     name: str,
@@ -52,6 +62,15 @@ def _wrap(
     if owner is None or not hasattr(owner, name):
         return
     original = getattr(owner, name)
+    if inspect.iscoroutinefunction(original):
+
+        async def measured_async(*args: Any, **kwargs: Any) -> Any:
+            if phase_timer is not None:
+                kwargs.setdefault("phase_timer", phase_timer)
+            return await _measure_async(timings, label or name, original, *args, **kwargs)
+
+        setattr(owner, name, measured_async)
+        return
 
     def measured(*args: Any, **kwargs: Any) -> Any:
         if phase_timer is not None:
@@ -227,7 +246,6 @@ class RequestRuntimeProfiler:
         _wrap(planning, "plan_tasks", timings, "input_planning")
         for name, label in (
             ("_planning_task_groups", "planning_group_tasks"),
-            ("_task_max_workers", "planning_worker_count"),
             ("_plan_task_group", "planning_plan_group"),
             ("_plan_task_to_tasks", "planning_plan_task"),
             ("_report_cache_key", "planning_cache_key"),
@@ -279,11 +297,10 @@ class RequestRuntimeProfiler:
 
             analysis_engine._run_module = timed_run_module
 
-        _wrap(batch, "execute", timings, "batch_execute")
+        _wrap(batch, "execute_async", timings, "batch_execute")
         for name, label in (
             ("prepare_tasks", "batch_prepare"),
             ("_skip_tasks_inside_batch_outputs", "batch_skip_inside_outputs"),
-            ("_execute_ready_tasks", "batch_execute_ready"),
             ("collect_result", "batch_collect_result"),
             ("_inspect_tasks_before_extract", "batch_password_preflight"),
             ("_inspect_resource_profiles", "batch_resource_profiles"),
@@ -308,7 +325,8 @@ class RequestRuntimeProfiler:
         _wrap(output_scan, "take_scan_session", timings, "output_take_scan_session")
 
         _wrap(extractor, "inspect", timings, "health_password_preflight")
-        _wrap(extractor, "extract", timings, "extract_total", phase_timer=phase)
+        _wrap(extractor, "extract", timings, "extract_total_legacy", phase_timer=phase)
+        _wrap(extractor, "extract_asyncio", timings, "extract_total", phase_timer=phase)
         _wrap(extractor, "close", timings, "extractor_close")
         _wrap(_child(extractor, "password_resolver"), "resolve", timings, "password_resolver")
         password_tester = _child(extractor, "password_tester")
@@ -318,7 +336,8 @@ class RequestRuntimeProfiler:
         _wrap(metadata_scanner, "scan", timings, "filename_metadata")
         _wrap(metadata_scanner, "scan_for_task", timings, "filename_metadata_for_task")
         sevenzip = _child(extractor, "sevenzip_runner")
-        _wrap(sevenzip, "extract_attempt", timings, "sevenzip_worker", phase_timer=phase)
+        _wrap(sevenzip, "extract_attempt", timings, "sevenzip_worker_legacy", phase_timer=phase)
+        _wrap(sevenzip, "submit_attempt_asyncio", timings, "sevenzip_worker", phase_timer=phase)
         _wrap(sevenzip, "_json_line", timings, "worker_protocol_json_decode")
         _wrap(sevenzip, "_drain_stderr", timings, "worker_protocol_drain_stderr")
         _wrap(sevenzip, "_emit_progress", timings, "worker_protocol_emit_progress")
@@ -365,9 +384,11 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
         "batch_directory_password_annotate",
         "batch_output_dir_resolver",
         "batch_skip_inside_outputs",
-        "batch_execute_ready",
         "batch_collect_result",
         "batch_directory_password_remember",
+        "batch_password_preflight",
+        "batch_resource_profiles",
+        "batch_report_task_finished",
         "output_scan",
     ))
     output_snapshot_children = sum(total(label) for label in (
@@ -380,7 +401,6 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
     ))
     planning_children = sum(total(label) for label in (
         "planning_group_tasks",
-        "planning_worker_count",
         "planning_plan_group",
     ))
     worker_protocol_children = sum(total(label) for label in (
@@ -394,7 +414,7 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
         "batch_overhead_excluding_extract": round(total("batch_execute") - total("extract_total"), 6),
         "batch_parent_python_residual": round(total("batch_execute") - batch_direct_children, 6),
         "execute_ready_overhead_excluding_extract_verify": round(
-            total("batch_execute_ready") - total("extract_total") - total("verify_total"),
+            total("batch_execute") - total("extract_total") - total("verify_total"),
             6,
         ),
         "output_snapshot_python_residual": round(
@@ -406,7 +426,7 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
             total("planning_analyzer_analyze") - total("planning_engine_analyze_path"),
             6,
         ),
-        "worker_wait_residual": round(total("worker_read_protocol") - worker_protocol_children, 6),
+        "worker_wait_residual": round(total("sevenzip_worker") - worker_protocol_children, 6),
     }
 
 
@@ -419,7 +439,7 @@ def _derived_timing_medians(request_timings: list[TimingMap]) -> dict[str, float
     }
 
 
-def _run_profile_once(
+async def _run_profile_once(
     runner: PipelineEngine,
     archive: str,
     output: Path,
@@ -432,8 +452,8 @@ def _run_profile_once(
     config["output"]["root"] = str(output)
     started = time.perf_counter()
     try:
-        summary = runner.submit([os.path.abspath(archive)], direct=True).result().summary
-        return time.perf_counter() - started, summary, _output_summary(output)
+        response = await runner.run([os.path.abspath(archive)], direct=True)
+        return time.perf_counter() - started, response.summary, _output_summary(output)
     finally:
         if not keep_output:
             _cleanup_generated_output(output, output_base)
@@ -459,68 +479,74 @@ def main() -> int:
     config["recursive_extract"] = {"mode": "fixed", "max_rounds": max(1, args.recursive_rounds)}
     output_base = Path(args.output).resolve()
     config["output"] = {"root": str(output_base)}
-    runner = PipelineEngine(config).start()
-    profiler = RequestRuntimeProfiler()
-    profiler.install(runner)
-    generated_outputs: list[Path] = []
 
-    def run_once(output: Path):
-        generated_outputs.append(output)
-        return _run_profile_once(
-            runner,
-            args.archive,
-            output,
-            output_base,
-            config,
-            keep_output=args.keep_output,
-        )
+    async def run() -> int:
+        runner = PipelineEngine(config)
+        profiler = RequestRuntimeProfiler()
+        profiler.install(runner)
+        generated_outputs: list[Path] = []
 
-    elapsed_samples: list[float] = []
-    summaries = []
-    output_summaries = []
-    try:
-        for index in range(max(0, args.warmup)):
-            run_once(_generated_output_path(output_base, "warmup", index))
-        profiler.enabled = True
-        for index in range(max(1, args.repeat)):
-            elapsed, summary, output_summary = run_once(_generated_output_path(output_base, "run", index))
-            elapsed_samples.append(elapsed)
-            summaries.append(summary)
-            output_summaries.append(output_summary)
-    finally:
-        profiler.restore()
-        runner.close()
-        if not args.keep_output:
-            for output in generated_outputs:
-                _cleanup_generated_output(output, output_base)
+        async def run_once(output: Path):
+            generated_outputs.append(output)
+            return await _run_profile_once(
+                runner,
+                args.archive,
+                output,
+                output_base,
+                config,
+                keep_output=args.keep_output,
+            )
 
-    last_summary = summaries[-1]
-    report = {
-        "elapsed_seconds": [round(value, 6) for value in elapsed_samples],
-        "elapsed_median_seconds": round(statistics.median(elapsed_samples), 6),
-        "successful_runs": sum(summary.success_count > 0 for summary in summaries),
-        "success_count": last_summary.success_count,
-        "failed_tasks": [str(item) for item in last_summary.failed_tasks],
-        "failures": [getattr(item, "to_dict", lambda: str(item))() for item in last_summary.failures],
-        "timing_medians_seconds": _timing_medians(profiler.request_timings),
-        "timing_seconds_by_run": [_timing_totals(timings) for timings in profiler.request_timings],
-        "derived_timing_seconds_by_run": [_derived_timing(timings) for timings in profiler.request_timings],
-        "derived_timing_medians_seconds": _derived_timing_medians(profiler.request_timings),
-        "timing_calls": {
-            label: [len(timings.get(label, [])) for timings in profiler.request_timings]
-            for label in sorted({label for timings in profiler.request_timings for label in timings})
-        },
-        "output_summaries": output_summaries,
-        "recursive_rounds": max(1, args.recursive_rounds),
-        "outputs_cleaned": not args.keep_output,
-        "output_base": str(output_base),
-    }
-    rendered = render_report(report_from_payload("extraction.large-archive-profile", report))
-    print("PROFILE_JSON=" + rendered)
-    if args.json_output:
-        args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(rendered, encoding="utf-8")
-    return 0 if all(summary.success_count > 0 for summary in summaries) else 1
+        elapsed_samples: list[float] = []
+        summaries = []
+        output_summaries = []
+        try:
+            async with runner:
+                for index in range(max(0, args.warmup)):
+                    await run_once(_generated_output_path(output_base, "warmup", index))
+                profiler.enabled = True
+                for index in range(max(1, args.repeat)):
+                    elapsed, summary, output_summary = await run_once(
+                        _generated_output_path(output_base, "run", index)
+                    )
+                    elapsed_samples.append(elapsed)
+                    summaries.append(summary)
+                    output_summaries.append(output_summary)
+        finally:
+            profiler.restore()
+            if not args.keep_output:
+                for output in generated_outputs:
+                    _cleanup_generated_output(output, output_base)
+
+        last_summary = summaries[-1]
+        report = {
+            "elapsed_seconds": [round(value, 6) for value in elapsed_samples],
+            "elapsed_median_seconds": round(statistics.median(elapsed_samples), 6),
+            "successful_runs": sum(summary.success_count > 0 for summary in summaries),
+            "success_count": last_summary.success_count,
+            "failed_tasks": [str(item) for item in last_summary.failed_tasks],
+            "failures": [getattr(item, "to_dict", lambda: str(item))() for item in last_summary.failures],
+            "timing_medians_seconds": _timing_medians(profiler.request_timings),
+            "timing_seconds_by_run": [_timing_totals(timings) for timings in profiler.request_timings],
+            "derived_timing_seconds_by_run": [_derived_timing(timings) for timings in profiler.request_timings],
+            "derived_timing_medians_seconds": _derived_timing_medians(profiler.request_timings),
+            "timing_calls": {
+                label: [len(timings.get(label, [])) for timings in profiler.request_timings]
+                for label in sorted({label for timings in profiler.request_timings for label in timings})
+            },
+            "output_summaries": output_summaries,
+            "recursive_rounds": max(1, args.recursive_rounds),
+            "outputs_cleaned": not args.keep_output,
+            "output_base": str(output_base),
+        }
+        rendered = render_report(report_from_payload("extraction.large-archive-profile", report))
+        print("PROFILE_JSON=" + rendered)
+        if args.json_output:
+            args.json_output.parent.mkdir(parents=True, exist_ok=True)
+            args.json_output.write_text(rendered, encoding="utf-8")
+        return 0 if all(summary.success_count > 0 for summary in summaries) else 1
+
+    return asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -94,6 +94,7 @@ def run_native(count: int) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--records", type=int, default=100_000)
+    parser.add_argument("--timeout", type=float, default=300.0, help="Child-process wall-clock timeout.")
     parser.add_argument("--child", action="store_true")
     args = parser.parse_args()
     count = max(1, args.records)
@@ -113,6 +114,7 @@ def main() -> int:
         check=True,
         capture_output=True,
         text=True,
+        timeout=max(1.0, args.timeout),
     )
     print(render_report(report_from_payload("memory.worker-manifest", json.loads(completed.stdout))))
     return 0

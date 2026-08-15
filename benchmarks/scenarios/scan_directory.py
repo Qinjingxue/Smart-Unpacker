@@ -186,7 +186,7 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _fresh_process_sample(
-    root: Path, scenario: str, config_path: Path
+    root: Path, scenario: str, config_path: Path, timeout_seconds: float
 ) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -205,6 +205,7 @@ def _fresh_process_sample(
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[2],
+        timeout=timeout_seconds,
     )
     return json.loads(completed.stdout)
 
@@ -214,6 +215,7 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--config", type=Path, default=Path("sunpack_config.json"))
     parser.add_argument("--runs", type=int, default=20)
+    parser.add_argument("--timeout", type=float, default=300.0, help="Per fresh-process sample wall-clock timeout.")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--cache-mode",
@@ -264,7 +266,7 @@ def main() -> None:
             ordered = scenarios if run_index % 2 == 0 else list(reversed(scenarios))
             for scenario in ordered:
                 if mode == "fresh-process":
-                    sample = _fresh_process_sample(root, scenario, config_path)
+                    sample = _fresh_process_sample(root, scenario, config_path, args.timeout)
                 else:
                     sample = run_sample(root, scenario, config_path)
                 grouped[scenario].append(sample)

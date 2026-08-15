@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -15,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.scanner import ScanOrchestrator
-from sunpack.coordinator.scheduling.executor import TaskExecutor
 from tests.helpers.performance_config import archive_pressure_config
 from benchmarks.harness import BenchmarkWorkspace, render_report, report_from_payload
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, normalize_archive_format
@@ -131,26 +131,12 @@ def _task_path_from_arg(value) -> str:
     return str(getattr(value, "main_path", value) or "")
 
 
-def _archive_task_detail(args, kwargs, result) -> str:
-    archive = _task_path_from_arg(args[0] if args else kwargs.get("task", ""))
-    status = "success" if getattr(result, "success", False) else "failure"
-    return f"ext={_path_ext(archive)}|status={status}"
-
-
 def _password_resolve_detail(args, kwargs, result) -> str:
     archive = _task_path_from_arg(args[0] if args else kwargs.get("task", ""))
     status = getattr(result, "status", "")
     password = getattr(result, "password", None)
     matched = password is not None
     return f"ext={_path_ext(archive)}|status={status}|matched={matched}"
-
-
-def _task_count_detail(args, kwargs, result) -> str:
-    tasks = args[1] if len(args) > 1 else kwargs.get("tasks", [])
-    try:
-        return f"tasks={len(tasks or [])}"
-    except TypeError:
-        return ""
 
 
 def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str, detail: Callable | None = None):
@@ -163,33 +149,85 @@ def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str, d
     recorder.add_restore(lambda: setattr(owner, method_name, original))
 
 
-def attach_pipeline_timing(runner: PipelineEngine) -> TimingRecorder:
-    recorder = TimingRecorder()
-    wrap_method(runner.task_scanner, "scan_targets", recorder, "pipeline_scan")
-    wrap_method(runner.batch_runner, "execute", recorder, "batch_execute")
-    wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
-    wrap_method(runner.input_planning_stage, "plan_tasks", recorder, "input_planning")
-    wrap_method(runner.batch_runner.repair_stage, "repair_after_verification_assessment_result", recorder, "repair_after_verification")
-    wrap_method(runner.batch_runner, "_repair_after_verification_with_beam", recorder, "repair_beam")
-    if runner.batch_runner.repair_stage.scheduler is not None:
-        wrap_method(runner.batch_runner.repair_stage.scheduler, "generate_repair_candidates", recorder, "repair_candidates")
-    wrap_method(runner.batch_runner, "_execute_ready_tasks", recorder, "execute_ready")
-    wrap_method(runner.batch_runner, "collect_result", recorder, "collect_result")
-    wrap_method(runner.output_scan_policy, "scan_roots_from_outputs", recorder, "output_scan")
-    wrap_method(TaskExecutor, "execute_all", recorder, "execute_all_wall", detail=_task_count_detail)
-    wrap_method(runner.extractor, "inspect", recorder, "health_password_preflight")
-    wrap_method(runner.batch_runner.resource_inspector, "inspect", recorder, "resource_preflight")
-    wrap_method(runner.batch_runner.resource_inspector, "record_estimated_single_task_profile", recorder, "resource_estimate")
-    wrap_method(runner.extractor.password_resolver, "resolve", recorder, "password_resolve", detail=_password_resolve_detail)
-    wrap_method(runner.extractor.password_tester, "test_password", recorder, "password_native_test_archive")
-    wrap_method(runner.extractor.password_tester.native_password_tester, "try_passwords", recorder, "password_native_try", detail=_password_try_detail)
-    wrap_method(runner.extractor, "extract", recorder, "extract", detail=_archive_task_detail)
-    wrap_method(runner.batch_runner.verifier, "verify", recorder, "verify")
-    wrap_method(runner.extractor, "close", recorder, "extractor_close")
-    return recorder
+class PipelineTimingProbe:
+    """Instrument every per-request runtime created by the async PipelineEngine.
+
+    The engine no longer exposes ``task_scanner``/``batch_runner`` as public
+    attributes, so the probe hooks the private ``_request_runtime_factory``
+    seam (the same one the large-archive profiler uses) and wraps the sync
+    pipeline stages that still exist after the async refactor.  Stages that no
+    longer exist are skipped silently so a stale probe can never abort a
+    pressure run; their columns report 0.0 in ``timing_columns``.
+    """
+
+    def __init__(self) -> None:
+        self.recorder = TimingRecorder()
+        self._factory_restore: tuple[Any, Callable[..., Any]] | None = None
+
+    def install(self, runner: PipelineEngine) -> None:
+        original_factory = runner._request_runtime_factory
+        self._factory_restore = (runner, original_factory)
+
+        def profiled_factory(*args: Any, **kwargs: Any):
+            runtime = original_factory(*args, **kwargs)
+            self._instrument_runtime(runtime)
+            return runtime
+
+        runner._request_runtime_factory = profiled_factory
+
+    def restore(self) -> None:
+        if self._factory_restore is not None:
+            runner, factory = self._factory_restore
+            runner._request_runtime_factory = factory
+            self._factory_restore = None
+
+    def _wrap(self, owner: Any, method_name: str, label: str, detail: Callable | None = None) -> None:
+        if owner is None or not hasattr(owner, method_name):
+            return
+        wrap_method(owner, method_name, self.recorder, label, detail=detail)
+
+    def _instrument_runtime(self, runtime: Any) -> None:
+        scanner = getattr(runtime, "task_scanner", None)
+        planning = getattr(runtime, "input_planning_stage", None)
+        batch = getattr(runtime, "batch_runner", None)
+        extractor = getattr(runtime, "extractor", None)
+        output_scan = getattr(runtime, "output_scan_policy", None)
+
+        self._wrap(scanner, "scan_targets", "pipeline_scan")
+        self._wrap(scanner, "direct_file_tasks", "pipeline_direct_scan")
+        self._wrap(planning, "plan_tasks", "input_planning")
+        self._wrap(batch, "prepare_tasks", "batch_prepare")
+        self._wrap(batch, "_skip_tasks_inside_batch_outputs", "batch_skip_inside_outputs")
+        self._wrap(batch, "_inspect_tasks_before_extract", "batch_password_preflight")
+        self._wrap(batch, "_inspect_resource_profiles", "batch_resource_profiles")
+        self._wrap(batch, "collect_result", "batch_collect_result")
+        self._wrap(batch, "_report_task_started", "batch_report_task_started")
+        self._wrap(batch, "_report_task_finished", "batch_report_task_finished")
+        repair_stage = getattr(batch, "repair_stage", None)
+        self._wrap(repair_stage, "repair_after_verification_assessment_result", "repair_after_verification")
+        self._wrap(batch, "_repair_after_verification_with_beam", "repair_beam")
+        repair_scheduler = getattr(repair_stage, "scheduler", None) if repair_stage is not None else None
+        if repair_scheduler is not None:
+            self._wrap(repair_scheduler, "generate_repair_candidates", "repair_candidates")
+        self._wrap(output_scan, "scan_roots_from_outputs", "output_scan")
+        self._wrap(output_scan, "take_scan_session", "output_take_scan_session")
+        self._wrap(extractor, "inspect", "health_password_preflight")
+        self._wrap(extractor, "extract", "extract")
+        self._wrap(extractor, "close", "extractor_close")
+        password_resolver = getattr(extractor, "password_resolver", None)
+        self._wrap(password_resolver, "resolve", "password_resolve", detail=_password_resolve_detail)
+        password_tester = getattr(extractor, "password_tester", None)
+        self._wrap(password_tester, "test_password", "password_native_test_archive")
+        native_tester = getattr(password_tester, "native_password_tester", None) if password_tester is not None else None
+        self._wrap(native_tester, "try_passwords", "password_native_try", detail=_password_try_detail)
+        resource_inspector = getattr(batch, "resource_inspector", None)
+        self._wrap(resource_inspector, "inspect", "resource_preflight")
+        self._wrap(resource_inspector, "record_estimated_single_task_profile", "resource_estimate")
+        verifier = getattr(batch, "verifier", None)
+        self._wrap(verifier, "verify", "verify")
 
 
-def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
+def timing_columns(recorder: TimingRecorder | None, pipeline_ms: float = 0.0) -> dict[str, float | dict]:
     if recorder is None:
         return {
             "pipeline_scan_ms": 0.0,
@@ -213,34 +251,64 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
             "extractor_close_ms": 0.0,
             "timings": {},
         }
+    batch_execute_ms = round(
+        recorder.ms("batch_prepare")
+        + recorder.ms("batch_skip_inside_outputs")
+        + recorder.ms("batch_password_preflight")
+        + recorder.ms("batch_resource_profiles")
+        + recorder.ms("batch_collect_result")
+        + recorder.ms("batch_report_task_started")
+        + recorder.ms("batch_report_task_finished")
+        + recorder.ms("output_scan")
+        + recorder.ms("output_take_scan_session"),
+        2,
+    )
+    repair_ms = round(
+        recorder.ms("repair_after_verification")
+        + recorder.ms("repair_beam")
+        + recorder.ms("repair_candidates"),
+        2,
+    )
+    measured_stages = (
+        recorder.ms("pipeline_scan")
+        + recorder.ms("input_planning")
+        + batch_execute_ms
+        + repair_ms
+        + recorder.ms("health_password_preflight")
+        + recorder.ms("password_resolve")
+        + recorder.ms("password_native_test_archive")
+        + recorder.ms("password_native_try")
+        + recorder.ms("resource_preflight")
+        + recorder.ms("resource_estimate")
+        + recorder.ms("verify")
+        + recorder.ms("extractor_close")
+    )
+    # The native extraction itself runs asynchronously through the worker and
+    # has no synchronous probe; report it as the pipeline wall minus every
+    # measured stage (the un-attributed residual).
+    extract_ms = round(max(0.0, pipeline_ms - measured_stages), 2)
     return {
         "pipeline_scan_ms": recorder.ms("pipeline_scan"),
-        "batch_execute_ms": recorder.ms("batch_execute"),
-        "prepare_ms": recorder.ms("prepare"),
-        "analysis_ms": recorder.ms("analysis"),
-        "repair_ms": round(
-            recorder.ms("repair_after_verification")
-            + recorder.ms("repair_beam")
-            + recorder.ms("repair_candidates"),
+        "batch_execute_ms": batch_execute_ms,
+        "prepare_ms": recorder.ms("batch_prepare"),
+        "analysis_ms": recorder.ms("input_planning"),
+        "repair_ms": repair_ms,
+        "execute_ready_ms": 0.0,
+        "execute_all_wall_ms": round(pipeline_ms, 2),
+        "preflight_ms": recorder.ms("health_password_preflight"),
+        "health_ms": 0.0,
+        "password_resolve_ms": recorder.ms("password_resolve"),
+        "password_native_test_ms": round(
+            recorder.ms("password_native_test_archive") + recorder.ms("password_native_try"),
             2,
         ),
-        "execute_ready_ms": recorder.ms("execute_ready"),
-        "execute_all_wall_ms": recorder.ms("execute_all_wall"),
-        "preflight_ms": recorder.ms("health_password_preflight"),
-        "health_ms": recorder.ms("health_probe"),
-        "password_resolve_ms": recorder.ms("password_resolve"),
-        "password_native_test_ms": round((
-            recorder.ms("password_native_test_archive")
-            + recorder.ms("password_native_try")
-            + recorder.ms("preflight_structural_test")
-        ), 2),
         "resource_ms": recorder.ms("resource_preflight") + recorder.ms("resource_estimate"),
-        "extract_ms": recorder.ms("extract"),
+        "extract_ms": extract_ms,
         "verify_ms": recorder.ms("verify"),
-        "collect_result_ms": recorder.ms("collect_result"),
+        "collect_result_ms": recorder.ms("batch_collect_result"),
         "output_scan_ms": recorder.ms("output_scan"),
-        "postprocess_ms": recorder.ms("postprocess"),
-        "final_summary_ms": recorder.ms("final_summary"),
+        "postprocess_ms": 0.0,
+        "final_summary_ms": 0.0,
         "extractor_close_ms": recorder.ms("extractor_close"),
         "timings": recorder.snapshot(),
     }
@@ -486,6 +554,34 @@ def clean_outputs(case: ArchiveCase):
             path.unlink(missing_ok=True)
 
 
+def _run_engine(targets: list[str], config: dict) -> dict[str, Any]:
+    """Run one async PipelineEngine submission and return summary + timing.
+
+    The engine now owns a single event loop per run; every per-request runtime
+    it creates is instrumented through the factory probe so the phase columns
+    reflect the current async pipeline (removed stages report 0.0).
+    """
+    runner = PipelineEngine(config)
+    probe = PipelineTimingProbe()
+    probe.install(runner)
+    started = time.perf_counter()
+    try:
+        async def run() -> Any:
+            async with runner:
+                response = await runner.run(targets)
+                return response.summary
+
+        summary = asyncio.run(run())
+    finally:
+        probe.restore()
+    pipeline_seconds = time.perf_counter() - started
+    return {
+        "summary": summary,
+        "pipeline_seconds": pipeline_seconds,
+        "timings": timing_columns(probe.recorder, pipeline_seconds * 1000),
+    }
+
+
 def run_case(pressure_case: PressureCase) -> dict:
     if pressure_case.case is None:
         return {
@@ -516,15 +612,10 @@ def run_case(pressure_case: PressureCase) -> dict:
     scan_results = ScanOrchestrator(scan_config).scan(str(pressure_case.case.archive_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineEngine(archive_pressure_config(passwords=pressure_case.passwords)).start()
-    pipeline_timing = attach_pipeline_timing(runner)
-    started = time.perf_counter()
-    try:
-        summary = runner.submit([str(pressure_case.case.archive_dir)]).result().summary
-    finally:
-        pipeline_timing.restore()
-        runner.close()
-    pipeline_seconds = time.perf_counter() - started
+    pipeline_result = _run_engine([str(pressure_case.case.archive_dir)], scan_config)
+    summary = pipeline_result["summary"]
+    pipeline_seconds = pipeline_result["pipeline_seconds"]
+    pipeline_timing = pipeline_result["timings"]
 
     extracted = marker_extracted(pressure_case.case)
     observed = "success" if summary.success_count > 0 and extracted else "failure"
@@ -547,7 +638,7 @@ def run_case(pressure_case: PressureCase) -> dict:
         "failed_tasks": list(summary.failed_tasks),
         "skip_reason": pressure_case.skip_reason,
         "files": sorted(path.name for path in pressure_case.case.archive_dir.iterdir() if path.is_file()),
-        **timing_columns(pipeline_timing),
+        **pipeline_timing,
     }
 
 
@@ -603,16 +694,10 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineEngine(archive_pressure_config(passwords=PASSWORD_TRY_LIST, worker_profile="auto")).start()
-    pipeline_timing = attach_pipeline_timing(runner)
-    started = time.perf_counter()
-    try:
-        summary = runner.submit([str(batch_dir)]).result().summary
-    finally:
-        pipeline_timing.restore()
-        runner.close()
-    pipeline_seconds = time.perf_counter() - started
-    timing_data = timing_columns(pipeline_timing)
+    pipeline_result = _run_engine([str(batch_dir)], scan_config)
+    summary = pipeline_result["summary"]
+    pipeline_seconds = pipeline_result["pipeline_seconds"]
+    timing_data = pipeline_result["timings"]
 
     rows: list[dict] = []
     case_rows: list[dict] = []

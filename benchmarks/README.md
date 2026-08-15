@@ -20,7 +20,25 @@ python -m benchmarks extraction format-matrix --runs 5 --json-out build/extracti
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out build/sevenzip-worker-baseline.json
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss
+python -m benchmarks memory many-tasks --python-rounds 5 --worker-rounds 3 --json-out build/memory-growth.json
 ```
+
+## Run timeout
+
+Every scenario runs in a child process under a hard wall-clock deadline, so a
+stale scenario that calls a removed API and blocks forever is killed instead
+of hanging the whole benchmark run.  The global limit defaults to 3600 seconds
+and can be overridden before the scenario name, or via
+`SUNPACK_BENCH_TIMEOUT`:
+
+```powershell
+python -m benchmarks --timeout 600 extraction format-matrix --runs 3
+```
+
+A killed scenario exits with code 124.  Scenario-internal subprocesses (7-Zip,
+the CLI client, native workers, worker children) all carry their own timeouts
+too; they honour `SUNPACK_BENCH_SUBPROCESS_TIMEOUT` (default 600s) where
+applicable.
 
 ## Real archive workspace lifecycle
 
@@ -78,6 +96,24 @@ worker CPU time, child-process RSS peak, output statistics, native status, and f
 Use repeated or comma-separated `--profile` values and repeated `--format` values to
 focus the matrix. Durable results contain both `report.json` and `results.csv`.
 
+`memory many-tasks` measures memory *growth* (not peak) of the two long-lived
+components under a large task count across every format: the Python pipeline and
+the native 7z worker. One mixed-format corpus is built with the format-matrix
+builder (archives kept above the 1 MiB scanner floor, e.g.
+`--small-files 1100 --large-files 2 --large-file-mib 1`), then:
+
+- phase `python` re-runs the whole corpus through the persistent-runtime
+  `extract` pipeline once per round (`--python-rounds`, default 5) and samples
+  the Python process RSS/private/tracemalloc/native reader cache after every
+  round, plus the residual after the engine closes;
+- phase `worker` feeds every archive through one persistent
+  `sunpack_sevenzip_worker.exe` (`--worker-rounds`, default 3) and samples the
+  worker process RSS after every job, so per-format and cumulative growth come
+  straight out of the trajectory.
+
+Use `--format` to restrict formats, `--skip-python` / `--skip-worker` to run a
+single phase, and `--json-out` for a durable copy.
+
 `reader embedded-scan --generate-gib 10 --rounds 1 --skip-cli` creates a streamed
 ZIP64 fixture under the benchmark workspace, measures native embedded-scan wall/CPU
 time and process memory peaks, and writes the report to the durable benchmark-results
@@ -91,6 +127,23 @@ with `--iocp-chunk-mib`, `--iocp-buffers`, and `--iocp-workers` without changing
 the normal reader cache or `read_at()` behavior. `iocp-buffers` controls the
 bounded in-flight read depth; `iocp-workers` controls parallel signature
 scanning independently.
+
+`extraction real-archive` measures the current architecture: `sunpack extract`
+delegates to the long-lived persistent server process, so RSS accounting
+includes the CLI client's process tree plus the persistent server and its
+native 7-Zip worker (baseline service RSS is subtracted as idle overhead).
+Each run has a per-run timeout (`--timeout`, default 600s); a timed-out run is
+reported with exit code -124 and the server is shut down so the next run
+starts from a clean baseline.
+
+`extraction split-pressure` and `extraction large-archive-profile` drive the
+async `PipelineEngine` (one event loop per submission) and instrument the
+per-request runtime through the private runtime-factory seam. Timing columns
+reflect the current pipeline stages: `pipeline_scan`, `input_planning`,
+`batch_prepare`/`batch_execute`/`batch_collect_result`, `output_scan`,
+`password_resolve`, `verify`, `resource`, and `extract_ms` (the pipeline wall
+minus every measured stage, since native extraction runs asynchronously
+through the worker). Stages removed by the refactor report 0.0.
 
 The following obsolete probes were intentionally removed during consolidation:
 

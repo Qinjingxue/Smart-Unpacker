@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import os
@@ -69,7 +70,7 @@ def sample(label: str) -> dict:
 
 def main() -> int:
     tracemalloc.start(10)
-    from sunpack.cli.cli import main as cli_main
+    from sunpack.cli.cli import async_main
     from sunpack.cli import persistent_runtime
 
     root = Path(tempfile.mkdtemp(prefix="sunpack-residual-rss-"))
@@ -77,31 +78,44 @@ def main() -> int:
     persistent_runtime.enable_persistent_runtime()
     try:
         rows.append(sample("baseline"))
-        for batch in range(1, 5):
-            input_dir = root / f"input-{batch}"
-            output_dir = root / f"output-{batch}"
-            input_dir.mkdir()
-            paths = []
-            for index in range(50):
-                archive_path = input_dir / f"archive-{batch}-{index:04d}.zip"
-                with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
-                    archive.writestr("payload.bin", os.urandom(128 * 1024))
-                paths.append(str(archive_path))
-            code = cli_main([
-                "extract", *paths, "--direct-file", "--out-dir", str(output_dir),
-                "--cleanup", "k", "--no-flatten", "--no-pause", "--quiet",
-            ])
-            if code:
-                raise RuntimeError(f"batch {batch} failed: {code}")
-            rows.append(sample(f"batch-{batch}"))
-        persistent_runtime.close_persistent_runtime()
-        rows.append(sample("after-engine-close"))
+
+        async def run_batches() -> None:
+            # The persistent server owns exactly one event loop for its whole
+            # lifetime, and PipelineEngine rejects requests from a different
+            # loop, so every batch must run inside this single loop via the
+            # async CLI entry point instead of a fresh asyncio.run per batch.
+            for batch in range(1, 5):
+                input_dir = root / f"input-{batch}"
+                output_dir = root / f"output-{batch}"
+                input_dir.mkdir()
+                paths = []
+                for index in range(50):
+                    archive_path = input_dir / f"archive-{batch}-{index:04d}.zip"
+                    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                        archive.writestr("payload.bin", os.urandom(128 * 1024))
+                    paths.append(str(archive_path))
+                code = await async_main([
+                    "extract", *paths, "--direct-file", "--out-dir", str(output_dir),
+                    "--cleanup", "k", "--no-flatten", "--no-pause", "--quiet",
+                ])
+                if code:
+                    raise RuntimeError(f"batch {batch} failed: {code}")
+                rows.append(sample(f"batch-{batch}"))
+            # close_persistent_runtime is async; awaiting it here (on the
+            # server's own loop) actually shuts the engine down.
+            await persistent_runtime.close_persistent_runtime()
+            rows.append(sample("after-engine-close"))
+
+        asyncio.run(run_batches())
         from sunpack_native import release_reader_handles_under
         release_reader_handles_under(str(root))
         rows.append(sample("after-reader-handle-release"))
         print(render_report(report_from_payload("memory.residual-rss", rows)))
     finally:
-        persistent_runtime.close_persistent_runtime()
+        try:
+            asyncio.run(persistent_runtime.close_persistent_runtime())
+        except Exception:
+            pass
         shutil.rmtree(root, ignore_errors=True)
     return 0
 

@@ -31,11 +31,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the legacy Archive::read-per-password path for A/B comparison.",
     )
+    parser.add_argument(
+        "--tool-timeout",
+        type=float,
+        default=300.0,
+        help="Wall-clock timeout for the archive-generation subprocesses.",
+    )
     return parser.parse_args()
 
 
-def run(command: list[str], cwd: Path) -> None:
-    completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+def run(command: list[str], cwd: Path, timeout_seconds: float = 300.0) -> None:
+    try:
+        completed = subprocess.run(
+            command, cwd=cwd, capture_output=True, text=True, timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"command timed out after {timeout_seconds:g}s: {command}\n"
+        ) from exc
     if completed.returncode:
         raise RuntimeError(
             f"command failed ({completed.returncode}): {command}\n"
@@ -114,6 +127,7 @@ def main() -> None:
                 f"-p{args.password}", "-mem=AES256", "-mx=0", "-y",
             ],
             work,
+            args.tool_timeout,
         )
         run(
             [
@@ -121,6 +135,7 @@ def main() -> None:
                 f"-p{args.password}", "-mhe=on", "-mx=0", "-y",
             ],
             work,
+            args.tool_timeout,
         )
         run(
             [
@@ -128,6 +143,7 @@ def main() -> None:
                 f"-hp{args.password}", str(rar_path), str(payload),
             ],
             work,
+            args.tool_timeout,
         )
         results = {
             "configuration": {

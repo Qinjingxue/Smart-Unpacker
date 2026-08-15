@@ -46,20 +46,27 @@ GENERATED_FORMATS = (
 )
 MIN_SCANNABLE_ARCHIVE_BYTES = 1024 * 1024
 DEFAULT_CACHE_ROOT = ROOT / "build" / "benchmark-cache" / "extraction-format-matrix"
+# Every subprocess below gets a hard timeout so a stale or hung command fails
+# loudly instead of blocking the whole matrix forever.
+DEFAULT_SUBPROCESS_TIMEOUT = float(os.environ.get("SUNPACK_BENCH_SUBPROCESS_TIMEOUT", "600"))
 
 
-def timed(command: list[str], cwd: Path) -> tuple[float, int, str]:
+def timed(command: list[str], cwd: Path, timeout: float = DEFAULT_SUBPROCESS_TIMEOUT) -> tuple[float, int, str]:
     started = time.perf_counter()
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return time.perf_counter() - started, -124, f"command timed out after {timeout:g}s: {command[0]}"
     return time.perf_counter() - started, result.returncode, result.stderr[-2000:]
 
 
@@ -68,12 +75,14 @@ def _run_live_capture(
     *,
     cwd: Path,
     env: dict[str, str] | None = None,
+    timeout: float = DEFAULT_SUBPROCESS_TIMEOUT,
 ) -> tuple[int, str, str]:
     """Run a subprocess, forwarding its stderr lines to our stderr in real time.
 
     stdout and stderr are drained concurrently so the child never blocks on a
     full pipe; both streams are also returned as text (stderr doubles as the
-    error report when the child fails).
+    error report when the child fails).  A hard timeout kills the child so a
+    stale worker cannot hang the matrix.
     """
     process = subprocess.Popen(
         command,
@@ -101,27 +110,42 @@ def _run_live_capture(
     ]
     for thread in threads:
         thread.start()
-    returncode = process.wait()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=2)
+        return -124, "".join(stdout_chunks), "".join(stderr_chunks) + f"\ncommand timed out after {timeout:g}s"
     for thread in threads:
         thread.join()
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
 def _run_7z(command: list[str]) -> bool:
-    result = subprocess.run(
-        [str(SEVEN_ZIP), *command],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            [str(SEVEN_ZIP), *command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEFAULT_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0
 
 
 def _run_rar(command: list[str]) -> bool:
-    result = subprocess.run(
-        [str(RAR), *command],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            [str(RAR), *command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEFAULT_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0
 
 
@@ -158,11 +182,15 @@ def _create_archive(target: Path, archive_type: str, source: Path) -> bool:
 
 
 def _create_zstd_archive(target: Path, source: Path) -> bool:
-    result = subprocess.run(
-        [str(ZSTD), "-q", "-f", "-3", str(source), "-o", str(target)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            [str(ZSTD), "-q", "-f", "-3", str(source), "-o", str(target)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEFAULT_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0 and target.exists()
 
 
@@ -208,21 +236,29 @@ def _timed_seven_zip_extract(archive: Path, output: Path, archive_format: str) -
     first_output = stage if composite else output
     first_output.mkdir(parents=True, exist_ok=True)
     command = [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{first_output}", str(archive)]
-    first = subprocess.run(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        first = subprocess.run(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=DEFAULT_SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return time.perf_counter() - started, -124
     code = first.returncode
     if code == 0 and composite:
         tar_candidates = [path for path in stage.rglob("*") if path.is_file()]
         if len(tar_candidates) != 1:
             code = 2
         else:
-            second = subprocess.run(
-                [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{output}", str(tar_candidates[0])],
-                cwd=ROOT,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            code = second.returncode
+            try:
+                second = subprocess.run(
+                    [str(SEVEN_ZIP), "x", "-y", "-bd", "-bso0", f"-o{output}", str(tar_candidates[0])],
+                    cwd=ROOT,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=DEFAULT_SUBPROCESS_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                code = -124
+            else:
+                code = second.returncode
         shutil.rmtree(stage, ignore_errors=True)
     return time.perf_counter() - started, code
 
@@ -745,12 +781,16 @@ def _phase_aggregates(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _git_revision(root: Path) -> str | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
