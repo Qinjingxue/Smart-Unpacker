@@ -1,10 +1,4 @@
-"""Stress the native worker scheduler with many small archive jobs.
-
-The workload deliberately submits each request's jobs as a burst.  This gives
-the worker a queue containing a large head-start for the first request, so the
-native priority-aging and virtual-finish policy must actively interleave later
-requests instead of merely preserving a fair caller-side submission order.
-"""
+"""Stress native worker parallelism and resource admission with small archive jobs."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +12,6 @@ import sys
 import threading
 import time
 import zipfile
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -135,24 +128,6 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     upper = min(lower + 1, len(ordered) - 1)
     fraction = position - lower
     return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction, 3)
-
-
-def _jain_index(values: list[int]) -> float | None:
-    total = sum(values)
-    squared = sum(value * value for value in values)
-    if not values or squared == 0:
-        return None
-    return round((total * total) / (len(values) * squared), 6)
-
-
-def _max_run(values: list[str]) -> int:
-    current = longest = 0
-    previous = ""
-    for value in values:
-        current = current + 1 if value == previous else 1
-        longest = max(longest, current)
-        previous = value
-    return longest
 
 
 def _create_corpus(root: Path, *, jobs: int, files_per_archive: int, file_size_bytes: int) -> dict[str, Any]:
@@ -369,7 +344,6 @@ def _run_batch(
 
     summary = _summarize_batch(
         capacity=capacity,
-        client_count=client_count,
         submitted_at=submitted_at,
         events=events,
         results=results,
@@ -396,7 +370,6 @@ def _run_batch(
 def _summarize_batch(
     *,
     capacity: int,
-    client_count: int,
     submitted_at: dict[str, float],
     events: list[dict[str, Any]],
     results: dict[str, dict[str, Any]],
@@ -455,13 +428,6 @@ def _summarize_batch(
         for times in by_job.values()
         if "job_started" in times and "job_finished" in times
     ]
-    admission_requests = [str(event.get("request_id") or "") for event in admissions]
-    fairness_window = min(len(admission_requests), max(client_count * 4, capacity * client_count * 2))
-    early_counts = Counter(admission_requests[:fairness_window])
-    overall_counts = Counter(admission_requests)
-    first_admission: dict[str, int] = {}
-    for index, request_id in enumerate(admission_requests):
-        first_admission.setdefault(request_id, index)
     elapsed = max(0.000001, finished_at - started_at)
     passed = sum(result.get("status") == "ok" for result in results.values())
     expected_jobs = len(submitted_at)
@@ -484,7 +450,6 @@ def _summarize_batch(
         "expected_max_active_jobs": expected_max_active,
         "capacity": capacity,
         "sample_interval_ms": sample_interval_ms,
-        "client_count": client_count,
         "job_count": expected_jobs,
         "passed_jobs": passed,
         "failed_jobs": expected_jobs - passed,
@@ -504,11 +469,6 @@ def _summarize_batch(
         "queue_latency_p95_ms": _percentile(queue_ms, 95),
         "service_p50_ms": _percentile(service_ms, 50),
         "service_p95_ms": _percentile(service_ms, 95),
-        "fairness_window_admissions": fairness_window,
-        "early_admission_jain_index": _jain_index([early_counts[f"request-{index:02d}"] for index in range(client_count)]),
-        "overall_admission_jain_index": _jain_index([overall_counts[f"request-{index:02d}"] for index in range(client_count)]),
-        "first_admission_spread_jobs": max(first_admission.values(), default=0) - min(first_admission.values(), default=0),
-        "longest_same_request_admission_run": _max_run(admission_requests),
         "admitted_jobs": len(admissions),
         "controller_adjustment_count": len(controller_events),
         "controller_first_adjustment_after_enqueue_ms": min(controller_offsets_ms) if controller_offsets_ms else None,
@@ -528,9 +488,6 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "queued_underutilization_ratio",
         "queue_latency_p95_ms",
         "service_p95_ms",
-        "early_admission_jain_index",
-        "overall_admission_jain_index",
-        "longest_same_request_admission_run",
         "observed_peak_active_jobs",
         "controller_adjustment_count",
         "controller_first_adjustment_after_enqueue_ms",
@@ -576,7 +533,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark native worker fairness and parallelism for many small ZIP jobs.")
+    parser = argparse.ArgumentParser(description="Benchmark native worker parallelism and resource admission for many small ZIP jobs.")
     parser.add_argument("--jobs", type=int, default=256)
     parser.add_argument("--clients", type=int, default=4)
     parser.add_argument("--capacities", default="1,2,4,8", help="Comma-separated native worker thread capacities.")

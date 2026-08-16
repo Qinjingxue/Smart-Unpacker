@@ -1,5 +1,4 @@
 from benchmarks.scenarios.worker_small_file_scheduling import (
-    _jain_index,
     _parse_capacities,
     _summarize_batch,
 )
@@ -15,12 +14,7 @@ def test_parse_capacities_deduplicates_and_rejects_out_of_range_values():
         raise AssertionError("capacity zero must be rejected")
 
 
-def test_jain_index_is_one_for_equal_counts_and_lower_for_a_skew():
-    assert _jain_index([4, 4, 4, 4]) == 1.0
-    assert _jain_index([8, 0, 0, 0]) == 0.25
-
-
-def test_batch_summary_uses_native_events_for_utilization_and_admission_fairness():
+def test_batch_summary_uses_native_events_for_utilization():
     submitted_at = {"a-1": 0.0, "b-1": 0.0, "a-2": 0.0, "b-2": 0.0}
     events = [
         {"received_at": 1.0, "event": "job_admitted", "job_id": "a-1", "request_id": "request-00", "active_jobs": 1},
@@ -38,7 +32,6 @@ def test_batch_summary_uses_native_events_for_utilization_and_admission_fairness
 
     summary = _summarize_batch(
         capacity=2,
-        client_count=2,
         submitted_at=submitted_at,
         events=events,
         results=results,
@@ -55,16 +48,12 @@ def test_batch_summary_uses_native_events_for_utilization_and_admission_fairness
     assert summary["all_passed"] is True
     assert summary["observed_peak_active_jobs"] == 2
     assert summary["thread_capacity_utilization"] == 0.666667
-    assert summary["early_admission_jain_index"] == 1.0
-    assert summary["overall_admission_jain_index"] == 1.0
-    assert summary["longest_same_request_admission_run"] == 1
     assert summary["controller_adjustment_count"] == 0
 
 
 def test_batch_summary_reports_controller_adjustment_latency():
     summary = _summarize_batch(
         capacity=4,
-        client_count=1,
         submitted_at={"job-1": 0.0},
         events=[
             {"received_at": 0.0, "event": "job_queued", "job_id": "job-1", "request_id": "request-00", "active_jobs": 0},

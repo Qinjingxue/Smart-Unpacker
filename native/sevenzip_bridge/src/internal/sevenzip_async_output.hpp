@@ -476,9 +476,6 @@ private:
                 ++it;
             }
         }
-        if (last_writer_job_ == job.get()) {
-            last_writer_job_ = nullptr;
-        }
     }
 
     void enqueue_file_job_locked(const FileStatePtr& file, WorkItem item) {
@@ -501,22 +498,11 @@ private:
         if (ready_files_.empty()) {
             return nullptr;
         }
-        std::size_t selected = 0;
-        if (last_writer_job_ != nullptr) {
-            for (std::size_t index = 0; index < ready_files_.size(); ++index) {
-                const auto& candidate = ready_files_[index];
-                if (candidate && candidate->job.get() != last_writer_job_) {
-                    selected = index;
-                    break;
-                }
-            }
-        }
-        FileStatePtr file = std::move(ready_files_[selected]);
-        ready_files_.erase(ready_files_.begin() + static_cast<std::ptrdiff_t>(selected));
+        FileStatePtr file = std::move(ready_files_.front());
+        ready_files_.pop_front();
         if (file) {
             file->ready = false;
             file->writing = true;
-            last_writer_job_ = file->job.get();
         }
         return file;
     }
@@ -730,7 +716,6 @@ private:
     std::condition_variable producer_cv_;
     std::condition_variable work_cv_;
     const std::size_t writer_count_;
-    JobState* last_writer_job_ = nullptr;
     std::size_t queued_jobs_ = 0;
     bool stopping_ = false;
 };

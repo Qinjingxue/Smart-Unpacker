@@ -1095,19 +1095,6 @@ std::size_t configured_native_queue_capacity() noexcept {
     return (std::min)(static_cast<std::size_t>(configured), std::size_t{1'000'000});
 }
 
-std::size_t configured_native_priority_aging_quantum() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_PRIORITY_AGING_QUANTUM");
-    if (!value || !*value) {
-        return 32;
-    }
-    char* end = nullptr;
-    const unsigned long configured = std::strtoul(value, &end, 10);
-    if (end == value || *end != '\0' || configured == 0) {
-        return 32;
-    }
-    return (std::max)(1UL, (std::min)(configured, 100000UL));
-}
-
 bool configured_native_adaptive_enabled() noexcept {
     const char* value = std::getenv("SUNPACK_NATIVE_ADAPTIVE_ENABLED");
     if (!value || !*value) {
@@ -1280,7 +1267,6 @@ public:
           worker_count_((std::max)(std::size_t{1}, worker_count)),
           memory_budget_(configured_native_memory_budget()),
           queue_capacity_(configured_native_queue_capacity()),
-          priority_aging_quantum_(configured_native_priority_aging_quantum()),
           profile_cache_path_(configured_native_profile_cache_path()),
           profile_cache_enabled_(configured_native_profile_cache_enabled()),
           runtime_controller_(
@@ -1345,9 +1331,6 @@ public:
                 print_worker_event(job_id, "job_finished", metadata);
                 return future;
             }
-            FairnessState& fairness = fairness_[metadata.request_id];
-            fairness.weight = metadata.fairness_weight;
-            fairness.queued += 1;
             if (!job_id.empty()) {
                 cancel_tokens_[job_id] = cancel_token;
             }
@@ -1356,7 +1339,6 @@ public:
                 std::move(promise),
                 std::move(cancel_token),
                 metadata,
-                next_sequence_++,
             });
             controller_recheck_ = true;
         }
@@ -1420,9 +1402,7 @@ public:
 
 private:
     struct JobMetadata {
-        int priority = 0;
         std::string request_id;
-        std::size_t fairness_weight = 1;
         std::size_t cpu_weight = 1;
         std::size_t memory_reserve = 64U << 20;
         std::size_t dictionary_reserve = 0;
@@ -1436,29 +1416,14 @@ private:
         std::shared_ptr<std::promise<int>> promise;
         std::shared_ptr<std::atomic<bool>> cancel_token;
         JobMetadata metadata;
-        std::uint64_t sequence = 0;
-    };
-
-    struct FairnessState {
-        std::uint64_t virtual_finish = 0;
-        std::size_t weight = 1;
-        std::size_t queued = 0;
-        std::size_t active = 0;
     };
 
     static JobMetadata metadata_from_request(const std::string& request) noexcept {
         JobMetadata metadata;
         unsigned long long value = 0;
-        if (json_uint_field_in_object(request, "native_priority", &value)) {
-            metadata.priority = static_cast<int>((std::min)(value, 1000ULL));
-        }
         metadata.request_id = json_string_field(request, "request_id", "");
         if (metadata.request_id.empty()) {
             metadata.request_id = json_string_field(request, "job_id", "");
-        }
-        if (json_uint_field_in_object(request, "native_fairness_weight", &value)) {
-            metadata.fairness_weight = (std::max)(std::size_t{1}, static_cast<std::size_t>(
-                (std::min)(value, 1024ULL)));
         }
         if (json_uint_field_in_object(request, "native_cpu_weight", &value)) {
             metadata.cpu_weight = (std::max)(std::size_t{1}, static_cast<std::size_t>(value));
@@ -1523,38 +1488,12 @@ private:
     }
 
     std::size_t select_job_locked() const noexcept {
-        std::size_t selected = queue_.size();
-        const auto effective_priority = [this](const Job& job) {
-            const std::uint64_t age = next_sequence_ >= job.sequence
-                ? next_sequence_ - job.sequence : 0;
-            const std::uint64_t aging = age / (std::max)(std::size_t{1}, priority_aging_quantum_);
-            return static_cast<std::uint64_t>(job.metadata.priority) + (std::min)(aging, std::uint64_t{1000});
-        };
-        const auto virtual_finish = [this](const Job& job) {
-            const auto found = fairness_.find(job.metadata.request_id);
-            return found == fairness_.end() ? std::uint64_t{0} : found->second.virtual_finish;
-        };
         for (std::size_t index = 0; index < queue_.size(); ++index) {
-            const Job& candidate = queue_[index];
-            if (!can_admit_locked(candidate)) {
-                continue;
-            }
-            if (selected == queue_.size()) {
-                selected = index;
-                continue;
-            }
-            const Job& current = queue_[selected];
-            const std::uint64_t candidate_priority = effective_priority(candidate);
-            const std::uint64_t current_priority = effective_priority(current);
-            if (candidate_priority > current_priority ||
-                (candidate_priority == current_priority &&
-                 (virtual_finish(candidate) < virtual_finish(current) ||
-                  (virtual_finish(candidate) == virtual_finish(current) &&
-                   candidate.sequence < current.sequence)))) {
-                selected = index;
+            if (can_admit_locked(queue_[index])) {
+                return index;
             }
         }
-        return selected;
+        return queue_.size();
     }
 
     void print_worker_event(
@@ -1572,8 +1511,6 @@ private:
             "{\"type\":\"native_event\",\"job_id\":\"" + json_escape(job_id) +
             "\",\"event\":\"" + event +
             "\",\"request_id\":\"" + json_escape(metadata.request_id) +
-            "\",\"priority\":" + std::to_string(metadata.priority) +
-            ",\"fairness_weight\":" + std::to_string(metadata.fairness_weight) +
             ",\"cpu_weight\":" + std::to_string(metadata.cpu_weight) +
             ",\"memory_reserve_bytes\":" + std::to_string(metadata.memory_reserve) +
              ",\"dictionary_reserve_bytes\":" + std::to_string(metadata.dictionary_reserve) +
@@ -1781,15 +1718,6 @@ private:
                 auto iterator = queue_.begin() + static_cast<std::ptrdiff_t>(selected);
                 job = std::move(*iterator);
                 queue_.erase(iterator);
-                auto fairness_iterator = fairness_.find(job.metadata.request_id);
-                if (fairness_iterator != fairness_.end()) {
-                    FairnessState& fairness = fairness_iterator->second;
-                    fairness.queued = fairness.queued > 0 ? fairness.queued - 1 : 0;
-                    fairness.active += 1;
-                    fairness.virtual_finish += (std::max)(
-                        std::uint64_t{1},
-                        std::uint64_t{1024} / (std::max)(std::size_t{1}, fairness.weight));
-                }
                 active_jobs_ += 1;
                 active_cpu_weight_ += job.metadata.cpu_weight;
                 active_memory_ += job.metadata.memory_reserve;
@@ -1826,14 +1754,6 @@ private:
                     ? active_memory_ - job.metadata.memory_reserve : 0;
                 if (job.metadata.solid_archive && active_solid_jobs_ > 0) {
                     active_solid_jobs_ -= 1;
-                }
-                auto fairness_iterator = fairness_.find(job.metadata.request_id);
-                if (fairness_iterator != fairness_.end()) {
-                    FairnessState& fairness = fairness_iterator->second;
-                    fairness.active = fairness.active > 0 ? fairness.active - 1 : 0;
-                    if (fairness.queued == 0 && fairness.active == 0) {
-                        fairness_.erase(fairness_iterator);
-                    }
                 }
                 remaining_jobs = active_jobs_;
                 remaining_cpu = active_cpu_weight_;
@@ -1877,7 +1797,6 @@ private:
     const std::size_t worker_count_;
     const std::size_t memory_budget_;
     const std::size_t queue_capacity_;
-    const std::size_t priority_aging_quantum_;
     const std::string profile_cache_path_;
     const bool profile_cache_enabled_;
     sunpack::sevenzip::NativeRuntimeControl runtime_controller_;
@@ -1885,8 +1804,6 @@ private:
     std::size_t active_cpu_weight_ = 0;
     std::size_t active_memory_ = 0;
     std::size_t active_solid_jobs_ = 0;
-    std::uint64_t next_sequence_ = 0;
-    std::unordered_map<std::string, FairnessState> fairness_;
     bool controller_recheck_ = false;
     bool any_job_failed_ = false;
     bool stopping_ = false;
