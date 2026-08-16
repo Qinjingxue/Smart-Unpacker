@@ -260,6 +260,29 @@ function Ensure-Bundled7ZipAssets {
     }
 }
 
+function Remove-PreviousNativeExtension {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$VenvPath
+    )
+
+    $sitePackages = Join-Path $VenvPath "Lib\site-packages"
+    if (-not (Test-Path -LiteralPath $sitePackages)) {
+        return
+    }
+
+    Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "uninstall", "--yes", "sunpack-native")
+    $leftovers = Get-ChildItem -LiteralPath $sitePackages -Force |
+        Where-Object {
+            $_.Name -eq "sunpack_native" -or
+            $_.Name -match "^sunpack_native-.*\.dist-info$" -or
+            $_.Name -match "^[~].*npack_native$"
+        }
+    foreach ($leftover in $leftovers) {
+        Remove-Item -LiteralPath $leftover.FullName -Recurse -Force
+    }
+}
+
 function Invoke-VerifiedFileDownload {
     param(
         [Parameter(Mandatory = $true)]
@@ -722,6 +745,7 @@ $venvScripts = Join-Path $venvPath "Scripts"
 $projectPath = Join-Path $repoRoot "pyproject.toml"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
+$rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $buildRoot = Join-Path $repoRoot "build"
@@ -762,6 +786,7 @@ $env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 
 Write-Step "Building and installing Rust native extension"
 $maturinCommand = Ensure-Maturin -PythonPath $venvPython -VenvScripts $venvScripts
+Remove-PreviousNativeExtension -PythonPath $venvPython -VenvPath $venvPath
 New-Item -ItemType Directory -Path $nativeWheelRoot -Force | Out-Null
 Invoke-Native -FilePath "cargo" -Arguments @("--version")
 Invoke-Native -FilePath $maturinCommand -Arguments @(
@@ -769,6 +794,7 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
     "--manifest-path", $nativeCargoToml,
     "--release",
     "--target", $rustTarget,
+    "--target-dir", $rustTargetDir,
     "--out", $nativeWheelRoot
 )
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot

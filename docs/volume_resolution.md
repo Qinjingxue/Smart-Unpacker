@@ -96,7 +96,7 @@ python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 
 ```
 
 The benchmark creates sparse temporary candidates, writes the versioned report beneath
-`build/benchmark-results/reader.volume-anchor/`, and removes its temporary corpus on exit.
+`benchmarks/results/reader.volume-anchor/`, and removes its temporary corpus on exit.
 
 ## Regression corpus
 

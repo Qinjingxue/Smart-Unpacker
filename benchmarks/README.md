@@ -45,7 +45,7 @@ applicable.
 
 Scenarios that generate real archives use `BenchmarkWorkspace` and share this lifecycle:
 
-1. Create corpus, work, and extraction-output directories under `build/benchmark-tmp/`.
+1. Create corpus, work, and extraction-output directories under `benchmarks/.work/`.
 2. Generate archives through the existing `ArchiveFixtureFactory` or scenario corpus builder.
 3. Always write `report.json` and `manifest.json` under
    `benchmarks/results/<scenario>/<UTC timestamp>-<run id>/`.
@@ -56,6 +56,12 @@ results are stored under `benchmarks/results/`. Use `--keep-workdir` only when
 debugging a generated archive; the retained path is recorded in `manifest.json`. Temporary
 archives are never copied to the durable result directory implicitly, so large corpora do not
 accumulate. A scenario may explicitly preserve a small diagnostic artifact with the workspace API.
+
+Remove regenerable benchmark data without touching versioned reports:
+
+```powershell
+python -m benchmarks clean --cache --work
+```
 
 `extraction format-matrix` builds ZIP, 7z, split 7z, RAR, split RAR, TAR, gzip,
 bzip2, xz, zstd and the conventional compressed-TAR aliases. It uses the bundled
@@ -71,7 +77,7 @@ rejected when they fall below the project's 1 MiB recognition floor.
 The format matrix now uses an adaptive host-pressure gate before every extractor launch.
 Tune it with `--max-cpu-percent`, `--min-available-memory-percent`, and
 `--pressure-max-wait-seconds`; `--case-cooldown-seconds` is an optional extra fixed delay.
-Generated corpora are content-addressed under `build/benchmark-cache/` and can be refreshed
+Generated corpora are content-addressed under `benchmarks/.cache/` and can be refreshed
 with `--rebuild-corpus-cache` or disabled with `--no-corpus-cache`. Use repeated `--format`
 options for a focused run. One diagnostic extraction per case reuses the large-archive
 runtime profiler and writes phase medians and per-format aggregates into the report; use

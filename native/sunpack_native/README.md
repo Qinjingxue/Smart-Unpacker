@@ -12,13 +12,13 @@ is Windows/COM/7z.dll-specific.
 
 ```powershell
 python -m pip install -e ".[build]"
-python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release
+python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64
 ```
 
 Install the generated wheel:
 
 ```powershell
-$wheel = Get-ChildItem native\sunpack_native\target\wheels\sunpack_native-*.whl | Select-Object -First 1 -ExpandProperty FullName
+$wheel = Get-ChildItem .cache\rust-target\x64\wheels\sunpack_native-*.whl | Select-Object -First 1 -ExpandProperty FullName
 python -m pip install --force-reinstall $wheel
 ```
 

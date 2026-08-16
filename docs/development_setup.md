@@ -94,7 +94,7 @@ ARM64 开发环境：
 
 ```powershell
 python -m pip install -e ".[build]"
-python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --out build\native-wheels-dev
+python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64 --out build\native-wheels-dev
 $wheel = Get-ChildItem build\native-wheels-dev\sunpack_native-*.whl |
     Sort-Object LastWriteTimeUtc -Descending |
     Select-Object -First 1 -ExpandProperty FullName

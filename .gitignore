@@ -87,3 +87,6 @@ repair_training/latest_runs.json
 tests/测试改造.txt
 tests/real/error_records
 .sunpack_bench_inspect
+/benchmarks/.cache/
+/benchmarks/.work/
+/.cache/

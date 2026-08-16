@@ -12,7 +12,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
-DEFAULT_TEMP_ROOT = REPO_ROOT / "build" / "benchmark-tmp"
+DEFAULT_TEMP_ROOT = REPO_ROOT / "benchmarks" / ".work"
 
 
 def _safe_name(value: str) -> str:

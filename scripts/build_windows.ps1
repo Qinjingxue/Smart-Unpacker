@@ -121,6 +121,29 @@ function Assert-LitePackageExcludesModelRuntime {
     }
 }
 
+function Remove-PreviousNativeExtension {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$VenvPath
+    )
+
+    $sitePackages = Join-Path $VenvPath "Lib\site-packages"
+    if (-not (Test-Path -LiteralPath $sitePackages)) {
+        return
+    }
+
+    Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "uninstall", "--yes", "sunpack-native")
+    $leftovers = Get-ChildItem -LiteralPath $sitePackages -Force |
+        Where-Object {
+            $_.Name -eq "sunpack_native" -or
+            $_.Name -match "^sunpack_native-.*\.dist-info$" -or
+            $_.Name -match "^[~].*npack_native$"
+        }
+    foreach ($leftover in $leftovers) {
+        Remove-Item -LiteralPath $leftover.FullName -Recurse -Force
+    }
+}
+
 function Assert-CommandExists {
     param(
         [string]$Command,
@@ -687,6 +710,7 @@ $modelManifestPath = Join-Path $modelsRoot "manifest.json"
 $iconPath = Join-Path $repoRoot "sunpack.ico"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
+$rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $toolsRoot = if ($buildArch -eq "x64") { Join-Path $repoRoot "tools" } else { Join-Path $repoRoot ("tools-" + $buildArch) }
@@ -790,6 +814,7 @@ Remove-IfExists -LiteralPath $releaseRoot
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
 Write-Step "Building and installing Rust native extension"
+Remove-PreviousNativeExtension -PythonPath $venvPython -VenvPath $venvPath
 New-Item -ItemType Directory -Path $nativeWheelRoot -Force | Out-Null
 Invoke-Native -FilePath "cargo" -Arguments @("--version")
 Invoke-Native -FilePath $maturinCommand -Arguments @(
@@ -797,6 +822,7 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
     "--manifest-path", $nativeCargoToml,
     "--release",
     "--target", $rustTarget,
+    "--target-dir", $rustTargetDir,
     "--out", $nativeWheelRoot
 )
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot

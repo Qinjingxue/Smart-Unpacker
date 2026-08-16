@@ -45,7 +45,7 @@ GENERATED_FORMATS = (
     "zip", "7z", "7z-split", "rar", "rar-split", "tar", "gz", "bz2", "xz", "zst", "tgz", "tbz2", "txz", "tzst",
 )
 MIN_SCANNABLE_ARCHIVE_BYTES = 1024 * 1024
-DEFAULT_CACHE_ROOT = ROOT / "build" / "benchmark-cache" / "extraction-format-matrix"
+DEFAULT_CACHE_ROOT = ROOT / "benchmarks" / ".cache" / "extraction-format-matrix"
 # Every subprocess below gets a hard timeout so a stale or hung command fails
 # loudly instead of blocking the whole matrix forever.
 DEFAULT_SUBPROCESS_TIMEOUT = float(os.environ.get("SUNPACK_BENCH_SUBPROCESS_TIMEOUT", "600"))

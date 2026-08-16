@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 
 from .registry import SCENARIOS
+
+
+BENCHMARKS_ROOT = Path(__file__).resolve().parent
+BENCHMARK_CACHE_ROOT = BENCHMARKS_ROOT / ".cache"
+BENCHMARK_WORK_ROOT = BENCHMARKS_ROOT / ".work"
 
 # A scenario that makes a stale API call must fail loudly instead of hanging the
 # whole benchmark run.  Every scenario therefore runs in a child process under
@@ -29,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
             f"{TIMEOUT_EXIT_CODE}."
         ),
     )
-    parser.add_argument("group", nargs="?", choices=sorted({key[0] for key in SCENARIOS}))
+    parser.add_argument("group", nargs="?", choices=[*sorted({key[0] for key in SCENARIOS}), "clean"])
     parser.add_argument("scenario", nargs="?")
     parser.add_argument("scenario_args", nargs=argparse.REMAINDER)
     return parser
@@ -56,12 +63,41 @@ def _run_scenario_in_subprocess(module: str, scenario_args: list[str], timeout: 
     return int(completed.returncode)
 
 
+def _clean_benchmark_artifacts(args: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Remove regenerable benchmark artifacts.")
+    parser.add_argument("--cache", action="store_true", help="Remove benchmarks/.cache.")
+    parser.add_argument("--work", action="store_true", help="Remove benchmarks/.work.")
+    parser.add_argument("--dry-run", action="store_true", help="Print paths without removing them.")
+    selected = parser.parse_args(args)
+    paths = [
+        ("cache", BENCHMARK_CACHE_ROOT, selected.cache),
+        ("work", BENCHMARK_WORK_ROOT, selected.work),
+    ]
+    if not any(enabled for _, _, enabled in paths):
+        parser.error("choose at least one of --cache or --work")
+    for label, path, enabled in paths:
+        if not enabled:
+            continue
+        if selected.dry_run:
+            print(f"would remove benchmark {label}: {path}")
+        elif path.exists():
+            shutil.rmtree(path)
+            print(f"removed benchmark {label}: {path}")
+        else:
+            print(f"benchmark {label} is already absent: {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.list:
         for scenario in SCENARIOS.values():
             print(f"{scenario.group:10} {scenario.name:24} {scenario.description}")
         return 0
+    if args.group == "clean":
+        if args.scenario:
+            _parser().error("clean accepts only --cache and/or --work")
+        return _clean_benchmark_artifacts(list(args.scenario_args))
     if not args.group or not args.scenario:
         _parser().error("group and scenario are required unless --list is used")
     selected = SCENARIOS.get((args.group, args.scenario))
