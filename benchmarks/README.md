@@ -15,13 +15,13 @@ python -m benchmarks reader password-fast-path --rounds 5
 python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 5
 python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cli `
   --iocp-chunk-mib 2 --iocp-buffers 8 --iocp-workers 2
-python -m benchmarks scan hotspots . --mode full --json-out build/scan-hotspots.json
-python -m benchmarks extraction format-matrix --runs 5 --json-out build/extraction-benchmark.json
-python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out build/sevenzip-worker-baseline.json
+python -m benchmarks scan hotspots . --mode full --json-out benchmarks/results/scan-hotspots.json
+python -m benchmarks extraction format-matrix --runs 5 --json-out benchmarks/results/extraction-benchmark.json
+python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out benchmarks/results/sevenzip-worker-baseline.json
 python -m benchmarks extraction worker-small-file-scheduling --jobs 256 --clients 4 --capacities 1,2,4,8 --runs 3
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss
-python -m benchmarks memory many-tasks --python-rounds 5 --worker-rounds 3 --json-out build/memory-growth.json
+python -m benchmarks memory many-tasks --python-rounds 5 --worker-rounds 3 --json-out benchmarks/results/memory-growth.json
 ```
 
 ## Run timeout
@@ -48,10 +48,11 @@ Scenarios that generate real archives use `BenchmarkWorkspace` and share this li
 1. Create corpus, work, and extraction-output directories under `build/benchmark-tmp/`.
 2. Generate archives through the existing `ArchiveFixtureFactory` or scenario corpus builder.
 3. Always write `report.json` and `manifest.json` under
-   `build/benchmark-results/<scenario>/<UTC timestamp>-<run id>/`.
+   `benchmarks/results/<scenario>/<UTC timestamp>-<run id>/`.
 4. Remove the complete temporary work directory when the scenario exits, including on failure.
 
-Use `--results-root PATH` to put durable results elsewhere. Use `--keep-workdir` only when
+Use `--results-root PATH` to put durable results elsewhere. By default, durable benchmark
+results are stored under `benchmarks/results/`. Use `--keep-workdir` only when
 debugging a generated archive; the retained path is recorded in `manifest.json`. Temporary
 archives are never copied to the durable result directory implicitly, so large corpora do not
 accumulate. A scenario may explicitly preserve a small diagnostic artifact with the workspace API.
@@ -137,7 +138,7 @@ single phase, and `--json-out` for a durable copy.
 
 `reader embedded-scan --generate-gib 10 --rounds 1 --skip-cli` creates a streamed
 ZIP64 fixture under the benchmark workspace, measures native embedded-scan wall/CPU
-time and process memory peaks, and writes the report to the durable benchmark-results
+time and process memory peaks, and writes the report to the durable `benchmarks/results`
 directory. The generated archive is removed automatically unless `--keep-workdir` is
 supplied. The 10 GiB member is stored (not highly compressed), so generation is not
 part of the measured scan operation and the run exercises a large-file scan directly.

@@ -28,6 +28,7 @@ env/
 
 # Local reports and generated outputs
 reports/
+benchmarks/results/
 *.log
 .sunpack_cache/
 .sunpack_watch/
