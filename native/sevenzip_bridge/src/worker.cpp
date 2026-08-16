@@ -1511,7 +1511,7 @@ private:
             "{\"type\":\"native_event\",\"job_id\":\"" + json_escape(job_id) +
             "\",\"event\":\"" + event +
             "\",\"request_id\":\"" + json_escape(metadata.request_id) +
-            ",\"cpu_weight\":" + std::to_string(metadata.cpu_weight) +
+            "\",\"cpu_weight\":" + std::to_string(metadata.cpu_weight) +
             ",\"memory_reserve_bytes\":" + std::to_string(metadata.memory_reserve) +
              ",\"dictionary_reserve_bytes\":" + std::to_string(metadata.dictionary_reserve) +
             ",\"active_jobs\":" + std::to_string(active_jobs) +
