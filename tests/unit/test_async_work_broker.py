@@ -2,7 +2,7 @@ import asyncio
 import threading
 import time
 
-from sunpack.coordinator.async_work import AsyncWorkBroker, CURRENT_WORK
+from sunpack.coordinator.async_work import AsyncWorkBroker, CURRENT_WORK, map_unbounded
 
 
 def test_broker_uses_fixed_workers_and_returns_on_owner_loop():
@@ -61,5 +61,25 @@ def test_broker_round_robins_requests_instead_of_draining_one_batch():
             assert started.index("b1") < started.index("a3")
         finally:
             await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_map_unbounded_starts_every_logical_item_without_a_caller_slot_limit():
+    async def scenario():
+        started = []
+        release = asyncio.Event()
+
+        async def operation(value):
+            started.append(value)
+            await release.wait()
+            return value * 2
+
+        task = asyncio.create_task(map_unbounded(range(32), operation))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert started == list(range(32))
+        release.set()
+        assert await task == [value * 2 for value in range(32)]
 
     asyncio.run(scenario())

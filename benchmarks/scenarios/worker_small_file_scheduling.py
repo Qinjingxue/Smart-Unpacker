@@ -239,6 +239,7 @@ def _run_batch(
     capacity: int,
     client_count: int,
     timeout_seconds: float,
+    sample_interval_ms: int,
     admission_case: dict[str, Any],
     label: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -263,6 +264,7 @@ def _run_batch(
             "thread_capacity": capacity,
             "adaptive_enabled": admission_case["adaptive_enabled"],
             "initial_active_jobs": initial_active_jobs,
+            "sample_interval_ms": sample_interval_ms,
             "memory_budget_bytes": admission_case["memory_budget_bytes"],
             # Admission cases must isolate one constraint; persisted profile
             # calibration would otherwise silently change CPU/IO weights.
@@ -361,6 +363,7 @@ def _run_batch(
                     raise RuntimeError(f"native worker exited with {jobs - len(completed)} incomplete jobs")
         finished_at = time.perf_counter()
     finally:
+        controller_events = worker.controller_events()
         resource_after = process_counters(worker_process)
         sampler.stop()
         worker.close()
@@ -397,6 +400,8 @@ def _run_batch(
         finished_at=finished_at,
         admission_case=admission_case,
         resource_metrics=resource_metrics,
+        controller_events=controller_events,
+        sample_interval_ms=sample_interval_ms,
     )
     trace = {
         "label": label,
@@ -404,6 +409,7 @@ def _run_batch(
         "events": events,
         "results": results,
         "failures": failures,
+        "controller_events": controller_events,
     }
     return summary, trace
 
@@ -421,6 +427,8 @@ def _summarize_batch(
     finished_at: float,
     admission_case: dict[str, Any],
     resource_metrics: dict[str, Any],
+    controller_events: list[dict[str, Any]],
+    sample_interval_ms: int,
 ) -> dict[str, Any]:
     ordered_events = sorted(events, key=lambda event: (int(event.get("sequence", 0)), float(event["received_at"])))
     by_job: dict[str, dict[str, float]] = {}
@@ -482,12 +490,22 @@ def _summarize_batch(
     expected_max_active = admission_case["expected_max_active"]
     if expected_max_active is None and admission_case["name"] != "adaptive-baseline":
         expected_max_active = capacity
+    first_enqueue_at = min(
+        (float(event["received_at"]) for event in ordered_events if event.get("event") == "job_queued"),
+        default=None,
+    )
+    controller_offsets_ms = [
+        max(0.0, (float(event["received_at"]) - first_enqueue_at) * 1000.0)
+        for event in controller_events
+        if first_enqueue_at is not None and "received_at" in event
+    ]
     return {
         "admission_case": admission_case["name"],
         "admission_blocker": admission_case["blocker"],
         "admission_description": admission_case["description"],
         "expected_max_active_jobs": expected_max_active,
         "capacity": capacity,
+        "sample_interval_ms": sample_interval_ms,
         "client_count": client_count,
         "job_count": expected_jobs,
         "passed_jobs": passed,
@@ -515,6 +533,10 @@ def _summarize_batch(
         "first_admission_spread_jobs": max(first_admission.values(), default=0) - min(first_admission.values(), default=0),
         "longest_same_request_admission_run": _max_run(admission_requests),
         "admitted_jobs": len(admissions),
+        "controller_adjustment_count": len(controller_events),
+        "controller_first_adjustment_after_enqueue_ms": min(controller_offsets_ms) if controller_offsets_ms else None,
+        "controller_last_adjustment_after_enqueue_ms": max(controller_offsets_ms) if controller_offsets_ms else None,
+        "controller_peak_active_limit": max((int(event.get("active_limit", 0) or 0) for event in controller_events), default=None),
         **resource_metrics,
     }
 
@@ -533,6 +555,9 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "overall_admission_jain_index",
         "longest_same_request_admission_run",
         "observed_peak_active_jobs",
+        "controller_adjustment_count",
+        "controller_first_adjustment_after_enqueue_ms",
+        "controller_peak_active_limit",
         "worker_cpu_core_utilization",
         "host_cpu_utilization",
         "worker_rss_peak_mib",
@@ -583,6 +608,12 @@ def main() -> int:
     parser.add_argument("--files-per-archive", type=int, default=8)
     parser.add_argument("--file-size-bytes", type=int, default=8192)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--sample-interval-ms",
+        type=int,
+        default=500,
+        help="Native adaptive-controller sample interval (100-5000 ms).",
+    )
     parser.add_argument("--adaptive-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--admission-cases",
@@ -604,6 +635,8 @@ def main() -> int:
         parser.error("runs, files per archive, and file size must be positive; warmups must be non-negative")
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if not 100 <= args.sample_interval_ms <= 5000:
+        parser.error("--sample-interval-ms must be between 100 and 5000")
     try:
         worker_path = Path(get_sevenzip_bridge_worker_path()).resolve()
         dll_path = Path(get_7z_dll_path()).resolve()
@@ -635,6 +668,7 @@ def main() -> int:
                         capacity=capacity,
                         client_count=args.clients,
                         timeout_seconds=args.timeout_seconds,
+                        sample_interval_ms=args.sample_interval_ms,
                         admission_case=admission_case,
                         label=label,
                     )
@@ -664,6 +698,7 @@ def main() -> int:
                 "files_per_archive": args.files_per_archive,
                 "file_size_bytes": args.file_size_bytes,
                 "adaptive_enabled": bool(args.adaptive_enabled),
+                "sample_interval_ms": args.sample_interval_ms,
             },
             "environment": {
                 "worker_path": str(worker_path),

@@ -1,6 +1,7 @@
 #include "sevenzip_bridge/bridge.hpp"
 #include "internal/sevenzip_paths.hpp"
 #include "internal/sevenzip_status.hpp"
+#include "internal/native_runtime_control.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -54,6 +55,26 @@ bool check_password_probe_status_names() {
     )) == "needs_volume_or_tail_damaged";
 }
 
+bool check_runtime_control_uses_io_rates() {
+    using namespace sunpack::sevenzip;
+    NativeRuntimeConfig config;
+    config.initial_active_jobs = 3;
+    config.scale_down_streak_required = 1;
+    config.io_scale_down_bytes_per_second = 100;
+    NativeRuntimeControl controller(4, 0, config);
+
+    NativeRuntimeSample sample;
+    sample.available_memory = 4ULL << 30;
+    sample.io_bytes_per_second = 101.0;
+    controller.observe(sample, 0, 3, 3, 3, 0, 0.1);
+    const auto short_interval = controller.snapshot(3, 3, 3, 0);
+
+    NativeRuntimeControl second_controller(4, 0, config);
+    second_controller.observe(sample, 0, 3, 3, 3, 0, 0.5);
+    const auto long_interval = second_controller.snapshot(3, 3, 3, 0);
+    return short_interval.io_limit == 2 && long_interval.io_limit == 2;
+}
+
 }  // namespace
 #endif
 
@@ -70,6 +91,10 @@ int wmain(int argc, wchar_t** argv) {
     if (!check_password_probe_status_names()) {
         std::cerr << "password probe status name check failed\n";
         return 4;
+    }
+    if (!check_runtime_control_uses_io_rates()) {
+        std::cerr << "runtime control IO rate check failed\n";
+        return 5;
     }
 #endif
 

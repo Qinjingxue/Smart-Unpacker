@@ -111,6 +111,9 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     )
     set_int("profile_calibration_window_size", "SUNPACK_NATIVE_PROFILE_WINDOW_SIZE", minimum=4)
     set_int("profile_calibration_max_delta", "SUNPACK_NATIVE_PROFILE_MAX_DELTA", minimum=0)
+    set_int("io_scale_up_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_UP_BYTES_PER_SECOND")
+    set_int("io_scale_up_backlog_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES_PER_SECOND")
+    set_int("io_scale_down_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES_PER_SECOND")
     set_int("max_queue_jobs", "SUNPACK_NATIVE_MAX_QUEUE_JOBS")
     set_int("priority_aging_quantum", "SUNPACK_NATIVE_PRIORITY_AGING_QUANTUM")
     set_float("profile_regression_ratio", "SUNPACK_NATIVE_PROFILE_REGRESSION_RATIO")
@@ -143,6 +146,7 @@ class _NativeWorkerProcess:
         self.process: subprocess.Popen | None = None
         self.worker_epoch = ""
         self.stderr_queue: queue.Queue[str | None] = queue.Queue()
+        self._controller_events: list[dict[str, Any]] = []
         self._job_states: dict[str, dict[str, Any]] = {}
         self._async_jobs: dict[str, dict[str, Any]] = {}
         self._dispatch_lock = threading.Lock()
@@ -179,6 +183,10 @@ class _NativeWorkerProcess:
                 "state": "submitted",
                 "worker_epoch": self.worker_epoch,
             }
+
+    def controller_events(self) -> list[dict[str, Any]]:
+        with self._dispatch_lock:
+            return list(self._controller_events)
 
     def submit_async(
         self,
@@ -235,6 +243,8 @@ class _NativeWorkerProcess:
                     payload = {}
                 job_id = str(payload.get("job_id") or "") if isinstance(payload, dict) else ""
                 with self._dispatch_lock:
+                    if isinstance(payload, dict) and payload.get("type") == "native_controller":
+                        self._controller_events.append({"received_at": time.perf_counter(), **payload})
                     async_state = self._async_jobs.get(job_id) if job_id else None
                     job_state = self._job_states.get(job_id) if job_id else None
                     if job_state is not None and isinstance(payload, dict):

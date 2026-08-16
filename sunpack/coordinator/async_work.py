@@ -50,6 +50,28 @@ async def map_bounded(
     return [results[index] for index in sorted(results)]
 
 
+async def map_unbounded(
+    values: Iterable[T],
+    operation: Callable[[T], Awaitable[U]],
+) -> list[U]:
+    """Start every logical item while individual stages retain their own bounds.
+
+    Native extraction owns execution admission. The operation may still await
+    bounded Python work such as preflight, but it never waits for a caller-side
+    extraction slot.
+    """
+
+    tasks: list[asyncio.Task[U]] = []
+    try:
+        tasks.extend(asyncio.create_task(operation(value)) for value in values)
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 class CancellationToken:
     """Cooperative cancellation shared by one request and its worker jobs."""
 

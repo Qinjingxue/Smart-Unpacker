@@ -1085,12 +1085,12 @@ std::string configured_native_profile_cache_path() {
 std::size_t configured_native_queue_capacity() noexcept {
     const char* value = std::getenv("SUNPACK_NATIVE_MAX_QUEUE_JOBS");
     if (!value || !*value) {
-        return 4096;
+        return 0;
     }
     char* end = nullptr;
     const unsigned long long configured = std::strtoull(value, &end, 10);
-    if (end == value || *end != '\0' || configured == 0) {
-        return 4096;
+    if (end == value || *end != '\0') {
+        return 0;
     }
     return (std::min)(static_cast<std::size_t>(configured), std::size_t{1'000'000});
 }
@@ -1217,9 +1217,11 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
     config.adaptive_enabled = configured_native_adaptive_enabled();
     config.initial_active_jobs = configured_native_initial_active_jobs();
     if (config.initial_active_jobs == 0) {
+        const bool background = requested_native_process_mode() == "background";
         config.initial_active_jobs = (std::min)(
             max_active_jobs,
-            aggressive ? std::size_t{6} : std::size_t{4});
+            background ? (aggressive ? std::size_t{3} : std::size_t{2})
+                       : (aggressive ? std::size_t{8} : std::size_t{4}));
     }
     config.throughput_window_size = configured_native_size(
         "SUNPACK_NATIVE_THROUGHPUT_WINDOW_SIZE", config.throughput_window_size, 4);
@@ -1236,15 +1238,20 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         "SUNPACK_NATIVE_CPU_SCALE_UP_PERCENT", config.cpu_scale_up_percent, 0.0, 100.0);
     config.cpu_scale_down_percent = configured_native_double(
         "SUNPACK_NATIVE_CPU_SCALE_DOWN_PERCENT", config.cpu_scale_down_percent, 0.0, 100.0);
-    config.io_scale_up_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES",
-        aggressive ? (80ULL << 20) : (20ULL << 20));
-    config.io_scale_up_backlog_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES",
-        aggressive ? (160ULL << 20) : (40ULL << 20));
-    config.io_scale_down_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES",
-        aggressive ? (400ULL << 20) : (140ULL << 20));
+    const std::size_t legacy_io_scale_up_bytes = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES", aggressive ? (80ULL << 20) : (20ULL << 20));
+    const std::size_t legacy_io_scale_up_backlog_bytes = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES", aggressive ? (160ULL << 20) : (40ULL << 20));
+    const std::size_t legacy_io_scale_down_bytes = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES", aggressive ? (400ULL << 20) : (140ULL << 20));
+    // Preserve the old per-500ms configuration values while sampling at a
+    // variable cadence. New values are rates in bytes per second.
+    config.io_scale_up_bytes_per_second = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES_PER_SECOND", legacy_io_scale_up_bytes * 2);
+    config.io_scale_up_backlog_bytes_per_second = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES_PER_SECOND", legacy_io_scale_up_backlog_bytes * 2);
+    config.io_scale_down_bytes_per_second = configured_native_size(
+        "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES_PER_SECOND", legacy_io_scale_down_bytes * 2);
     config.medium_backlog_threshold = configured_native_size(
         "SUNPACK_NATIVE_MEDIUM_BACKLOG_THRESHOLD", config.medium_backlog_threshold);
     config.high_backlog_threshold = configured_native_size(
@@ -1262,8 +1269,6 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         86400.0);
     config.profile_calibration_min_parallel = configured_native_size(
         "SUNPACK_NATIVE_PROFILE_MIN_PARALLEL", config.profile_calibration_min_parallel);
-    config.io_scale_up_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES", config.io_scale_up_bytes);
     config.memory_scale_down_available = configured_native_size(
         "SUNPACK_NATIVE_MEMORY_SCALE_DOWN_AVAILABLE_BYTES", config.memory_scale_down_available);
     config.memory_scale_up_available = configured_native_size(
@@ -1334,6 +1339,7 @@ public:
             metadata.io_weight = adjusted_weight(metadata.io_weight, adjustment.io);
             metadata.memory_reserve = adjusted_memory(metadata.memory_reserve, adjustment.memory);
             if (memory_budget_ != 0 && metadata.memory_reserve > memory_budget_) {
+                any_job_failed_ = true;
                 promise->set_value(-1);
                 print_json_line(
                     "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
@@ -1343,7 +1349,8 @@ public:
                 print_worker_event(job_id, "job_finished", metadata);
                 return future;
             }
-            if (queue_.size() >= queue_capacity_) {
+            if (queue_capacity_ != 0 && queue_.size() >= queue_capacity_) {
+                any_job_failed_ = true;
                 promise->set_value(-2);
                 print_json_line(
                     "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
@@ -1366,9 +1373,11 @@ public:
                 metadata,
                 next_sequence_++,
             });
+            controller_recheck_ = true;
         }
         print_worker_event(job_id, "job_queued", metadata);
         condition_.notify_one();
+        controller_condition_.notify_one();
         return future;
     }
 
@@ -1391,6 +1400,8 @@ public:
         condition_.notify_all();
         return true;
     }
+
+    bool had_job_failure() const noexcept { return any_job_failed_; }
 
     void stop() noexcept {
         {
@@ -1614,6 +1625,23 @@ private:
             active_io_weight);
     }
 
+    static void print_controller_event(
+        const sunpack::sevenzip::NativeRuntimeSnapshot& snapshot,
+        std::size_t queued_jobs,
+        unsigned sampled_interval_ms,
+        unsigned next_interval_ms
+    ) noexcept {
+        print_json_line(
+            "{\"type\":\"native_controller\",\"queued_jobs\":" + std::to_string(queued_jobs) +
+            ",\"active_limit\":" + std::to_string(snapshot.active_limit) +
+            ",\"cpu_limit\":" + std::to_string(snapshot.cpu_limit) +
+            ",\"io_limit\":" + std::to_string(snapshot.io_limit) +
+            ",\"memory_limit\":" + std::to_string(snapshot.memory_limit) +
+            ",\"active_jobs\":" + std::to_string(snapshot.active_jobs) +
+            ",\"sampled_interval_ms\":" + std::to_string(sampled_interval_ms) +
+            ",\"next_sample_interval_ms\":" + std::to_string(next_interval_ms) + "}");
+    }
+
 #ifdef _WIN32
     static std::uint64_t filetime_ticks(const FILETIME& value) noexcept {
         ULARGE_INTEGER combined{};
@@ -1636,7 +1664,7 @@ private:
         return static_cast<unsigned>((std::max)(100UL, (std::min)(configured, 5000UL)));
     }
 
-    sunpack::sevenzip::NativeRuntimeSample read_runtime_sample() noexcept {
+    sunpack::sevenzip::NativeRuntimeSample read_runtime_sample(double elapsed_seconds) noexcept {
         sunpack::sevenzip::NativeRuntimeSample sample;
 #ifdef _WIN32
         MEMORYSTATUSEX memory_status{};
@@ -1651,9 +1679,10 @@ private:
         IO_COUNTERS io_counters{};
         if (GetProcessIoCounters(GetCurrentProcess(), &io_counters)) {
             const std::uint64_t total_io = io_counters.ReadTransferCount + io_counters.WriteTransferCount;
-            if (has_process_io_sample_) {
-                sample.io_bytes = total_io >= previous_process_io_
+            if (has_process_io_sample_ && elapsed_seconds > 0.0) {
+                const std::uint64_t io_bytes = total_io >= previous_process_io_
                     ? total_io - previous_process_io_ : 0;
+                sample.io_bytes_per_second = static_cast<double>(io_bytes) / elapsed_seconds;
             }
             previous_process_io_ = total_io;
             has_process_io_sample_ = true;
@@ -1684,31 +1713,77 @@ private:
         return sample;
     }
 
+    unsigned controller_interval_ms(
+        const sunpack::sevenzip::NativeRuntimeSnapshot& snapshot,
+        std::size_t queued_jobs
+    ) const noexcept {
+        const unsigned configured = native_sample_interval_ms();
+        if (queued_jobs == 0) {
+            return (std::min)(5000U, (std::max)(1000U, configured));
+        }
+        if (queued_jobs > (std::max)(std::size_t{1}, snapshot.active_limit) * 2 &&
+            snapshot.active_limit < worker_count_) {
+            return 100;
+        }
+        return (std::min)(configured, 250U);
+    }
+
     void controller_loop() noexcept {
-        const auto interval = std::chrono::milliseconds(native_sample_interval_ms());
+        constexpr unsigned minimum_sample_interval_ms = 100;
+        unsigned next_interval_ms = native_sample_interval_ms();
+        auto last_sample_at = std::chrono::steady_clock::now();
         while (true) {
             std::unique_lock<std::mutex> wait_lock(mutex_);
-            if (controller_condition_.wait_for(wait_lock, interval, [this] { return stopping_; })) {
+            controller_condition_.wait_for(
+                wait_lock,
+                std::chrono::milliseconds(next_interval_ms),
+                [this] { return stopping_ || controller_recheck_; });
+            if (stopping_) {
                 break;
             }
+            controller_recheck_ = false;
             wait_lock.unlock();
-            const auto sample = read_runtime_sample();
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed_seconds = std::chrono::duration<double>(now - last_sample_at).count();
+            if (elapsed_seconds * 1000.0 < minimum_sample_interval_ms) {
+                next_interval_ms = (std::max)(
+                    1U,
+                    minimum_sample_interval_ms - static_cast<unsigned>(elapsed_seconds * 1000.0));
+                std::unique_lock<std::mutex> cooldown_lock(mutex_);
+                if (controller_condition_.wait_for(
+                        cooldown_lock,
+                        std::chrono::milliseconds(next_interval_ms),
+                        [this] { return stopping_; })) {
+                    break;
+                }
+                continue;
+            }
+            const unsigned sampled_interval_ms = static_cast<unsigned>(elapsed_seconds * 1000.0);
+            last_sample_at = now;
+            const auto sample = read_runtime_sample(elapsed_seconds);
             bool changed = false;
+            std::size_t queued_jobs = 0;
+            sunpack::sevenzip::NativeRuntimeSnapshot snapshot;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (stopping_) {
                     break;
                 }
+                queued_jobs = queue_.size();
                 changed = runtime_controller_.observe(
                     sample,
-                    queue_.size(),
+                    queued_jobs,
                     active_jobs_,
                     active_cpu_weight_,
                     active_io_weight_,
                     active_memory_,
-                    static_cast<double>(interval.count()) / 1000.0);
+                    elapsed_seconds);
+                snapshot = runtime_controller_.snapshot(
+                    active_jobs_, active_cpu_weight_, active_io_weight_, active_memory_);
             }
+            next_interval_ms = controller_interval_ms(snapshot, queued_jobs);
             if (changed) {
+                print_controller_event(snapshot, queued_jobs, sampled_interval_ms, next_interval_ms);
                 condition_.notify_all();
             }
         }
@@ -1821,8 +1896,11 @@ private:
                     job.metadata.cpu_weight,
                     job.metadata.io_weight,
                     job.metadata.memory_reserve);
+                any_job_failed_ = any_job_failed_ || code != 0;
+                controller_recheck_ = true;
             }
             condition_.notify_all();
+            controller_condition_.notify_one();
             print_active_event(job, "job_finished", remaining_jobs, remaining_cpu, remaining_memory, remaining_io);
             try {
                 job.promise->set_value(code);
@@ -1858,6 +1936,8 @@ private:
     std::size_t active_solid_jobs_ = 0;
     std::uint64_t next_sequence_ = 0;
     std::unordered_map<std::string, FairnessState> fairness_;
+    bool controller_recheck_ = false;
+    bool any_job_failed_ = false;
     bool stopping_ = false;
 #ifdef _WIN32
     bool has_process_io_sample_ = false;
@@ -1904,8 +1984,7 @@ std::size_t configured_native_worker_count() noexcept {
 
 int run_message(
     const std::string& request,
-    NativeJobExecutor& executor,
-    std::vector<std::future<int>>& pending
+    NativeJobExecutor& executor
 ) {
     const std::string command = json_string_field(request, "worker_command", "");
     if (command == "cancel") {
@@ -1918,7 +1997,9 @@ int run_message(
     if (command == "shutdown") {
         return 0;
     }
-    pending.push_back(executor.submit(request));
+    // Native owns queued work. Keeping one future per accepted message would
+    // reintroduce a Python-independent caller-side queue in the worker main.
+    executor.submit(request);
     return 0;
 }
 
@@ -1934,7 +2015,6 @@ int main() {
         ",\"initial_active_limit\":" + std::to_string(runtime_config.initial_active_jobs) +
         ",\"process_mode\":\"" + requested_process_mode +
         "\",\"process_mode_applied\":" + (process_mode_applied ? "true" : "false") + "}");
-    std::vector<std::future<int>> pending;
     std::string line;
     while (std::getline(std::cin, line)) {
         line.erase(line.begin(), std::find_if(line.begin(), line.end(), [](unsigned char ch) {
@@ -1944,17 +2024,12 @@ int main() {
             continue;
         }
         const bool shutdown = json_string_field(line, "worker_command", "") == "shutdown";
-        const int code = run_message(line, executor, pending);
+        const int code = run_message(line, executor);
         if (shutdown) {
             executor.stop();
             return code;
         }
     }
     executor.stop();
-    for (auto& future : pending) {
-        if (future.get() != 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return executor.had_job_failure() ? 1 : 0;
 }

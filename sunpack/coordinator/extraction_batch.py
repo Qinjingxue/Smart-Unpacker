@@ -38,7 +38,7 @@ from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.support.output_cleanup import OutputCleanupEvent
-from sunpack.coordinator.async_work import map_bounded
+from sunpack.coordinator.async_work import map_unbounded
 
 
 def _advance_batch_state(state, sent, *, first: bool):
@@ -244,14 +244,10 @@ class ExtractionBatchRunner:
                 ensure_input_lease=ensure_input_lease,
             )
 
-        worker_config = (
-            self.config.get("performance", {}).get("worker", {})
-            if isinstance(self.config.get("performance"), dict)
-            else {}
-        )
-        configured_limit = int(worker_config.get("max_inflight_files", 0) or 0) if isinstance(worker_config, dict) else 0
-        inflight_limit = configured_limit or min(512, max(64, broker.thread_capacity * 8))
-        outcomes = await map_bounded(prepared_tasks, inflight_limit, execute_one)
+        # Python only bounds blocking preparation through the broker. Every
+        # extraction-ready task is submitted to the native worker, where
+        # fairness and resource admission are centralized.
+        outcomes = await map_unbounded(prepared_tasks, execute_one)
 
         output_dirs = []
         logical_scan_roots = []
