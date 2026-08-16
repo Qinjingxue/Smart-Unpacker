@@ -11,8 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <utility>
@@ -45,13 +47,31 @@ public:
     struct FileState;
     using FileStatePtr = std::shared_ptr<FileState>;
 
+    struct FileSnapshot {
+        UInt64 accepted_bytes = 0;
+        UInt64 written_bytes = 0;
+        UInt32 output_crc32 = 0;
+        Int32 operation_result = 0;
+        HRESULT hresult = S_OK;
+        int win32_error = 0;
+        bool operation_result_set = false;
+        bool has_output_crc32 = false;
+        bool has_mtime_ns = false;
+        UInt64 mtime_ns = 0;
+        std::vector<unsigned char> magic;
+        bool failed = false;
+        bool closed = false;
+        std::size_t peak_active_data_writes = 0;
+    };
+
     struct WorkItem {
         enum class Kind { Data, Close };
 
-        static WorkItem data(Buffer* value) {
+        static WorkItem data(Buffer* value, UInt64 offset) {
             WorkItem item;
             item.kind = Kind::Data;
             item.buffer = value;
+            item.output_offset = offset;
             return item;
         }
 
@@ -65,6 +85,7 @@ public:
         Kind kind = Kind::Data;
         Buffer* buffer = nullptr;
         FileStatePtr file;
+        UInt64 output_offset = 0;
     };
 
     struct FileState {
@@ -74,44 +95,63 @@ public:
             std::wstring archive_path,
             UInt32 archive_index,
             std::size_t trace)
-            : job(std::move(state)),
-              path(std::move(file_path)),
-              item_path(std::move(archive_path)),
+            : item_path(std::move(archive_path)),
               item_index(archive_index),
-              trace_index(trace) {}
+              trace_index(trace),
+              job(std::move(state)),
+              path(std::move(file_path)) {}
+
+        // These fields are immutable after construction and may be used as output identity.
+        const std::wstring item_path;
+        const UInt32 item_index = 0;
+        const std::size_t trace_index = 0;
+
+    private:
+        friend class AsyncFileWriter;
 
         JobStatePtr job;
         std::wstring path;
-        std::wstring item_path;
-        UInt32 item_index = 0;
-        std::size_t trace_index = 0;
         std::atomic<UInt64> accepted_bytes{0};
+        std::atomic<UInt64> next_write_offset{0};
         std::size_t inflight_bytes = 0;
+        std::size_t outstanding_data = 0;
+        std::size_t active_data_writes = 0;
+        std::size_t peak_active_data_writes = 0;
         UInt64 written_bytes = 0;
         UInt32 output_crc32 = 0;
         Int32 operation_result = 0;
-        bool operation_result_set = false;
         HRESULT hresult = S_OK;
         int win32_error = 0;
+        bool operation_result_set = false;
         bool has_output_crc32 = false;
         bool has_mtime_ns = false;
         UInt64 mtime_ns = 0;
         std::vector<unsigned char> magic;
         bool failed = false;
         bool closed = false;
-        std::deque<WorkItem> pending;
-        bool ready = false;
-        bool writing = false;
-
-    private:
-        friend class AsyncFileWriter;
+        bool close_requested = false;
+        bool close_enqueued = false;
         HANDLE handle = INVALID_HANDLE_VALUE;
         bool open_attempted = false;
     };
 
     struct Buffer {
-        Buffer() : data(new unsigned char[kBufferSize]) {}
+        Buffer()
+            : data(new unsigned char[kBufferSize]),
+              completion_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
+            if (completion_event == nullptr) {
+                throw std::bad_alloc();
+            }
+        }
+
+        ~Buffer() {
+            if (completion_event != nullptr) {
+                CloseHandle(completion_event);
+            }
+        }
+
         std::unique_ptr<unsigned char[]> data;
+        HANDLE completion_event = nullptr;
         FileStatePtr file;
         UInt32 size = 0;
     };
@@ -210,14 +250,15 @@ public:
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 producer_cv_.wait(lock, [this, &job, &file] {
-                    return terminal_result_locked(job) != S_OK || can_accept_locked(job, file);
+                    return terminal_result_locked(job) != S_OK || file->close_requested ||
+                        can_accept_locked(job, file);
                 });
                 const HRESULT error = terminal_result_locked(job);
-                if (error != S_OK) {
+                if (error != S_OK || file->close_requested) {
                     if (processed_size) {
                         *processed_size = consumed;
                     }
-                    return error;
+                    return error == S_OK ? E_ABORT : error;
                 }
                 buffer = free_buffers_.front();
                 free_buffers_.pop_front();
@@ -241,32 +282,52 @@ public:
 
             const auto chunk = static_cast<UInt32>(chunk_size);
             std::memcpy(buffer->data.get(), source + consumed, chunk);
-            buffer->size = chunk;
-            buffer->file = file;
 
             HRESULT enqueue_result = S_OK;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 const HRESULT error = terminal_result_locked(job);
-                if (error != S_OK) {
+                if (error != S_OK || file->close_requested) {
                     job->inflight_bytes -= chunk;
                     file->inflight_bytes -= chunk;
-                    buffer->file.reset();
-                    buffer->size = 0;
                     free_buffers_.push_back(buffer);
                     if (processed_size) {
                         *processed_size = consumed;
                     }
-                    enqueue_result = error;
+                    enqueue_result = error == S_OK ? E_ABORT : error;
                 } else {
+                    buffer->file = file;
+                    buffer->size = chunk;
                     try {
-                        enqueue_file_job_locked(file, WorkItem::data(buffer));
+                        // Queue allocation happens before offset allocation, so an allocation
+                        // failure cannot leave a hole in the file's logical byte range.
+                        work_queue_.emplace_back(WorkItem::data(buffer, 0));
+                        const UInt64 output_offset = file->next_write_offset.fetch_add(
+                            chunk, std::memory_order_relaxed);
+                        work_queue_.back().output_offset = output_offset;
+                        if (output_offset > (std::numeric_limits<UInt64>::max)() - chunk) {
+                            work_queue_.pop_back();
+                            buffer->file.reset();
+                            buffer->size = 0;
+                            job->inflight_bytes -= chunk;
+                            file->inflight_bytes -= chunk;
+                            free_buffers_.push_back(buffer);
+                            mark_file_failure_locked(file, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
+                            set_job_error_locked(job, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
+                            enqueue_result = E_FAIL;
+                        } else {
+                            ++queued_jobs_;
+                            ++job->pending_jobs;
+                            ++file->outstanding_data;
+                            file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
+                        }
                     } catch (...) {
-                        job->inflight_bytes -= chunk;
-                        file->inflight_bytes -= chunk;
                         buffer->file.reset();
                         buffer->size = 0;
+                        job->inflight_bytes -= chunk;
+                        file->inflight_bytes -= chunk;
                         free_buffers_.push_back(buffer);
+                        mark_file_failure_locked(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
                         set_job_error_locked(job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
                         if (processed_size) {
                             *processed_size = consumed;
@@ -274,17 +335,12 @@ public:
                         enqueue_result = E_OUTOFMEMORY;
                     }
                 }
-                if (enqueue_result == S_OK) {
-                    ++queued_jobs_;
-                    ++job->pending_jobs;
-                }
             }
             if (enqueue_result != S_OK) {
                 producer_cv_.notify_all();
                 return enqueue_result;
             }
             consumed += chunk;
-            file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
             work_cv_.notify_one();
         }
 
@@ -303,28 +359,34 @@ public:
         if (!file) {
             return;
         }
-        try {
-            std::unique_lock<std::mutex> lock(mutex_);
-            synchronize_cancellation_locked(file->job);
-            producer_cv_.wait(lock, [this, &file] {
-                return terminal_result_locked(file->job) != S_OK || queued_jobs_ < kMaxQueuedJobs;
-            });
-            const HRESULT error = terminal_result_locked(file->job);
-            if (error != S_OK) {
-                mark_file_failure_locked(file, error, current_win32_error_locked(file->job));
+
+        bool queued_close = false;
+        bool direct_close = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (file->close_requested) {
                 return;
             }
+            synchronize_cancellation_locked(file->job);
+            file->close_requested = true;
             file->output_crc32 = output_crc32;
             file->has_output_crc32 = has_output_crc32;
             file->magic = std::move(magic);
-            enqueue_file_job_locked(file, WorkItem::close(file));
-            ++queued_jobs_;
-            ++file->job->pending_jobs;
-            lock.unlock();
-            work_cv_.notify_one();
-        } catch (...) {
-            record_failure(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+            if (file->job) {
+                // Reserve the close before the last data completion can wake finish_job().
+                ++file->job->pending_jobs;
+            }
+            if (file->outstanding_data == 0) {
+                queued_close = enqueue_close_locked(file, &direct_close);
+            }
         }
+        if (queued_close) {
+            work_cv_.notify_one();
+        }
+        if (direct_close) {
+            process_close(file);
+        }
+        producer_cv_.notify_all();
     }
 
     HRESULT finish_job(const JobStatePtr& job) noexcept {
@@ -385,6 +447,42 @@ public:
         return current_win32_error_locked(job);
     }
 
+    UInt64 accepted_bytes(const FileStatePtr& file) const noexcept {
+        return file ? file->accepted_bytes.load(std::memory_order_relaxed) : 0;
+    }
+
+    void record_operation_result(const FileStatePtr& file, Int32 operation_result) noexcept {
+        if (!file) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        file->operation_result = operation_result;
+        file->operation_result_set = true;
+    }
+
+    FileSnapshot snapshot_file(const FileStatePtr& file) const {
+        FileSnapshot snapshot;
+        if (!file) {
+            return snapshot;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot.accepted_bytes = file->accepted_bytes.load(std::memory_order_relaxed);
+        snapshot.written_bytes = file->written_bytes;
+        snapshot.output_crc32 = file->output_crc32;
+        snapshot.operation_result = file->operation_result;
+        snapshot.hresult = file->hresult;
+        snapshot.win32_error = file->win32_error;
+        snapshot.operation_result_set = file->operation_result_set;
+        snapshot.has_output_crc32 = file->has_output_crc32;
+        snapshot.has_mtime_ns = file->has_mtime_ns;
+        snapshot.mtime_ns = file->mtime_ns;
+        snapshot.magic = file->magic;
+        snapshot.failed = file->failed;
+        snapshot.closed = file->closed;
+        snapshot.peak_active_data_writes = file->peak_active_data_writes;
+        return snapshot;
+    }
+
     void finish() noexcept {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -395,6 +493,7 @@ public:
                 }
             }
         }
+        // Writer threads still drain queued data and deferred Close work before exiting.
         work_cv_.notify_all();
         producer_cv_.notify_all();
         for (auto& worker : workers_) {
@@ -462,8 +561,8 @@ private:
     }
 
     bool can_accept_locked(const JobStatePtr& job, const FileStatePtr& file) const noexcept {
-        return job && file && !free_buffers_.empty() && queued_jobs_ < kMaxQueuedJobs &&
-            job->inflight_bytes < job->max_inflight_bytes &&
+        return job && file && !file->close_requested && !free_buffers_.empty() &&
+            queued_jobs_ < kMaxQueuedJobs && job->inflight_bytes < job->max_inflight_bytes &&
             file->inflight_bytes < kDefaultFileInFlightBytes;
     }
 
@@ -478,87 +577,55 @@ private:
         }
     }
 
-    void enqueue_file_job_locked(const FileStatePtr& file, WorkItem item) {
-        if (!file) {
-            return;
+    bool enqueue_close_locked(const FileStatePtr& file, bool* direct_close) noexcept {
+        if (!file || !file->close_requested || file->close_enqueued || file->closed ||
+            file->outstanding_data != 0) {
+            return false;
         }
-        file->pending.push_back(std::move(item));
-        if (!file->ready && !file->writing) {
-            try {
-                ready_files_.push_back(file);
-            } catch (...) {
-                file->pending.pop_back();
-                throw;
+        file->close_enqueued = true;
+        try {
+            work_queue_.push_back(WorkItem::close(file));
+            ++queued_jobs_;
+            return true;
+        } catch (...) {
+            mark_file_failure_locked(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+            set_job_error_locked(file->job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+            if (direct_close) {
+                *direct_close = true;
             }
-            file->ready = true;
+            return false;
         }
-    }
-
-    FileStatePtr select_ready_file_locked() noexcept {
-        if (ready_files_.empty()) {
-            return nullptr;
-        }
-        FileStatePtr file = std::move(ready_files_.front());
-        ready_files_.pop_front();
-        if (file) {
-            file->ready = false;
-            file->writing = true;
-        }
-        return file;
     }
 
     void writer_loop() noexcept {
         for (;;) {
             WorkItem item;
-            FileStatePtr file;
-            bool capacity_available = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                work_cv_.wait(lock, [this] { return stopping_ || !ready_files_.empty(); });
-                if (ready_files_.empty()) {
+                work_cv_.wait(lock, [this] { return stopping_ || !work_queue_.empty(); });
+                if (work_queue_.empty()) {
                     if (stopping_) {
                         break;
                     }
                     continue;
                 }
-                file = select_ready_file_locked();
-                if (!file || file->pending.empty()) {
-                    if (file) {
-                        file->writing = false;
-                    }
-                    continue;
-                }
-                item = std::move(file->pending.front());
-                file->pending.pop_front();
+                item = std::move(work_queue_.front());
+                work_queue_.pop_front();
                 --queued_jobs_;
-                capacity_available = true;
             }
-            if (capacity_available) {
-                producer_cv_.notify_all();
-            }
+            producer_cv_.notify_all();
 
             if (item.kind == WorkItem::Kind::Data) {
-                process_data(item.buffer);
+                process_data(item.buffer, item.output_offset);
                 release_buffer(item.buffer);
             } else {
                 process_close(item.file);
             }
-
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (file) {
-                    file->writing = false;
-                    if (!file->pending.empty() && !file->ready) {
-                        ready_files_.push_back(file);
-                        file->ready = true;
-                    }
-                }
-            }
-            work_cv_.notify_one();
         }
     }
 
     bool open_file(const FileStatePtr& file) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!file || file->failed) {
             return false;
         }
@@ -575,17 +642,43 @@ private:
             0,
             nullptr,
             CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             nullptr);
         if (file->handle == INVALID_HANDLE_VALUE) {
             const DWORD error = GetLastError();
-            record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
+            mark_file_failure_locked(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
+            set_job_error_locked(file->job, HRESULT_FROM_WIN32(error), static_cast<int>(error));
             return false;
         }
         return true;
     }
 
-    void process_data(Buffer* buffer) noexcept {
+    bool begin_data_write(const FileStatePtr& file) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!file || file->failed || terminal_result_locked(file->job) != S_OK) {
+            return false;
+        }
+        ++file->active_data_writes;
+        file->peak_active_data_writes = (std::max)(
+            file->peak_active_data_writes, file->active_data_writes);
+        return true;
+    }
+
+    void end_data_write(const FileStatePtr& file) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (file && file->active_data_writes != 0) {
+            --file->active_data_writes;
+        }
+    }
+
+    void add_written_bytes(const FileStatePtr& file, DWORD written) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (file) {
+            file->written_bytes += written;
+        }
+    }
+
+    void process_data(Buffer* buffer, UInt64 output_offset) noexcept {
         if (!buffer || !buffer->file) {
             return;
         }
@@ -596,30 +689,53 @@ private:
             record_failure(file, global_error, current_win32_error(job));
             return;
         }
-        if (!open_file(file)) {
+        if (!open_file(file) || !begin_data_write(file)) {
+            const HRESULT error = current_error(job);
+            if (error != S_OK) {
+                record_failure(file, error, current_win32_error(job));
+            }
             return;
         }
 
-        UInt32 offset = 0;
-        while (offset < buffer->size) {
-            DWORD written = 0;
-            if (!WriteFile(
-                    file->handle,
-                    buffer->data.get() + offset,
-                    buffer->size - offset,
-                    &written,
-                    nullptr)) {
+        UInt32 transferred = 0;
+        while (transferred < buffer->size) {
+            const UInt64 request_offset = output_offset + transferred;
+            OVERLAPPED overlapped{};
+            overlapped.Offset = static_cast<DWORD>(request_offset);
+            overlapped.OffsetHigh = static_cast<DWORD>(request_offset >> 32U);
+            overlapped.hEvent = buffer->completion_event;
+            ResetEvent(buffer->completion_event);
+
+            const DWORD request_size = buffer->size - transferred;
+            const BOOL started = WriteFile(
+                file->handle,
+                buffer->data.get() + transferred,
+                request_size,
+                nullptr,
+                &overlapped);
+            if (!started && GetLastError() != ERROR_IO_PENDING) {
                 const DWORD error = GetLastError();
+                end_data_write(file);
+                record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
+                return;
+            }
+
+            DWORD written = 0;
+            if (!GetOverlappedResult(file->handle, &overlapped, &written, TRUE)) {
+                const DWORD error = GetLastError();
+                end_data_write(file);
                 record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
                 return;
             }
             if (written == 0) {
+                end_data_write(file);
                 record_failure(file, HRESULT_FROM_WIN32(ERROR_WRITE_FAULT), ERROR_WRITE_FAULT);
                 return;
             }
-            offset += written;
-            file->written_bytes += written;
+            transferred += written;
+            add_written_bytes(file, written);
         }
+        end_data_write(file);
     }
 
     void process_close(const FileStatePtr& file) noexcept {
@@ -631,12 +747,24 @@ private:
         if (global_error != S_OK) {
             record_failure(file, global_error, current_win32_error(job));
         }
-        if (!file->failed && file->handle == INVALID_HANDLE_VALUE) {
+
+        bool should_open = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            should_open = !file->failed && file->handle == INVALID_HANDLE_VALUE &&
+                !file->open_attempted;
+        }
+        if (should_open) {
             open_file(file);
         }
-        if (file->handle != INVALID_HANDLE_VALUE) {
-            const HANDLE handle = file->handle;
+
+        HANDLE handle = INVALID_HANDLE_VALUE;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            handle = file->handle;
             file->handle = INVALID_HANDLE_VALUE;
+        }
+        if (handle != INVALID_HANDLE_VALUE) {
             FILETIME last_write{};
             if (GetFileTime(handle, nullptr, nullptr, &last_write)) {
                 ULARGE_INTEGER ticks{};
@@ -644,6 +772,7 @@ private:
                 ticks.HighPart = last_write.dwHighDateTime;
                 constexpr UInt64 unix_epoch_100ns = 116444736000000000ULL;
                 if (ticks.QuadPart >= unix_epoch_100ns) {
+                    std::lock_guard<std::mutex> lock(mutex_);
                     file->mtime_ns = (ticks.QuadPart - unix_epoch_100ns) * 100ULL;
                     file->has_mtime_ns = true;
                 }
@@ -669,10 +798,15 @@ private:
         }
         const auto file = buffer->file;
         const auto job = file ? file->job : nullptr;
+        bool queued_close = false;
+        bool direct_close = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (file) {
                 file->inflight_bytes -= buffer->size;
+                if (file->outstanding_data != 0) {
+                    --file->outstanding_data;
+                }
             }
             if (job) {
                 job->inflight_bytes -= buffer->size;
@@ -683,6 +817,15 @@ private:
             buffer->file.reset();
             buffer->size = 0;
             free_buffers_.push_back(buffer);
+            if (file && file->close_requested && file->outstanding_data == 0) {
+                queued_close = enqueue_close_locked(file, &direct_close);
+            }
+        }
+        if (queued_close) {
+            work_cv_.notify_one();
+        }
+        if (direct_close) {
+            process_close(file);
         }
         producer_cv_.notify_all();
     }
@@ -691,7 +834,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             mark_file_failure_locked(file, hr, win32_error);
-            if (file && file->job) {
+            if (file) {
                 set_job_error_locked(file->job, hr, win32_error);
             }
         }
@@ -710,7 +853,7 @@ private:
     std::vector<std::unique_ptr<Buffer>> buffers_;
     std::deque<Buffer*> free_buffers_;
     std::vector<std::thread> workers_;
-    std::deque<FileStatePtr> ready_files_;
+    std::deque<WorkItem> work_queue_;
     std::vector<std::weak_ptr<JobState>> active_jobs_;
     mutable std::mutex mutex_;
     std::condition_variable producer_cv_;

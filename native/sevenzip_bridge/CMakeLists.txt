@@ -96,6 +96,20 @@ target_include_directories(sunpack_sevenzip_smoke
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+add_executable(sunpack_sevenzip_async_output
+    tests/async_output.cpp
+)
+apply_release_optimizations(sunpack_sevenzip_async_output)
+
+target_link_libraries(sunpack_sevenzip_async_output
+    PRIVATE sunpack_sevenzip_core
+)
+
+target_include_directories(sunpack_sevenzip_async_output
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 add_executable(sunpack_sevenzip_worker
     src/worker.cpp
 )
@@ -120,3 +134,4 @@ endif()
 
 enable_testing()
 add_test(NAME sunpack_sevenzip_smoke COMMAND sunpack_sevenzip_smoke)
+add_test(NAME sunpack_sevenzip_async_output COMMAND sunpack_sevenzip_async_output)

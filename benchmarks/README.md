@@ -19,6 +19,7 @@ python -m benchmarks scan hotspots . --mode full --json-out benchmarks/results/s
 python -m benchmarks extraction format-matrix --runs 5 --json-out benchmarks/results/extraction-benchmark.json
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out benchmarks/results/sevenzip-worker-baseline.json
 python -m benchmarks extraction worker-small-file-scheduling --jobs 256 --clients 4 --capacities 1,2,4,8 --runs 3
+python -m benchmarks extraction worker-single-file-write --baseline-worker-path C:\path\to\before\sunpack_sevenzip_worker.exe --candidate-worker-path C:\path\to\after\sunpack_sevenzip_worker.exe --payload-gib 1 --writer-threads 4 --runs 3 --warmups 1
 python -m benchmarks extraction worker-resource-pressure --modes cpu,io,memory --controllers adaptive,fixed --capacities 1,2,4 --jobs 4
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss

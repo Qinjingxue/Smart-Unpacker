@@ -686,6 +686,7 @@ public:
 
     ~AsyncFileOutStream() {
         if (writer_ && file_) {
+            std::lock_guard<std::mutex> lock(mutex_);
             writer_->close_file(file_, crc32_ ^ 0xFFFFFFFFU, compute_crc_, std::move(magic_));
         }
     }
@@ -715,6 +716,7 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE Write(const void* data, UInt32 size, UInt32* processedSize) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!writer_ || !file_) {
             if (processedSize) {
                 *processedSize = 0;
@@ -744,6 +746,7 @@ private:
     bool compute_crc_ = false;
     UInt32 crc32_ = 0xFFFFFFFFU;
     std::vector<unsigned char> magic_;
+    std::mutex mutex_;
 };
 
 
@@ -1055,48 +1058,50 @@ public:
             if (!state) {
                 continue;
             }
-            total_written += state->written_bytes;
-            const bool decoder_ok = state->operation_result_set && state->operation_result == kOpOk;
-            const bool output_ok = state->closed && !state->failed;
+            const auto snapshot = async_writer_->snapshot_file(state);
+            total_written += snapshot.written_bytes;
+            const bool decoder_ok = snapshot.operation_result_set &&
+                snapshot.operation_result == kOpOk;
+            const bool output_ok = snapshot.closed && !snapshot.failed;
             if (decoder_ok && output_ok) {
                 ++completed_files;
             }
 
             if (output_trace_ && state->trace_index < output_trace_->items.size()) {
                 auto& item = output_trace_->items[state->trace_index];
-                item.bytes_written = state->written_bytes;
-                item.operation_result = state->operation_result;
-                item.magic = state->magic;
-                item.has_mtime_ns = state->has_mtime_ns;
-                item.mtime_ns = state->mtime_ns;
+                item.bytes_written = snapshot.written_bytes;
+                item.operation_result = snapshot.operation_result;
+                item.magic = snapshot.magic;
+                item.has_mtime_ns = snapshot.has_mtime_ns;
+                item.mtime_ns = snapshot.mtime_ns;
                 item.failed = item.failed || !decoder_ok || !output_ok;
                 item.done = decoder_ok && output_ok;
                 if (item.done && item.has_source_crc32) {
                     item.output_crc32 = item.source_crc32;
                     item.has_output_crc32 = true;
-                } else if (state->has_output_crc32) {
-                    item.output_crc32 = state->output_crc32;
+                } else if (snapshot.has_output_crc32) {
+                    item.output_crc32 = snapshot.output_crc32;
                     item.has_output_crc32 = true;
                 }
                 item.crc_verified = item.done && (!item.has_source_crc32 ||
                     (item.has_output_crc32 && item.source_crc32 == item.output_crc32));
-                if (state->failed) {
-                    item.hresult = static_cast<int>(state->hresult);
-                    item.win32_error = state->win32_error;
+                if (snapshot.failed) {
+                    item.hresult = static_cast<int>(snapshot.hresult);
+                    item.win32_error = snapshot.win32_error;
                 }
             }
 
-            if (state->failed) {
+            if (snapshot.failed) {
                 has_failed_file = true;
                 output_error_ = true;
                 if (failed_item_.empty()) {
                     failed_item_ = state->item_path;
                     failed_item_index_ = state->item_index;
-                    failed_item_bytes_written_ = state->written_bytes;
+                    failed_item_bytes_written_ = snapshot.written_bytes;
                 }
                 if (output_trace_) {
-                    output_trace_->last_hresult = static_cast<int>(state->hresult);
-                    output_trace_->last_win32_error = state->win32_error;
+                    output_trace_->last_hresult = static_cast<int>(snapshot.hresult);
+                    output_trace_->last_win32_error = snapshot.win32_error;
                 }
             }
         }
@@ -1105,7 +1110,8 @@ public:
         if (output_trace_) {
             output_trace_->total_bytes_written = total_written;
             if (!async_files_.empty() && async_files_.back()) {
-                output_trace_->current_item_bytes_written = async_files_.back()->written_bytes;
+                output_trace_->current_item_bytes_written =
+                    async_writer_->snapshot_file(async_files_.back()).written_bytes;
             }
         }
         if (writer_error != S_OK) {
@@ -1435,9 +1441,8 @@ public:
         }
 
         if (current_async_file_) {
-            current_async_file_->operation_result = opRes;
-            current_async_file_->operation_result_set = true;
-            current_item_bytes_written_ = current_async_file_->accepted_bytes.load(std::memory_order_relaxed);
+            async_writer_->record_operation_result(current_async_file_, opRes);
+            current_item_bytes_written_ = async_writer_->accepted_bytes(current_async_file_);
             if (output_trace_) {
                 output_trace_->current_item_bytes_written = current_item_bytes_written_;
             }

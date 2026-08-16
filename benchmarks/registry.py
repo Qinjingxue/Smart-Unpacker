@@ -28,6 +28,7 @@ _ROWS = [
     ("extraction", "large-archive-profile", "benchmarks.scenarios.extraction_large_archive", "Large archive pipeline profile."),
     ("extraction", "sevenzip-worker-matrix", "benchmarks.scenarios.sevenzip_worker_matrix", "Direct native 7z.dll worker format and size matrix."),
     ("extraction", "worker-small-file-scheduling", "benchmarks.scenarios.worker_small_file_scheduling", "Native worker parallelism and fairness under many small archive jobs."),
+    ("extraction", "worker-single-file-write", "benchmarks.scenarios.worker_single_file_write", "Before/after native worker throughput for one large output file."),
     ("extraction", "worker-resource-pressure", "benchmarks.scenarios.worker_resource_pressure", "Real 7z CPU, IO, and decoder-memory contention."),
     ("extraction", "split-pressure", "benchmarks.scenarios.extraction_split_pressure", "Split and carrier archive matrix."),
 ]
