@@ -97,14 +97,47 @@ def test_watch_runtime_does_not_change_process_cwd(tmp_path, monkeypatch):
     assert __import__("os").getcwd() == str(caller)
 
 
-def test_watch_background_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+def test_watch_runtime_marks_only_its_worker_config_as_background(monkeypatch):
     captured = {}
-    monkeypatch.setattr(watch_command, "runtime_working_directory", lambda: str(tmp_path))
-    monkeypatch.setattr(watch_command, "_watch_start_argv", lambda: ["sunpack", "watch", "start"])
-    monkeypatch.setattr(watch_command.subprocess, "Popen", lambda *args, **kwargs: captured.update(kwargs))
 
-    assert watch_command._start_watch_background()
-    assert captured["cwd"] == str(tmp_path)
+    class FakeEngine:
+        def __init__(self, config):
+            captured["engine_config"] = config
+
+    class FakeService:
+        def __init__(self, *, engine_factory, **_kwargs):
+            captured["engine_factory"] = engine_factory
+
+        async def run(self, *, once=False):
+            config = {"performance": {"worker": {"thread_capacity": 4}}}
+            captured["source_config"] = config
+            captured["engine"] = captured["engine_factory"](config)
+            captured["once"] = once
+            return 0
+
+    monkeypatch.setattr(watch_runtime, "PipelineEngine", FakeEngine)
+    monkeypatch.setattr(watch_runtime, "WatchService", FakeService)
+
+    assert _await(watch_runtime.run_watch_service(tray_enabled=False, once=True)) == 0
+    assert isinstance(captured["engine"], FakeEngine)
+    assert captured["once"] is True
+    assert captured["source_config"] == {"performance": {"worker": {"thread_capacity": 4}}}
+    assert captured["engine_config"]["performance"]["worker"] == {
+        "thread_capacity": 4,
+        "windows_process_mode": "background",
+    }
+
+
+def test_watch_add_reports_start_request_without_creating_watch_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch_command, "add_watch_roots", lambda paths: (tmp_path / "roots.txt", paths))
+    monkeypatch.setattr(watch_command, "load_config", lambda: {})
+    monkeypatch.setattr(watch_command, "signal_reload", lambda config: tmp_path / "reload")
+
+    code, result = watch_command._handle_add(SimpleNamespace(paths=["C:/downloads"], start=True))
+
+    assert code == 0
+    assert result.summary["start_requested"] is True
+    assert "started" not in result.summary
 
 
 def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):

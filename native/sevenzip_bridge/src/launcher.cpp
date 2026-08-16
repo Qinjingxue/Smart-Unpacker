@@ -423,6 +423,32 @@ bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DW
     return true;
 }
 
+bool spawn_watch(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr,
+                 const std::wstring& working_directory = {}) {
+    const std::wstring watch = executable_directory() + L"\\sunpack-watch.exe";
+    std::wstring command = quote_argument(watch);
+    for (const auto& argument : arguments) command += L" " + quote_argument(argument);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const DWORD flags = detached ? (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS) : 0;
+    const wchar_t* child_cwd = working_directory.empty() ? nullptr : working_directory.c_str();
+    if (!CreateProcessW(watch.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
+                        child_cwd,
+                        &startup, &process)) return false;
+    CloseHandle(process.hThread);
+    if (detached) {
+        CloseHandle(process.hProcess);
+        return true;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hProcess);
+    if (exit_code) *exit_code = code;
+    return true;
+}
+
 void write_stream(DWORD handle_id, const std::string& text) {
     if (text.empty()) return;
     HANDLE handle = GetStdHandle(handle_id);
@@ -457,6 +483,36 @@ int wmain(int argc, wchar_t** argv) {
     if (!launcher_cwd.empty()) SetCurrentDirectoryW(launcher_cwd.c_str());
     const bool extract = argc >= 2 && wcscmp(argv[1], L"extract") == 0;
     const bool shutdown_request = argc >= 2 && wcscmp(argv[1], L"--persistent-shutdown") == 0;
+    const bool watch_start = argc >= 3 && wcscmp(argv[1], L"watch") == 0 && wcscmp(argv[2], L"start") == 0;
+    const bool watch_add = argc >= 3 && wcscmp(argv[1], L"watch") == 0 && wcscmp(argv[2], L"add") == 0;
+    if (watch_start) {
+        std::vector<std::wstring> watch_arguments;
+        bool once = false;
+        for (int index = 3; index < argc; ++index) {
+            watch_arguments.emplace_back(argv[index]);
+            once = once || wcscmp(argv[index], L"--once") == 0;
+        }
+        DWORD code = 1;
+        if (!spawn_watch(watch_arguments, !once, &code, launcher_cwd)) return 1;
+        return once ? static_cast<int>(code) : 0;
+    }
+    if (watch_add) {
+        std::vector<std::wstring> forwarded;
+        bool start_after_add = false;
+        for (int index = 1; index < argc; ++index) {
+            if (wcscmp(argv[index], L"--start") == 0) {
+                start_after_add = true;
+            } else {
+                forwarded.emplace_back(argv[index]);
+            }
+        }
+        if (start_after_add) {
+            DWORD code = 1;
+            if (!spawn_runtime(forwarded, false, &code, invocation_cwd)) return 1;
+            if (code != 0) return static_cast<int>(code);
+            return spawn_watch({}, true, nullptr, launcher_cwd) ? 0 : 1;
+        }
+    }
     if (!extract && !shutdown_request) {
         std::vector<std::wstring> forwarded;
         for (int index = 1; index < argc; ++index) forwarded.emplace_back(argv[index]);

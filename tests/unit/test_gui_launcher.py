@@ -7,7 +7,11 @@ def test_packaged_watch_launcher_uses_sibling_gui_executable(tmp_path, monkeypat
     watch_executable.write_bytes(b"")
     monkeypatch.setattr(launcher_module.sys, "executable", str(cli_executable))
 
-    assert launcher_module.watch_launch_argv() == [str(watch_executable.resolve())]
+    assert launcher_module.watch_launch_argv(once=True, no_tray=True) == [
+        str(watch_executable.resolve()),
+        "--once",
+        "--no-tray",
+    ]
 
 
 def test_source_watch_launcher_uses_gui_module(tmp_path, monkeypatch):
@@ -15,7 +19,12 @@ def test_source_watch_launcher_uses_gui_module(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher_module.sys, "executable", str(python))
     monkeypatch.setattr(launcher_module, "packaged_watch_executable", lambda *_args, **_kwargs: None)
 
-    assert launcher_module.watch_launch_argv() == [str(python.resolve()), "-m", "sunpack.gui"]
+    assert launcher_module.watch_launch_argv(once=True) == [
+        str(python.resolve()),
+        "-m",
+        "sunpack.gui",
+        "--once",
+    ]
 
 
 def test_source_startup_prefers_pythonw(tmp_path, monkeypatch):

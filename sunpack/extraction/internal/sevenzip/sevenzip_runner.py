@@ -118,6 +118,10 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     worker_profile = process_config.get("profile")
     if worker_profile:
         environment["SUNPACK_NATIVE_WORKER_PROFILE"] = str(worker_profile)
+    process_mode = str(process_config.get("windows_process_mode") or "").strip().lower()
+    environment.pop("SUNPACK_NATIVE_PROCESS_MODE", None)
+    if process_mode == "background":
+        environment["SUNPACK_NATIVE_PROCESS_MODE"] = process_mode
     profile_cache_path = process_config.get("profile_calibration_cache_path")
     if profile_cache_path:
         environment["SUNPACK_NATIVE_PROFILE_CACHE_PATH"] = str(profile_cache_path)

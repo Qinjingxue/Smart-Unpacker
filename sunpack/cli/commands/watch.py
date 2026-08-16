@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -108,13 +107,15 @@ def _handle_add(args):
     roots_path, added = add_watch_roots(list(args.paths or []))
     config = load_config()
     reload_event = signal_reload(config)
-    started = False
-    if getattr(args, "start", False) and not _watch_running(config):
-        started = _start_watch_background()
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "add", "paths": list(args.paths or [])},
-        summary={"roots_path": str(roots_path), "added": added, "reload_event": reload_event, "started": started},
+        summary={
+            "roots_path": str(roots_path),
+            "added": added,
+            "reload_event": reload_event,
+            "start_requested": bool(getattr(args, "start", False)),
+        },
         items=added,
     )
 
@@ -177,29 +178,6 @@ def _handle_startup(args):
 
 def _watch_running(config: dict) -> bool:
     return is_watch_lock_active(config)
-
-
-def _start_watch_background() -> bool:
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    subprocess.Popen(
-        _watch_start_argv(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-        startupinfo=startupinfo,
-        close_fds=True,
-        cwd=runtime_working_directory(),
-    )
-    return True
-
-
-def _watch_start_argv() -> list[str]:
-    from sunpack.gui.launcher import watch_launch_argv
-
-    return watch_launch_argv()
 
 
 def _request_watch_elevation(args) -> bool:

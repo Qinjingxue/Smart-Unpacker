@@ -18,6 +18,7 @@ python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cl
 python -m benchmarks scan hotspots . --mode full --json-out build/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out build/extraction-benchmark.json
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out build/sevenzip-worker-baseline.json
+python -m benchmarks extraction worker-small-file-scheduling --jobs 256 --clients 4 --capacities 1,2,4,8 --runs 3
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss
 python -m benchmarks memory many-tasks --python-rounds 5 --worker-rounds 3 --json-out build/memory-growth.json
@@ -95,6 +96,26 @@ generates tiny/small/medium/large profiles by default, and records per-run worke
 worker CPU time, child-process RSS peak, output statistics, native status, and failures.
 Use repeated or comma-separated `--profile` values and repeated `--format` values to
 focus the matrix. Durable results contain both `report.json` and `results.csv`.
+
+`extraction worker-small-file-scheduling` measures the worker-internal thread
+scheduler under a deliberately adversarial many-small-file workload. It creates
+one small ZIP per job and submits each request's full burst before the next
+request, then sweeps `--capacities` (native thread counts). Per run it records
+throughput, observed active-job peak, time-weighted thread-capacity utilization,
+queue/service latency percentiles, queued-but-underutilized thread time,
+worker CPU/RSS/read/write utilization, early- and overall-admission Jain fairness,
+the spread to each request's first admission, and the longest same-request admission
+run. The early index detects short-term monopolization; the overall index detects
+whether requests receive equal admission counts by the end of the batch.
+
+The default admission matrix compares `adaptive-baseline`, `fixed-capacity`,
+`cpu-bound`, `io-bound`, `memory-bound`, and `solid-exclusive`. These cases make
+one admission rule dominant at a time, so a low active count can be attributed
+to the controller or to a concrete resource constraint. Use
+`--admission-cases fixed-capacity,cpu-bound` for a focused run, and
+`--no-adaptive-enabled` to change the baseline controller setting. Raw native
+scheduling events and result payloads are retained under `traces/` in the
+benchmark result directory; `results.csv` supports capacity-sweep comparison.
 
 `memory many-tasks` measures memory *growth* (not peak) of the two long-lived
 components under a large task count across every format: the Python pipeline and

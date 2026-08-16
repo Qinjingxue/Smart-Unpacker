@@ -362,6 +362,18 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     assert environment["SUNPACK_NATIVE_IO_SCALE_UP_BYTES"] == str(20 * 1024 * 1024)
 
 
+def test_native_environment_marks_background_worker_mode_explicitly():
+    environment = {"SUNPACK_NATIVE_PROCESS_MODE": "background"}
+
+    _apply_native_environment(environment, {"windows_process_mode": "background"})
+
+    assert environment["SUNPACK_NATIVE_PROCESS_MODE"] == "background"
+
+    _apply_native_environment(environment, {})
+
+    assert "SUNPACK_NATIVE_PROCESS_MODE" not in environment
+
+
 def test_compact_worker_manifest_is_parsed_into_native_storage():
     from sunpack.extraction.internal.sevenzip.worker_diagnostics import (
         build_worker_diagnostics,
