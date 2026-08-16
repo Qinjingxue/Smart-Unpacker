@@ -95,7 +95,15 @@ def _worker_counters(worker: _NativeWorkerProcess) -> dict[str, float | int | No
     }
 
 
-def _job_payload(*, job_id: str, archive: Path, output_dir: Path, dll_path: Path, payload_bytes: int) -> str:
+def _job_payload(
+    *,
+    job_id: str,
+    archive: Path,
+    output_dir: Path,
+    dll_path: Path,
+    payload_bytes: int,
+    dry_run: bool,
+) -> str:
     return json.dumps(
         {
             "job_id": job_id,
@@ -107,6 +115,7 @@ def _job_payload(*, job_id: str, archive: Path, output_dir: Path, dll_path: Path
             "format_hint": "zip",
             "native_expected_output_bytes": payload_bytes,
             "native_profile_key": "benchmark-single-stored-zip",
+            "dry_run": dry_run,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -127,6 +136,7 @@ def _run_worker(
     sample_interval: float,
     prefetch_archive: bool,
     cleanup_output: bool,
+    dry_run: bool,
 ) -> dict[str, Any]:
     archive = Path(corpus["archive"])
     output_dir = workspace.outputs / f"{phase}-{run:02d}-{label}"
@@ -156,6 +166,7 @@ def _run_worker(
         output_dir=output_dir,
         dll_path=dll_path,
         payload_bytes=int(corpus["payload_bytes"]),
+        dry_run=dry_run,
     )
 
     def on_line(line: str) -> bool:
@@ -212,17 +223,21 @@ def _run_worker(
     samples = sampler.samples[sample_start:]
     worker_rss = [sample.children_rss_mib for sample in samples]
     status = str(result.get("status") or "")
-    passed = (
-        status == "ok"
-        and output_bytes == int(corpus["payload_bytes"])
-        and output_sha256 == str(corpus["payload_sha256"])
-    )
+    if dry_run:
+        passed = status == "ok" and int(result.get("bytes_written", 0) or 0) == int(corpus["payload_bytes"])
+    else:
+        passed = (
+            status == "ok"
+            and output_bytes == int(corpus["payload_bytes"])
+            and output_sha256 == str(corpus["payload_sha256"])
+        )
     row = {
         "label": label,
         "phase": phase,
         "run": run,
         "status": status,
         "passed": passed,
+        "dry_run": dry_run,
         "worker_wall_seconds": round(wall_seconds, 6),
         "throughput_mib_per_second": round(int(corpus["payload_bytes"]) / MIB / wall_seconds, 3),
         "worker_cpu_ms": None
@@ -329,6 +344,12 @@ def main() -> int:
     parser.add_argument("--baseline-worker-path", type=Path, help="Pre-change worker executable.")
     parser.add_argument("--candidate-worker-path", type=Path, help="Post-change worker executable.")
     parser.add_argument("--prefetch-archive", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dry-run", action="store_true", help="Measure 7z decode and callback throughput without output I/O.")
+    parser.add_argument(
+        "--write-through",
+        action="store_true",
+        help="Open output with write-through semantics for a physical-disk throughput measurement.",
+    )
     parser.add_argument("--results-root", type=Path)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
@@ -339,6 +360,10 @@ def main() -> int:
         parser.error("--writer-threads must be between 1 and 32")
     if args.timeout_seconds <= 0 or args.sample_interval <= 0:
         parser.error("--timeout-seconds and --sample-interval must be positive")
+    if args.write_through:
+        os.environ["SUNPACK_ASYNC_WRITER_WRITE_THROUGH"] = "1"
+    else:
+        os.environ.pop("SUNPACK_ASYNC_WRITER_WRITE_THROUGH", None)
     worker_specs = _worker_specs(args, parser)
     try:
         dll_path = Path(get_7z_dll_path()).resolve()
@@ -379,6 +404,7 @@ def main() -> int:
                     sample_interval=args.sample_interval,
                     prefetch_archive=bool(args.prefetch_archive),
                     cleanup_output=not args.keep_workdir,
+                    dry_run=bool(args.dry_run),
                 )
                 rows.append(row)
                 print(
@@ -397,6 +423,8 @@ def main() -> int:
                 "timeout_seconds": args.timeout_seconds,
                 "sample_interval": args.sample_interval,
                 "prefetch_archive": bool(args.prefetch_archive),
+                "dry_run": bool(args.dry_run),
+                "write_through": bool(args.write_through),
             },
             "environment": {
                 "workers": {label: str(path) for label, path in worker_specs},

@@ -113,6 +113,11 @@ public:
         std::wstring path;
         std::atomic<UInt64> accepted_bytes{0};
         std::atomic<UInt64> next_write_offset{0};
+        // Serializes producers for this file while allowing different files to
+        // fill their staging buffers concurrently.  The writer mutex still
+        // protects scheduler/accounting state.
+        std::mutex producer_mutex;
+        Buffer* staging_buffer = nullptr;
         std::size_t inflight_bytes = 0;
         std::size_t outstanding_data = 0;
         std::size_t active_data_writes = 0;
@@ -137,8 +142,7 @@ public:
 
     struct Buffer {
         Buffer()
-            : data(new unsigned char[kBufferSize]),
-              completion_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
+            : completion_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
             if (completion_event == nullptr) {
                 throw std::bad_alloc();
             }
@@ -217,9 +221,12 @@ public:
         UInt32 item_index,
         std::size_t trace_index
     ) {
-        return std::make_shared<FileState>(
+        auto file = std::make_shared<FileState>(
             job ? job : make_job(),
             std::move(path), std::move(item_path), item_index, trace_index);
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_files_.push_back(file);
+        return file;
     }
 
     HRESULT write(
@@ -244,9 +251,16 @@ public:
         if (!job) {
             return E_FAIL;
         }
+        // 7-Zip normally calls an output stream serially, but keeping this
+        // lock here makes the writer API safe for concurrent callers of the
+        // same file without serializing producers for other files.
+        std::unique_lock<std::mutex> producer_lock(file->producer_mutex);
         while (consumed < size) {
-            Buffer* buffer = nullptr;
-            std::size_t chunk_size = 0;
+            bool queued_staging = false;
+            bool newly_acquired_staging = false;
+            UInt32 previous_size = 0;
+            UInt32 chunk = 0;
+            HRESULT setup_error = S_OK;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 producer_cv_.wait(lock, [this, &job, &file] {
@@ -260,88 +274,139 @@ public:
                     }
                     return error == S_OK ? E_ABORT : error;
                 }
-                buffer = free_buffers_.front();
-                free_buffers_.pop_front();
-                const std::size_t job_available = job->max_inflight_bytes -
-                    (std::min)(job->inflight_bytes, job->max_inflight_bytes);
-                const std::size_t file_available = kDefaultFileInFlightBytes -
-                    (std::min)(file->inflight_bytes, kDefaultFileInFlightBytes);
-                chunk_size = (std::min)({
-                    static_cast<std::size_t>(size - consumed),
-                    kBufferSize,
-                    job_available,
-                    file_available,
-                });
-                if (chunk_size == 0) {
-                    free_buffers_.push_front(buffer);
-                    continue;
+
+                // A full staging buffer is not writable.  Move ownership to
+                // the queue before obtaining the next pool buffer.
+                if (file->staging_buffer && file->staging_buffer->size == kBufferSize) {
+                    queued_staging = enqueue_staging_locked(file, false);
+                    if (!queued_staging) {
+                        const HRESULT enqueue_error = terminal_result_locked(job);
+                        if (enqueue_error != S_OK) {
+                            if (processed_size) {
+                                *processed_size = consumed;
+                            }
+                            return enqueue_error;
+                        }
+                        continue;
+                    }
                 }
-                job->inflight_bytes += chunk_size;
-                file->inflight_bytes += chunk_size;
+
+                Buffer* buffer = file->staging_buffer;
+                if (!buffer) {
+                    if (free_buffers_.empty()) {
+                        continue;
+                    }
+                    // Reuse the most recently completed buffer first.  This
+                    // keeps the lazily allocated pool working set bounded by
+                    // the actual in-flight concurrency instead of touching
+                    // every buffer in the FIFO pool over time.
+                    buffer = free_buffers_.back();
+                    free_buffers_.pop_back();
+                    try {
+                        if (!buffer->data) {
+                            buffer->data = std::make_unique<unsigned char[]>(kBufferSize);
+                        }
+                        buffer->file = file;
+                        buffer->size = 0;
+                        file->staging_buffer = buffer;
+                        newly_acquired_staging = true;
+                    } catch (...) {
+                        free_buffers_.push_back(buffer);
+                        mark_file_failure_locked(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+                        set_job_error_locked(job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+                        setup_error = E_OUTOFMEMORY;
+                    }
+                }
+                if (setup_error != S_OK) {
+                    // The buffer was returned to the pool and is not visible
+                    // from FileState after an allocation failure.
+                } else {
+                    previous_size = buffer->size;
+                    const std::size_t job_available = job->max_inflight_bytes -
+                        (std::min)(job->inflight_bytes, job->max_inflight_bytes);
+                    const std::size_t file_available = kDefaultFileInFlightBytes -
+                        (std::min)(file->inflight_bytes, kDefaultFileInFlightBytes);
+                    const std::size_t chunk_size = (std::min)({
+                        static_cast<std::size_t>(size - consumed),
+                        kBufferSize - previous_size,
+                        job_available,
+                        file_available,
+                    });
+                    if (chunk_size == 0) {
+                        if (newly_acquired_staging) {
+                            file->staging_buffer = nullptr;
+                            buffer->file.reset();
+                            free_buffers_.push_back(buffer);
+                        }
+                        continue;
+                    }
+                    chunk = static_cast<UInt32>(chunk_size);
+                    job->inflight_bytes += chunk_size;
+                    file->inflight_bytes += chunk_size;
+                }
             }
 
-            const auto chunk = static_cast<UInt32>(chunk_size);
-            std::memcpy(buffer->data.get(), source + consumed, chunk);
+            if (setup_error != S_OK) {
+                producer_cv_.notify_all();
+                if (processed_size) {
+                    *processed_size = consumed;
+                }
+                return setup_error;
+            }
+
+            // The pool Buffer is the staging buffer itself.  There is no
+            // temporary callback-sized allocation or second staging copy.
+            std::memcpy(
+                file->staging_buffer->data.get() + previous_size,
+                source + consumed,
+                chunk);
 
             HRESULT enqueue_result = S_OK;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 const HRESULT error = terminal_result_locked(job);
-                if (error != S_OK || file->close_requested) {
+                Buffer* buffer = file->staging_buffer;
+                if (error != S_OK || file->close_requested || !buffer) {
                     job->inflight_bytes -= chunk;
                     file->inflight_bytes -= chunk;
-                    free_buffers_.push_back(buffer);
+                    if (newly_acquired_staging && buffer && buffer->size == previous_size) {
+                        file->staging_buffer = nullptr;
+                        buffer->file.reset();
+                        buffer->size = 0;
+                        free_buffers_.push_back(buffer);
+                    }
                     if (processed_size) {
                         *processed_size = consumed;
                     }
                     enqueue_result = error == S_OK ? E_ABORT : error;
                 } else {
-                    buffer->file = file;
-                    buffer->size = chunk;
-                    try {
-                        // Queue allocation happens before offset allocation, so an allocation
-                        // failure cannot leave a hole in the file's logical byte range.
-                        work_queue_.emplace_back(WorkItem::data(buffer, 0));
-                        const UInt64 output_offset = file->next_write_offset.fetch_add(
-                            chunk, std::memory_order_relaxed);
-                        work_queue_.back().output_offset = output_offset;
-                        if (output_offset > (std::numeric_limits<UInt64>::max)() - chunk) {
-                            work_queue_.pop_back();
-                            buffer->file.reset();
-                            buffer->size = 0;
-                            job->inflight_bytes -= chunk;
-                            file->inflight_bytes -= chunk;
-                            free_buffers_.push_back(buffer);
-                            mark_file_failure_locked(file, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
-                            set_job_error_locked(job, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
+                    buffer->size = previous_size + chunk;
+                    if (previous_size == 0) {
+                        ++job->pending_jobs;
+                        ++file->outstanding_data;
+                    }
+                    file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
+                    consumed += chunk;
+                    if (buffer->size == kBufferSize) {
+                        queued_staging = enqueue_staging_locked(file, false);
+                        if (!queued_staging && terminal_result_locked(job) == S_OK) {
                             enqueue_result = E_FAIL;
-                        } else {
-                            ++queued_jobs_;
-                            ++job->pending_jobs;
-                            ++file->outstanding_data;
-                            file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
+                        } else if (!queued_staging) {
+                            enqueue_result = terminal_result_locked(job);
                         }
-                    } catch (...) {
-                        buffer->file.reset();
-                        buffer->size = 0;
-                        job->inflight_bytes -= chunk;
-                        file->inflight_bytes -= chunk;
-                        free_buffers_.push_back(buffer);
-                        mark_file_failure_locked(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
-                        set_job_error_locked(job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
-                        if (processed_size) {
-                            *processed_size = consumed;
-                        }
-                        enqueue_result = E_OUTOFMEMORY;
                     }
                 }
             }
             if (enqueue_result != S_OK) {
                 producer_cv_.notify_all();
+                if (processed_size) {
+                    *processed_size = consumed;
+                }
                 return enqueue_result;
             }
-            consumed += chunk;
-            work_cv_.notify_one();
+            if (queued_staging) {
+                work_cv_.notify_one();
+            }
         }
 
         if (processed_size) {
@@ -360,7 +425,9 @@ public:
             return;
         }
 
+        std::unique_lock<std::mutex> producer_lock(file->producer_mutex);
         bool queued_close = false;
+        bool queued_data = false;
         bool direct_close = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -376,9 +443,19 @@ public:
                 // Reserve the close before the last data completion can wake finish_job().
                 ++file->job->pending_jobs;
             }
+            if (terminal_result_locked(file->job) != S_OK) {
+                discard_staging_locked(file);
+            } else if (file->staging_buffer) {
+                // Closing is a producer-side flush boundary.  It must not be
+                // blocked by the normal queue watermark.
+                queued_data = enqueue_staging_locked(file, true);
+            }
             if (file->outstanding_data == 0) {
                 queued_close = enqueue_close_locked(file, &direct_close);
             }
+        }
+        if (queued_data) {
+            work_cv_.notify_one();
         }
         if (queued_close) {
             work_cv_.notify_one();
@@ -393,8 +470,16 @@ public:
         if (!job) {
             return E_FAIL;
         }
+        bool cancelled = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            synchronize_cancellation_locked(job);
+            cancelled = terminal_result_locked(job) != S_OK;
+        }
+        if (cancelled) {
+            cleanup_cancelled_staging(job);
+        }
         std::unique_lock<std::mutex> lock(mutex_);
-        synchronize_cancellation_locked(job);
         producer_cv_.wait(lock, [&job] {
             return job->pending_jobs == 0;
         });
@@ -411,6 +496,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             cancel_job_locked(job);
         }
+        cleanup_cancelled_staging(job);
+        work_cv_.notify_all();
         producer_cv_.notify_all();
     }
 
@@ -484,14 +571,19 @@ public:
     }
 
     void finish() noexcept {
+        std::vector<JobStatePtr> jobs;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
             for (const auto& weak_job : active_jobs_) {
                 if (const auto job = weak_job.lock()) {
                     cancel_job_locked(job);
+                    jobs.push_back(job);
                 }
             }
+        }
+        for (const auto& job : jobs) {
+            cleanup_cancelled_staging(job);
         }
         // Writer threads still drain queued data and deferred Close work before exiting.
         work_cv_.notify_all();
@@ -517,6 +609,13 @@ private:
             return kDefaultWriterCount;
         }
         return (std::min)(static_cast<std::size_t>(configured), kMaxWriterCount);
+    }
+
+    static bool write_through_enabled() noexcept {
+        wchar_t text[8]{};
+        const DWORD length = GetEnvironmentVariableW(
+            L"SUNPACK_ASYNC_WRITER_WRITE_THROUGH", text, static_cast<DWORD>(std::size(text)));
+        return length == 1 && text[0] == L'1';
     }
 
     void set_job_error_locked(const JobStatePtr& job, HRESULT hr, int win32_error) noexcept {
@@ -561,9 +660,19 @@ private:
     }
 
     bool can_accept_locked(const JobStatePtr& job, const FileStatePtr& file) const noexcept {
-        return job && file && !file->close_requested && !free_buffers_.empty() &&
-            queued_jobs_ < kMaxQueuedJobs && job->inflight_bytes < job->max_inflight_bytes &&
-            file->inflight_bytes < kDefaultFileInFlightBytes;
+        if (!job || !file || file->close_requested ||
+            job->inflight_bytes >= job->max_inflight_bytes ||
+            file->inflight_bytes >= kDefaultFileInFlightBytes) {
+            // A full staging buffer can still make progress by being queued,
+            // even though it cannot accept another byte.
+            return file && file->staging_buffer &&
+                file->staging_buffer->size == kBufferSize &&
+                queued_jobs_ < kMaxQueuedJobs;
+        }
+        if (file->staging_buffer) {
+            return file->staging_buffer->size < kBufferSize;
+        }
+        return !free_buffers_.empty();
     }
 
     void unregister_job_locked(const JobStatePtr& job) noexcept {
@@ -575,6 +684,114 @@ private:
                 ++it;
             }
         }
+    }
+
+    void cleanup_cancelled_staging(const JobStatePtr& job) noexcept {
+        if (!job) {
+            return;
+        }
+        std::vector<FileStatePtr> files;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = active_files_.begin(); it != active_files_.end();) {
+                if (const auto file = it->lock()) {
+                    if (file->job.get() == job.get()) {
+                        files.push_back(file);
+                    }
+                    ++it;
+                } else {
+                    it = active_files_.erase(it);
+                }
+            }
+        } catch (...) {
+            return;
+        }
+
+        for (const auto& file : files) {
+            std::unique_lock<std::mutex> producer_lock(file->producer_mutex);
+            bool queued_close = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (terminal_result_locked(job) == S_OK) {
+                    continue;
+                }
+                discard_staging_locked(file);
+                if (file->close_requested && file->outstanding_data == 0) {
+                    queued_close = enqueue_close_locked(file, nullptr);
+                }
+            }
+            if (queued_close) {
+                work_cv_.notify_one();
+            }
+            producer_cv_.notify_all();
+        }
+    }
+
+    void discard_staging_locked(const FileStatePtr& file) noexcept {
+        if (!file || !file->staging_buffer) {
+            return;
+        }
+        Buffer* buffer = file->staging_buffer;
+        file->staging_buffer = nullptr;
+        if (buffer->size != 0) {
+            if (file->inflight_bytes >= buffer->size) {
+                file->inflight_bytes -= buffer->size;
+            } else {
+                file->inflight_bytes = 0;
+            }
+            if (file->outstanding_data != 0) {
+                --file->outstanding_data;
+            }
+            if (file->job) {
+                if (file->job->inflight_bytes >= buffer->size) {
+                    file->job->inflight_bytes -= buffer->size;
+                } else {
+                    file->job->inflight_bytes = 0;
+                }
+                if (file->job->pending_jobs != 0) {
+                    --file->job->pending_jobs;
+                }
+            }
+        }
+        buffer->file.reset();
+        buffer->size = 0;
+        free_buffers_.push_back(buffer);
+    }
+
+    bool enqueue_staging_locked(
+        const FileStatePtr& file,
+        bool force_queue
+    ) noexcept {
+        if (!file || !file->staging_buffer || file->staging_buffer->size == 0) {
+            return false;
+        }
+        if (!force_queue && queued_jobs_ >= kMaxQueuedJobs) {
+            return false;
+        }
+
+        Buffer* buffer = file->staging_buffer;
+        const UInt64 output_offset = file->next_write_offset.load(std::memory_order_relaxed);
+        if (output_offset > (std::numeric_limits<UInt64>::max)() - buffer->size) {
+            discard_staging_locked(file);
+            mark_file_failure_locked(file, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
+            set_job_error_locked(file->job, E_FAIL, ERROR_ARITHMETIC_OVERFLOW);
+            return false;
+        }
+        try {
+            // Queue allocation happens before publishing the new logical
+            // offset, so an allocation failure cannot create an offset hole.
+            work_queue_.emplace_back(WorkItem::data(buffer, output_offset));
+        } catch (...) {
+            discard_staging_locked(file);
+            mark_file_failure_locked(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+            set_job_error_locked(file->job, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
+            return false;
+        }
+        file->staging_buffer = nullptr;
+        file->next_write_offset.store(
+            output_offset + buffer->size, std::memory_order_relaxed);
+        ++queued_jobs_;
+        return true;
     }
 
     bool enqueue_close_locked(const FileStatePtr& file, bool* direct_close) noexcept {
@@ -636,13 +853,17 @@ private:
             return false;
         }
         file->open_attempted = true;
+        DWORD creation_flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
+        if (write_through_enabled()) {
+            creation_flags |= FILE_FLAG_WRITE_THROUGH;
+        }
         file->handle = CreateFileW(
             win32_extended_path(file->path).c_str(),
             GENERIC_WRITE,
             0,
             nullptr,
             CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+            creation_flags,
             nullptr);
         if (file->handle == INVALID_HANDLE_VALUE) {
             const DWORD error = GetLastError();
@@ -765,6 +986,10 @@ private:
             file->handle = INVALID_HANDLE_VALUE;
         }
         if (handle != INVALID_HANDLE_VALUE) {
+            if (write_through_enabled() && !FlushFileBuffers(handle)) {
+                const DWORD error = GetLastError();
+                record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
+            }
             FILETIME last_write{};
             if (GetFileTime(handle, nullptr, nullptr, &last_write)) {
                 ULARGE_INTEGER ticks{};
@@ -855,6 +1080,7 @@ private:
     std::vector<std::thread> workers_;
     std::deque<WorkItem> work_queue_;
     std::vector<std::weak_ptr<JobState>> active_jobs_;
+    std::vector<std::weak_ptr<FileState>> active_files_;
     mutable std::mutex mutex_;
     std::condition_variable producer_cv_;
     std::condition_variable work_cv_;
