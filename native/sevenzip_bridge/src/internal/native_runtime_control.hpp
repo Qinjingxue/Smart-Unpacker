@@ -18,25 +18,20 @@ namespace sunpack::sevenzip {
 struct NativeRuntimeSample {
     double cpu_percent = 0.0;
     std::size_t available_memory = 0;
-    // A rate makes IO decisions independent of the controller cadence.
-    double io_bytes_per_second = 0.0;
 };
 
 struct NativeRuntimeSnapshot {
     std::size_t active_limit = 1;
     std::size_t cpu_limit = 1;
-    std::size_t io_limit = 1;
     std::size_t memory_limit = 1;
     std::size_t memory_budget = 0;
     std::size_t active_jobs = 0;
     std::size_t active_cpu = 0;
-    std::size_t active_io = 0;
     std::size_t active_memory = 0;
 };
 
 struct NativeProfileAdjustment {
     int cpu = 0;
-    int io = 0;
     int memory = 0;
 };
 
@@ -49,9 +44,6 @@ struct NativeRuntimeConfig {
     std::size_t scale_down_streak_required = 3;
     double cpu_scale_up_percent = 65.0;
     double cpu_scale_down_percent = 88.0;
-    std::uint64_t io_scale_up_bytes_per_second = 160ULL << 20;
-    std::uint64_t io_scale_up_backlog_bytes_per_second = 320ULL << 20;
-    std::uint64_t io_scale_down_bytes_per_second = 800ULL << 20;
     std::size_t memory_scale_down_available = 1ULL << 30;
     std::size_t memory_scale_up_available = 2ULL << 30;
     std::size_t medium_backlog_threshold = 8;
@@ -94,9 +86,6 @@ public:
           scale_down_streak_required_((std::max)(std::size_t{1}, config.scale_down_streak_required)),
           cpu_scale_up_percent_(config.cpu_scale_up_percent),
           cpu_scale_down_percent_(config.cpu_scale_down_percent),
-          io_scale_up_bytes_per_second_(config.io_scale_up_bytes_per_second),
-          io_scale_up_backlog_bytes_per_second_(config.io_scale_up_backlog_bytes_per_second),
-          io_scale_down_bytes_per_second_(config.io_scale_down_bytes_per_second),
           memory_scale_down_available_(config.memory_scale_down_available),
           memory_scale_up_available_(config.memory_scale_up_available),
           medium_backlog_threshold_((std::max)(std::size_t{1}, config.medium_backlog_threshold)),
@@ -116,7 +105,6 @@ public:
         initial_active_jobs_ = (std::max)(std::size_t{1}, (std::min)(initial, max_active_jobs_));
         active_limit_ = initial_active_jobs_;
         cpu_limit_ = active_limit_;
-        io_limit_ = active_limit_;
         memory_limit_ = active_limit_;
     }
 
@@ -126,10 +114,8 @@ public:
     bool can_admit(
         std::size_t active_jobs,
         std::size_t active_cpu,
-        std::size_t active_io,
         std::size_t active_memory,
         std::size_t cpu_weight,
-        std::size_t io_weight,
         std::size_t memory_reserve
     ) const noexcept {
         if (active_jobs >= active_limit_) {
@@ -158,9 +144,6 @@ public:
         if (active_cpu > cpu_limit_ || cpu_weight > cpu_limit_ - (std::min)(active_cpu, cpu_limit_)) {
             return false;
         }
-        if (active_io > io_limit_ || io_weight > io_limit_ - (std::min)(active_io, io_limit_)) {
-            return false;
-        }
         return true;
     }
 
@@ -169,7 +152,6 @@ public:
         std::size_t queued_jobs,
         std::size_t active_jobs,
         std::size_t active_cpu,
-        std::size_t active_io,
         std::size_t active_memory,
         double elapsed_seconds = 0.0
     ) {
@@ -179,7 +161,6 @@ public:
 
         const std::size_t old_active = active_limit_;
         const std::size_t old_cpu = cpu_limit_;
-        const std::size_t old_io = io_limit_;
         const std::size_t old_memory = memory_limit_;
         const std::size_t old_memory_capacity = memory_capacity_;
 
@@ -187,18 +168,14 @@ public:
             idle_seconds_ += (std::max)(0.0, elapsed_seconds);
             if (idle_decay_seconds_ > 0.0 && idle_seconds_ >= idle_decay_seconds_) {
                 cpu_limit_ = step_toward(cpu_limit_, initial_active_jobs_);
-                io_limit_ = step_toward(io_limit_, initial_active_jobs_);
                 memory_limit_ = step_toward(memory_limit_, initial_active_jobs_);
                 active_limit_ = (std::min)(
-                    max_active_jobs_, (std::max)({cpu_limit_, io_limit_, memory_limit_}));
+                    max_active_jobs_, (std::max)(cpu_limit_, memory_limit_));
                 cpu_scale_up_streak_ = 0;
                 cpu_scale_down_streak_ = 0;
-                io_scale_up_streak_ = 0;
-                io_scale_down_streak_ = 0;
                 memory_scale_up_streak_ = 0;
                 memory_scale_down_streak_ = 0;
                 throughput_samples_.clear();
-                io_history_.clear();
                 throughput_allows_scale_up_ = true;
                 idle_seconds_ = 0.0;
             }
@@ -215,15 +192,6 @@ public:
             } else if (sample.available_memory > memory_scale_up_available_) {
                 memory_capacity_ = memory_budget_;
             }
-        }
-
-        io_history_.push_back(sample.io_bytes_per_second);
-        while (io_history_.size() > 5) {
-            io_history_.pop_front();
-        }
-        double average_io_bytes_per_second = 0.0;
-        for (const auto value : io_history_) {
-            average_io_bytes_per_second += value / static_cast<double>(io_history_.size());
         }
 
         const std::size_t dynamic_floor = queued_jobs >= (std::max)(
@@ -246,23 +214,6 @@ public:
             cpu_scale_down_streak_ = 0;
         }
 
-        const bool io_backlog_allows_scale_up =
-            average_io_bytes_per_second < static_cast<double>(io_scale_up_bytes_per_second_) ||
-            (queued_jobs > io_limit_ * 2 &&
-             average_io_bytes_per_second < static_cast<double>(io_scale_up_backlog_bytes_per_second_));
-        if (throughput_allows_scale_up_ && backlog_wants_more && io_backlog_allows_scale_up) {
-            ++io_scale_up_streak_;
-            io_scale_down_streak_ = 0;
-        } else if (average_io_bytes_per_second > static_cast<double>(io_scale_down_bytes_per_second_) &&
-                   queued_jobs <= io_limit_ * 4 &&
-                   active_io >= (std::max)(std::size_t{1}, io_limit_ - 1)) {
-            ++io_scale_down_streak_;
-            io_scale_up_streak_ = 0;
-        } else {
-            io_scale_up_streak_ = 0;
-            io_scale_down_streak_ = 0;
-        }
-
         if (backlog_wants_more && sample.available_memory > memory_scale_up_available_) {
             ++memory_scale_up_streak_;
             memory_scale_down_streak_ = 0;
@@ -283,15 +234,6 @@ public:
             cpu_limit_ = (std::max)(dynamic_floor, cpu_limit_ - 1);
             cpu_scale_down_streak_ = 0;
         }
-        if (io_scale_up_streak_ >= scale_up_streak_required_) {
-            const std::size_t step = queued_jobs >= io_limit_ * 4 &&
-                    average_io_bytes_per_second < static_cast<double>(io_scale_up_bytes_per_second_) ? 2 : 1;
-            io_limit_ = (std::min)(max_active_jobs_, io_limit_ + step);
-            io_scale_up_streak_ = 0;
-        } else if (io_scale_down_streak_ >= scale_down_streak_required_) {
-            io_limit_ = (std::max)(dynamic_floor, io_limit_ - 1);
-            io_scale_down_streak_ = 0;
-        }
         if (memory_scale_up_streak_ >= scale_up_streak_required_) {
             memory_limit_ = (std::min)(max_active_jobs_, memory_limit_ + 1);
             memory_scale_up_streak_ = 0;
@@ -301,12 +243,11 @@ public:
         }
 
         cpu_limit_ = (std::max)(dynamic_floor, (std::min)(cpu_limit_, max_active_jobs_));
-        io_limit_ = (std::max)(dynamic_floor, (std::min)(io_limit_, max_active_jobs_));
         memory_limit_ = (std::max)(std::size_t{1}, (std::min)(memory_limit_, max_active_jobs_));
-        active_limit_ = (std::min)(max_active_jobs_, (std::max)({cpu_limit_, io_limit_, memory_limit_}));
+        active_limit_ = (std::min)(max_active_jobs_, (std::max)(cpu_limit_, memory_limit_));
 
         (void)active_jobs;
-        return old_active != active_limit_ || old_cpu != cpu_limit_ || old_io != io_limit_ ||
+        return old_active != active_limit_ || old_cpu != cpu_limit_ ||
             old_memory != memory_limit_ || old_memory_capacity != memory_capacity_;
     }
 
@@ -321,12 +262,11 @@ public:
     NativeRuntimeSnapshot snapshot(
         std::size_t active_jobs,
         std::size_t active_cpu,
-        std::size_t active_io,
         std::size_t active_memory
     ) const noexcept {
         return NativeRuntimeSnapshot{
-            active_limit_, cpu_limit_, io_limit_, memory_limit_, memory_capacity_,
-            active_jobs, active_cpu, active_io, active_memory,
+            active_limit_, cpu_limit_, memory_limit_, memory_capacity_,
+            active_jobs, active_cpu, active_memory,
         };
     }
 
@@ -344,16 +284,14 @@ public:
             return false;
         }
         std::string version;
-        if (!std::getline(input, version) || version != "SUNPACK_NATIVE_PROFILE_V1") {
+        if (!std::getline(input, version) || version != "SUNPACK_NATIVE_PROFILE_V2") {
             return false;
         }
         std::string key;
         NativeProfileAdjustment adjustment;
-        while (input >> std::quoted(key) >> adjustment.cpu >> adjustment.io >> adjustment.memory) {
+        while (input >> std::quoted(key) >> adjustment.cpu >> adjustment.memory) {
             adjustment.cpu = (std::max)(-profile_calibration_max_delta_,
                 (std::min)(profile_calibration_max_delta_, adjustment.cpu));
-            adjustment.io = (std::max)(-profile_calibration_max_delta_,
-                (std::min)(profile_calibration_max_delta_, adjustment.io));
             adjustment.memory = (std::max)(-profile_calibration_max_delta_,
                 (std::min)(profile_calibration_max_delta_, adjustment.memory));
             profile_adjustments_[key] = adjustment;
@@ -371,11 +309,10 @@ public:
         if (!output) {
             return false;
         }
-        output << "SUNPACK_NATIVE_PROFILE_V1\n";
+        output << "SUNPACK_NATIVE_PROFILE_V2\n";
         for (const auto& [key, adjustment] : profile_adjustments_) {
             output << std::quoted(key) << ' '
                    << adjustment.cpu << ' '
-                   << adjustment.io << ' '
                    << adjustment.memory << '\n';
         }
         output.close();
@@ -402,7 +339,6 @@ public:
         std::size_t active_jobs_at_start,
         bool success,
         std::size_t cpu_weight,
-        std::size_t io_weight,
         std::size_t memory_reserve
     ) {
         if (!success || estimated_bytes == 0 || duration_seconds <= 0.0) {
@@ -412,7 +348,6 @@ public:
             static_cast<double>(estimated_bytes) / duration_seconds,
             (std::max)(std::size_t{1}, active_jobs_at_start),
             cpu_weight,
-            io_weight,
         };
         throughput_samples_.push_back(sample);
         while (throughput_samples_.size() > throughput_window_size_) {
@@ -474,7 +409,6 @@ public:
         double previous_workers = 0.0;
         double recent_workers = 0.0;
         double average_cpu = 0.0;
-        double average_io = 0.0;
         for (std::size_t index = 0; index < samples.size(); ++index) {
             const auto& sample = samples[index];
             const double total = sample.throughput * static_cast<double>(sample.active_jobs);
@@ -486,14 +420,12 @@ public:
                 recent_workers += static_cast<double>(sample.active_jobs);
             }
             average_cpu += static_cast<double>(sample.cpu_weight);
-            average_io += static_cast<double>(sample.io_weight);
         }
         previous_total /= static_cast<double>(midpoint);
         recent_total /= static_cast<double>(samples.size() - midpoint);
         previous_workers /= static_cast<double>(midpoint);
         recent_workers /= static_cast<double>(samples.size() - midpoint);
         average_cpu /= static_cast<double>(samples.size());
-        average_io /= static_cast<double>(samples.size());
         if (recent_workers <= previous_workers ||
             recent_workers < static_cast<double>(profile_calibration_min_parallel_) ||
             previous_total <= 0.0) {
@@ -504,20 +436,16 @@ public:
         const NativeProfileAdjustment before = adjustment;
         if (recent_total < previous_total * profile_regression_ratio_) {
             adjustment.cpu = (std::min)(profile_calibration_max_delta_, adjustment.cpu + 1);
-            adjustment.io = (std::min)(profile_calibration_max_delta_, adjustment.io + 1);
             throughput_allows_scale_up_ = false;
         } else if (recent_total > previous_total * profile_improvement_ratio_) {
             if (average_cpu > 1.0) {
                 adjustment.cpu = (std::max)(-1, adjustment.cpu - 1);
             }
-            if (average_io > 2.0) {
-                adjustment.io = (std::max)(-1, adjustment.io - 1);
-            }
             throughput_allows_scale_up_ = true;
         } else {
             throughput_allows_scale_up_ = true;
         }
-        if (adjustment.cpu != before.cpu || adjustment.io != before.io || adjustment.memory != before.memory) {
+        if (adjustment.cpu != before.cpu || adjustment.memory != before.memory) {
             profile_adjustments_dirty_ = true;
         }
     }
@@ -537,7 +465,6 @@ private:
         double throughput = 0.0;
         std::size_t active_jobs = 1;
         std::size_t cpu_weight = 1;
-        std::size_t io_weight = 1;
     };
 
     const std::size_t max_active_jobs_;
@@ -547,15 +474,12 @@ private:
     std::size_t initial_active_jobs_ = 1;
     std::size_t active_limit_ = 1;
     std::size_t cpu_limit_ = 1;
-    std::size_t io_limit_ = 1;
     std::size_t memory_limit_ = 1;
     std::size_t minimum_memory_reserve_ = 64U << 20;
     bool throughput_allows_scale_up_ = true;
 
     std::size_t cpu_scale_up_streak_ = 0;
     std::size_t cpu_scale_down_streak_ = 0;
-    std::size_t io_scale_up_streak_ = 0;
-    std::size_t io_scale_down_streak_ = 0;
     std::size_t memory_scale_up_streak_ = 0;
     std::size_t memory_scale_down_streak_ = 0;
 
@@ -565,9 +489,6 @@ private:
     const std::size_t scale_down_streak_required_;
     const double cpu_scale_up_percent_;
     const double cpu_scale_down_percent_;
-    const std::uint64_t io_scale_up_bytes_per_second_;
-    const std::uint64_t io_scale_up_backlog_bytes_per_second_;
-    const std::uint64_t io_scale_down_bytes_per_second_;
     const std::size_t memory_scale_down_available_;
     const std::size_t memory_scale_up_available_;
     const std::size_t medium_backlog_threshold_;
@@ -583,7 +504,6 @@ private:
 
     double idle_seconds_ = 0.0;
     std::deque<ProfileSample> throughput_samples_;
-    std::deque<double> io_history_;
     std::unordered_map<std::string, std::deque<ProfileSample>> profile_samples_;
     std::unordered_map<std::string, NativeProfileAdjustment> profile_adjustments_;
     bool profile_adjustments_dirty_ = false;

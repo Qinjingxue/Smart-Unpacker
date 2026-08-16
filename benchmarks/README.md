@@ -19,6 +19,7 @@ python -m benchmarks scan hotspots . --mode full --json-out benchmarks/results/s
 python -m benchmarks extraction format-matrix --runs 5 --json-out benchmarks/results/extraction-benchmark.json
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out benchmarks/results/sevenzip-worker-baseline.json
 python -m benchmarks extraction worker-small-file-scheduling --jobs 256 --clients 4 --capacities 1,2,4,8 --runs 3
+python -m benchmarks extraction worker-resource-pressure --modes cpu,io,memory --controllers adaptive,fixed --capacities 1,2,4 --jobs 4
 python -m benchmarks extraction split-pressure --profile acceptance --strict
 python -m benchmarks memory residual-rss
 python -m benchmarks memory many-tasks --python-rounds 5 --worker-rounds 3 --json-out benchmarks/results/memory-growth.json
@@ -115,14 +116,17 @@ the spread to each request's first admission, and the longest same-request admis
 run. The early index detects short-term monopolization; the overall index detects
 whether requests receive equal admission counts by the end of the batch.
 
-The default admission matrix compares `adaptive-baseline`, `fixed-capacity`,
-`cpu-bound`, `io-bound`, `memory-bound`, and `solid-exclusive`. These cases make
-one admission rule dominant at a time, so a low active count can be attributed
-to the controller or to a concrete resource constraint. Use
-`--admission-cases fixed-capacity,cpu-bound` for a focused run, and
-`--no-adaptive-enabled` to change the baseline controller setting. Raw native
-scheduling events and result payloads are retained under `traces/` in the
-benchmark result directory; `results.csv` supports capacity-sweep comparison.
+`extraction worker-resource-pressure` uses real 7z archives and the native worker
+to measure resource contention rather than synthetic weights. `cpu` uses highly
+compressible LZMA2 data with a large dictionary to stress decoding; `io` uses
+random data with `-mx=0` to stress archive reads and output writes; `memory` uses
+LZMA2 decoder dictionaries with a deliberately small worker memory budget. It
+compares the adaptive controller with a fixed active-job limit and records worker
+CPU, host CPU, read throughput, worker RSS, admitted jobs, reservation totals,
+timeouts, and result failures. Repeat the memory case with `--dictionary-hint` and
+`--no-dictionary-hint` to distinguish accurate decoder reservations from
+underestimated reservations. These are pressure probes, not a hard RSS limit or a
+proof that arbitrary archives cannot exhaust system memory.
 
 `memory many-tasks` measures memory *growth* (not peak) of the two long-lived
 components under a large task count across every format: the Python pipeline and

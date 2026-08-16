@@ -41,7 +41,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "adaptive_enabled": None,
         "initial_active_jobs": 0,
         "cpu_weight": 1,
-        "io_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "solid_archive": False,
@@ -53,7 +52,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
         "cpu_weight": 1,
-        "io_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "solid_archive": False,
@@ -65,19 +63,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
         "cpu_weight": -1,
-        "io_weight": 1,
-        "memory_reserve_bytes": 8 << 20,
-        "memory_budget_bytes": 0,
-        "solid_archive": False,
-        "expected_max_active": 1,
-    },
-    "io-bound": {
-        "description": "Each job consumes the full IO admission budget.",
-        "blocker": "io-limit",
-        "adaptive_enabled": False,
-        "initial_active_jobs": -1,
-        "cpu_weight": 1,
-        "io_weight": -1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "solid_archive": False,
@@ -89,7 +74,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
         "cpu_weight": 1,
-        "io_weight": 1,
         "memory_reserve_bytes": 16 << 20,
         "memory_budget_bytes": 32 << 20,
         "solid_archive": False,
@@ -101,7 +85,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
         "cpu_weight": 1,
-        "io_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "solid_archive": True,
@@ -204,7 +187,6 @@ def _job_payload(
     dll_path: Path,
     expected_output_bytes: int,
     cpu_weight: int,
-    io_weight: int,
     memory_reserve_bytes: int,
     solid_archive: bool,
 ) -> str:
@@ -219,7 +201,6 @@ def _job_payload(
             "password": "",
             "format_hint": "zip",
             "native_cpu_weight": cpu_weight,
-            "native_io_weight": io_weight,
             "native_memory_reserve_bytes": memory_reserve_bytes,
             "native_solid_archive": solid_archive,
             "native_expected_output_bytes": expected_output_bytes,
@@ -255,7 +236,6 @@ def _run_batch(
     done = threading.Condition(lock)
     started_at = time.perf_counter()
     configured_cpu_weight = capacity if admission_case["cpu_weight"] == -1 else int(admission_case["cpu_weight"])
-    configured_io_weight = capacity if admission_case["io_weight"] == -1 else int(admission_case["io_weight"])
     initial_active_jobs = capacity if admission_case["initial_active_jobs"] == -1 else int(admission_case["initial_active_jobs"])
     worker = _NativeWorkerProcess(
         str(worker_path),
@@ -345,7 +325,6 @@ def _run_batch(
                     dll_path=dll_path,
                     expected_output_bytes=int(corpus["payload_bytes_per_job"]),
                     cpu_weight=configured_cpu_weight,
-                    io_weight=configured_io_weight,
                     memory_reserve_bytes=int(admission_case["memory_reserve_bytes"]),
                     solid_archive=bool(admission_case["solid_archive"]),
                 )
@@ -439,7 +418,7 @@ def _summarize_batch(
     queued_jobs = 0
     previous_at = started_at
     active = 0
-    peak_cpu = peak_io = peak_memory = 0
+    peak_cpu = peak_memory = 0
     for event in ordered_events:
         received_at = float(event["received_at"])
         active_area += max(0.0, received_at - previous_at) * active
@@ -457,7 +436,6 @@ def _summarize_batch(
         active = int(event.get("active_jobs", active) or 0)
         peak_active = max(peak_active, active)
         peak_cpu = max(peak_cpu, int(event.get("active_cpu_weight", 0) or 0))
-        peak_io = max(peak_io, int(event.get("active_io_weight", 0) or 0))
         peak_memory = max(peak_memory, int(event.get("active_memory_bytes", 0) or 0))
         job_id = str(event.get("job_id") or "")
         by_job.setdefault(job_id, {})[event_name] = received_at
@@ -521,7 +499,6 @@ def _summarize_batch(
         "queued_underutilized_thread_ms": round(queued_underutilized_area * 1000.0, 3),
         "queued_underutilization_ratio": round(queued_underutilized_area / (elapsed * capacity), 6),
         "peak_active_cpu_weight": peak_cpu,
-        "peak_active_io_weight": peak_io,
         "peak_active_memory_bytes": peak_memory,
         "queue_latency_p50_ms": _percentile(queue_ms, 50),
         "queue_latency_p95_ms": _percentile(queue_ms, 95),

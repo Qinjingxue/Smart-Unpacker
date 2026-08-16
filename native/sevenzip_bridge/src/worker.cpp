@@ -1238,20 +1238,6 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         "SUNPACK_NATIVE_CPU_SCALE_UP_PERCENT", config.cpu_scale_up_percent, 0.0, 100.0);
     config.cpu_scale_down_percent = configured_native_double(
         "SUNPACK_NATIVE_CPU_SCALE_DOWN_PERCENT", config.cpu_scale_down_percent, 0.0, 100.0);
-    const std::size_t legacy_io_scale_up_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES", aggressive ? (80ULL << 20) : (20ULL << 20));
-    const std::size_t legacy_io_scale_up_backlog_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES", aggressive ? (160ULL << 20) : (40ULL << 20));
-    const std::size_t legacy_io_scale_down_bytes = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES", aggressive ? (400ULL << 20) : (140ULL << 20));
-    // Preserve the old per-500ms configuration values while sampling at a
-    // variable cadence. New values are rates in bytes per second.
-    config.io_scale_up_bytes_per_second = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BYTES_PER_SECOND", legacy_io_scale_up_bytes * 2);
-    config.io_scale_up_backlog_bytes_per_second = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES_PER_SECOND", legacy_io_scale_up_backlog_bytes * 2);
-    config.io_scale_down_bytes_per_second = configured_native_size(
-        "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES_PER_SECOND", legacy_io_scale_down_bytes * 2);
     config.medium_backlog_threshold = configured_native_size(
         "SUNPACK_NATIVE_MEDIUM_BACKLOG_THRESHOLD", config.medium_backlog_threshold);
     config.high_backlog_threshold = configured_native_size(
@@ -1336,7 +1322,6 @@ public:
             const sunpack::sevenzip::NativeProfileAdjustment adjustment = runtime_controller_.profile_adjustment(
                 metadata.profile_key);
             metadata.cpu_weight = adjusted_weight(metadata.cpu_weight, adjustment.cpu);
-            metadata.io_weight = adjusted_weight(metadata.io_weight, adjustment.io);
             metadata.memory_reserve = adjusted_memory(metadata.memory_reserve, adjustment.memory);
             if (memory_budget_ != 0 && metadata.memory_reserve > memory_budget_) {
                 any_job_failed_ = true;
@@ -1439,7 +1424,6 @@ private:
         std::string request_id;
         std::size_t fairness_weight = 1;
         std::size_t cpu_weight = 1;
-        std::size_t io_weight = 1;
         std::size_t memory_reserve = 64U << 20;
         std::size_t dictionary_reserve = 0;
         bool solid_archive = false;
@@ -1478,9 +1462,6 @@ private:
         }
         if (json_uint_field_in_object(request, "native_cpu_weight", &value)) {
             metadata.cpu_weight = (std::max)(std::size_t{1}, static_cast<std::size_t>(value));
-        }
-        if (json_uint_field_in_object(request, "native_io_weight", &value)) {
-            metadata.io_weight = (std::max)(std::size_t{1}, static_cast<std::size_t>(value));
         }
         if (json_uint_field_in_object(request, "native_memory_reserve_bytes", &value)) {
             metadata.memory_reserve = (std::max)(
@@ -1530,10 +1511,8 @@ private:
         if (!runtime_controller_.can_admit(
                 active_jobs_,
                 active_cpu_weight_,
-                active_io_weight_,
                 active_memory_,
                 job.metadata.cpu_weight,
-                job.metadata.io_weight,
                 job.metadata.memory_reserve)) {
             return false;
         }
@@ -1584,8 +1563,7 @@ private:
         const JobMetadata& metadata,
         std::size_t active_jobs = 0,
         std::size_t active_cpu_weight = 0,
-        std::size_t active_memory = 0,
-        std::size_t active_io_weight = 0
+        std::size_t active_memory = 0
     ) const noexcept {
         if (job_id.empty()) {
             return;
@@ -1597,12 +1575,10 @@ private:
             "\",\"priority\":" + std::to_string(metadata.priority) +
             ",\"fairness_weight\":" + std::to_string(metadata.fairness_weight) +
             ",\"cpu_weight\":" + std::to_string(metadata.cpu_weight) +
-             ",\"io_weight\":" + std::to_string(metadata.io_weight) +
             ",\"memory_reserve_bytes\":" + std::to_string(metadata.memory_reserve) +
              ",\"dictionary_reserve_bytes\":" + std::to_string(metadata.dictionary_reserve) +
             ",\"active_jobs\":" + std::to_string(active_jobs) +
              ",\"active_cpu_weight\":" + std::to_string(active_cpu_weight) +
-             ",\"active_io_weight\":" + std::to_string(active_io_weight) +
              ",\"active_memory_bytes\":" + std::to_string(active_memory) +
             "}");
     }
@@ -1612,8 +1588,7 @@ private:
         const char* event,
         std::size_t active_jobs,
         std::size_t active_cpu_weight,
-        std::size_t active_memory,
-        std::size_t active_io_weight = 0
+        std::size_t active_memory
     ) const noexcept {
         print_worker_event(
             json_string_field(job.request, "job_id", ""),
@@ -1621,8 +1596,7 @@ private:
             job.metadata,
             active_jobs,
             active_cpu_weight,
-            active_memory,
-            active_io_weight);
+            active_memory);
     }
 
     static void print_controller_event(
@@ -1635,7 +1609,6 @@ private:
             "{\"type\":\"native_controller\",\"queued_jobs\":" + std::to_string(queued_jobs) +
             ",\"active_limit\":" + std::to_string(snapshot.active_limit) +
             ",\"cpu_limit\":" + std::to_string(snapshot.cpu_limit) +
-            ",\"io_limit\":" + std::to_string(snapshot.io_limit) +
             ",\"memory_limit\":" + std::to_string(snapshot.memory_limit) +
             ",\"active_jobs\":" + std::to_string(snapshot.active_jobs) +
             ",\"sampled_interval_ms\":" + std::to_string(sampled_interval_ms) +
@@ -1674,18 +1647,6 @@ private:
                 (std::min)(
                     memory_status.ullAvailPhys,
                     static_cast<unsigned long long>((std::numeric_limits<std::size_t>::max)())));
-        }
-
-        IO_COUNTERS io_counters{};
-        if (GetProcessIoCounters(GetCurrentProcess(), &io_counters)) {
-            const std::uint64_t total_io = io_counters.ReadTransferCount + io_counters.WriteTransferCount;
-            if (has_process_io_sample_ && elapsed_seconds > 0.0) {
-                const std::uint64_t io_bytes = total_io >= previous_process_io_
-                    ? total_io - previous_process_io_ : 0;
-                sample.io_bytes_per_second = static_cast<double>(io_bytes) / elapsed_seconds;
-            }
-            previous_process_io_ = total_io;
-            has_process_io_sample_ = true;
         }
 
         FILETIME idle_time{}, kernel_time{}, user_time{};
@@ -1774,12 +1735,11 @@ private:
                     sample,
                     queued_jobs,
                     active_jobs_,
-                    active_cpu_weight_,
-                    active_io_weight_,
-                    active_memory_,
-                    elapsed_seconds);
-                snapshot = runtime_controller_.snapshot(
-                    active_jobs_, active_cpu_weight_, active_io_weight_, active_memory_);
+                active_cpu_weight_,
+                active_memory_,
+                elapsed_seconds);
+            snapshot = runtime_controller_.snapshot(
+                    active_jobs_, active_cpu_weight_, active_memory_);
             }
             next_interval_ms = controller_interval_ms(snapshot, queued_jobs);
             if (changed) {
@@ -1805,7 +1765,6 @@ private:
             Job job;
             std::size_t admitted_jobs = 0;
             std::size_t admitted_cpu = 0;
-            std::size_t admitted_io = 0;
             std::size_t admitted_memory = 0;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
@@ -1833,18 +1792,16 @@ private:
                 }
                 active_jobs_ += 1;
                 active_cpu_weight_ += job.metadata.cpu_weight;
-                active_io_weight_ += job.metadata.io_weight;
                 active_memory_ += job.metadata.memory_reserve;
                 if (job.metadata.solid_archive) {
                     active_solid_jobs_ += 1;
                 }
                 admitted_jobs = active_jobs_;
                 admitted_cpu = active_cpu_weight_;
-                admitted_io = active_io_weight_;
                 admitted_memory = active_memory_;
             }
-            print_active_event(job, "job_admitted", admitted_jobs, admitted_cpu, admitted_memory, admitted_io);
-            print_active_event(job, "job_started", admitted_jobs, admitted_cpu, admitted_memory, admitted_io);
+            print_active_event(job, "job_admitted", admitted_jobs, admitted_cpu, admitted_memory);
+            print_active_event(job, "job_started", admitted_jobs, admitted_cpu, admitted_memory);
             const auto started_at = std::chrono::steady_clock::now();
             std::uint64_t actual_output_bytes = 0;
             int code = -100;
@@ -1856,7 +1813,6 @@ private:
             const std::string job_id = json_string_field(job.request, "job_id", "");
             std::size_t remaining_jobs = 0;
             std::size_t remaining_cpu = 0;
-            std::size_t remaining_io = 0;
             std::size_t remaining_memory = 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1866,8 +1822,6 @@ private:
                 active_jobs_ = active_jobs_ > 0 ? active_jobs_ - 1 : 0;
                 active_cpu_weight_ = active_cpu_weight_ >= job.metadata.cpu_weight
                     ? active_cpu_weight_ - job.metadata.cpu_weight : 0;
-                active_io_weight_ = active_io_weight_ >= job.metadata.io_weight
-                    ? active_io_weight_ - job.metadata.io_weight : 0;
                 active_memory_ = active_memory_ >= job.metadata.memory_reserve
                     ? active_memory_ - job.metadata.memory_reserve : 0;
                 if (job.metadata.solid_archive && active_solid_jobs_ > 0) {
@@ -1883,7 +1837,6 @@ private:
                 }
                 remaining_jobs = active_jobs_;
                 remaining_cpu = active_cpu_weight_;
-                remaining_io = active_io_weight_;
                 remaining_memory = active_memory_;
                 const double duration_seconds = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - started_at).count();
@@ -1894,14 +1847,13 @@ private:
                     admitted_jobs,
                     code == 0,
                     job.metadata.cpu_weight,
-                    job.metadata.io_weight,
                     job.metadata.memory_reserve);
                 any_job_failed_ = any_job_failed_ || code != 0;
                 controller_recheck_ = true;
             }
             condition_.notify_all();
             controller_condition_.notify_one();
-            print_active_event(job, "job_finished", remaining_jobs, remaining_cpu, remaining_memory, remaining_io);
+            print_active_event(job, "job_finished", remaining_jobs, remaining_cpu, remaining_memory);
             try {
                 job.promise->set_value(code);
             } catch (...) {
@@ -1931,7 +1883,6 @@ private:
     sunpack::sevenzip::NativeRuntimeControl runtime_controller_;
     std::size_t active_jobs_ = 0;
     std::size_t active_cpu_weight_ = 0;
-    std::size_t active_io_weight_ = 0;
     std::size_t active_memory_ = 0;
     std::size_t active_solid_jobs_ = 0;
     std::uint64_t next_sequence_ = 0;
@@ -1940,8 +1891,6 @@ private:
     bool any_job_failed_ = false;
     bool stopping_ = false;
 #ifdef _WIN32
-    bool has_process_io_sample_ = false;
-    std::uint64_t previous_process_io_ = 0;
     bool has_system_cpu_sample_ = false;
     std::uint64_t previous_idle_time_ = 0;
     std::uint64_t previous_kernel_time_ = 0;

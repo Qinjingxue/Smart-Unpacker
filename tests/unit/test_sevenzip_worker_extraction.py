@@ -352,16 +352,12 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
             "thread_capacity": 0,
             "memory_budget_bytes": 0,
             "adaptive_enabled": True,
-            "scale_up_threshold_mb_s": 20,
-            "io_scale_down_bytes_per_second": 12345,
         },
     )
 
     assert "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES" not in environment
     assert "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY" not in environment
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
-    assert environment["SUNPACK_NATIVE_IO_SCALE_UP_BYTES"] == str(20 * 1024 * 1024)
-    assert environment["SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES_PER_SECOND"] == "12345"
 
 
 def test_native_environment_marks_background_worker_mode_explicitly():

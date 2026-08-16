@@ -98,9 +98,6 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     set_int("high_floor_workers", "SUNPACK_NATIVE_HIGH_FLOOR_JOBS")
     set_float("cpu_scale_up_threshold_percent", "SUNPACK_NATIVE_CPU_SCALE_UP_PERCENT")
     set_float("cpu_scale_down_threshold_percent", "SUNPACK_NATIVE_CPU_SCALE_DOWN_PERCENT")
-    set_bytes_from_mb("scale_up_threshold_mb_s", "SUNPACK_NATIVE_IO_SCALE_UP_BYTES")
-    set_bytes_from_mb("scale_up_backlog_threshold_mb_s", "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES")
-    set_bytes_from_mb("scale_down_threshold_mb_s", "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES")
     set_bytes_from_mb(
         "memory_scale_down_available_mb",
         "SUNPACK_NATIVE_MEMORY_SCALE_DOWN_AVAILABLE_BYTES",
@@ -111,9 +108,6 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     )
     set_int("profile_calibration_window_size", "SUNPACK_NATIVE_PROFILE_WINDOW_SIZE", minimum=4)
     set_int("profile_calibration_max_delta", "SUNPACK_NATIVE_PROFILE_MAX_DELTA", minimum=0)
-    set_int("io_scale_up_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_UP_BYTES_PER_SECOND")
-    set_int("io_scale_up_backlog_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_UP_BACKLOG_BYTES_PER_SECOND")
-    set_int("io_scale_down_bytes_per_second", "SUNPACK_NATIVE_IO_SCALE_DOWN_BYTES_PER_SECOND")
     set_int("max_queue_jobs", "SUNPACK_NATIVE_MAX_QUEUE_JOBS")
     set_int("priority_aging_quantum", "SUNPACK_NATIVE_PRIORITY_AGING_QUANTUM")
     set_float("profile_regression_ratio", "SUNPACK_NATIVE_PROFILE_REGRESSION_RATIO")
@@ -1308,10 +1302,6 @@ class SevenZipRunner:
         except (TypeError, ValueError):
             cpu_weight = 1
         try:
-            io_weight = max(1, min(8, int(tokens.get("io", 1) or 1)))
-        except (TypeError, ValueError):
-            io_weight = 1
-        try:
             memory_weight = max(1, min(8, int(tokens.get("memory", 1) or 1)))
         except (TypeError, ValueError):
             memory_weight = 1
@@ -1321,7 +1311,6 @@ class SevenZipRunner:
             dictionary_bytes = 0
         native_memory = max(64 << 20, memory_weight * (32 << 20), dictionary_bytes + (32 << 20))
         job["native_cpu_weight"] = cpu_weight
-        job["native_io_weight"] = io_weight
         job["native_memory_reserve_bytes"] = native_memory
         job["native_dictionary_reserve_bytes"] = dictionary_bytes
         job["native_solid_archive"] = bool(analysis.get("solid", False))
