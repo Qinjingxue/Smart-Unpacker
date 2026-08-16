@@ -1045,19 +1045,10 @@ public:
         }
 
         const HRESULT writer_error = async_writer_->finish_job(async_job_);
-        if (writer_error != S_OK) {
-            output_error_ = true;
-            const int win32_error = async_writer_->current_win32_error(async_job_);
-            mark_current_item_failure(writer_error, win32_error);
-            if (output_trace_) {
-                output_trace_->last_hresult = static_cast<int>(writer_error);
-                output_trace_->last_win32_error = win32_error;
-            }
-            if (operation_result_ == kOpOk) {
-                operation_result_ = kOpDataError;
-            }
-            return;
-        }
+        const int writer_win32_error = writer_error == S_OK
+            ? 0
+            : async_writer_->current_win32_error(async_job_);
+        bool has_failed_file = false;
         UInt64 total_written = 0;
         UInt32 completed_files = 0;
         for (const auto& state : async_files_) {
@@ -1096,6 +1087,7 @@ public:
             }
 
             if (state->failed) {
+                has_failed_file = true;
                 output_error_ = true;
                 if (failed_item_.empty()) {
                     failed_item_ = state->item_path;
@@ -1114,6 +1106,18 @@ public:
             output_trace_->total_bytes_written = total_written;
             if (!async_files_.empty() && async_files_.back()) {
                 output_trace_->current_item_bytes_written = async_files_.back()->written_bytes;
+            }
+        }
+        if (writer_error != S_OK) {
+            output_error_ = true;
+            // FileState diagnostics are authoritative once the writer has drained.
+            // Fall back only for scheduler failures that have no associated file.
+            if (!has_failed_file) {
+                mark_current_item_failure(writer_error, writer_win32_error);
+                if (output_trace_) {
+                    output_trace_->last_hresult = static_cast<int>(writer_error);
+                    output_trace_->last_win32_error = writer_win32_error;
+                }
             }
         }
         if (output_error_ && operation_result_ == kOpOk) {

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,22 +52,23 @@ def test_profile_run_cleans_output_when_pipeline_fails(tmp_path: Path):
     output = _generated_output_path(output_base, "run", 0)
     config = {"output": {"root": str(output_base)}}
 
-    class FailedFuture:
-        def result(self):
-            output.mkdir(parents=True)
-            (output / "partial.bin").write_bytes(b"partial")
-            raise RuntimeError("pipeline failed")
+    async def run(*_args, **_kwargs):
+        output.mkdir(parents=True)
+        (output / "partial.bin").write_bytes(b"partial")
+        raise RuntimeError("pipeline failed")
 
-    runner = SimpleNamespace(submit=lambda *_args, **_kwargs: FailedFuture())
+    runner = SimpleNamespace(run=run)
 
     with pytest.raises(RuntimeError, match="pipeline failed"):
-        _run_profile_once(
-            runner,
-            str(tmp_path / "archive.rar"),
-            output,
-            output_base,
-            config,
-            keep_output=False,
+        asyncio.run(
+            _run_profile_once(
+                runner,
+                str(tmp_path / "archive.rar"),
+                output,
+                output_base,
+                config,
+                keep_output=False,
+            )
         )
 
     assert not output.exists()
@@ -74,7 +76,7 @@ def test_profile_run_cleans_output_when_pipeline_fails(tmp_path: Path):
 
 def test_worker_wait_residual_excludes_protocol_processing():
     derived = _derived_timing({
-        "worker_read_protocol": [1.0],
+        "sevenzip_worker": [1.0],
         "worker_protocol_json_decode": [0.1],
         "worker_protocol_drain_stderr": [0.02],
         "worker_protocol_emit_progress": [0.03],

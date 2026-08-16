@@ -599,6 +599,8 @@ def test_worker_propagates_delayed_async_file_open_failure(tmp_path):
     assert worker_result["failure_stage"] == "output_write"
     assert worker_result["failure_kind"] == "output_filesystem"
     assert worker_result["files_written"] == 0
+    assert worker_result["failed_item"] == "invalid*output.txt"
+    assert worker_result["diagnostics"]["failed_item"]["path"] == "invalid*output.txt"
     assert output_items[-1]["failed"] is True
     assert output_items[-1]["bytes_written"] == 0
     assert not list(out_dir.glob("invalid*output.txt"))
