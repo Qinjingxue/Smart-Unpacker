@@ -30,6 +30,30 @@ function Assert-PathMissing {
     Write-Host ("PASS  {0,-42} absent" -f $Description) -ForegroundColor Green
 }
 
+function Get-PackagedRuntimeToolNames {
+    return @(
+        "7z.dll",
+        "sunpack_sevenzip.dll",
+        "sunpack_sevenzip_worker.exe"
+    )
+}
+
+function Assert-PackagedRuntimeTools {
+    param([Parameter(Mandatory = $true)][string]$PackageRoot)
+
+    $toolsPath = Join-Path $PackageRoot "tools"
+    Assert-PathExists -LiteralPath $toolsPath -Description "Packaged runtime tools directory"
+    $expected = @(Get-PackagedRuntimeToolNames)
+    $entries = @(Get-ChildItem -LiteralPath $toolsPath -Force)
+    $unexpected = @($entries | Where-Object { $_.Name -notin $expected })
+    if ($unexpected.Count -gt 0) {
+        throw ("Unexpected files in the packaged runtime tools directory: " + (($unexpected | ForEach-Object FullName) -join ", "))
+    }
+    foreach ($name in $expected) {
+        Assert-PathExists -LiteralPath (Join-Path $toolsPath $name) -Description "Packaged runtime tool $name"
+    }
+}
+
 function Get-ExpectedPeMachine {
     param([string]$BuildArch)
     switch ($BuildArch) {
@@ -145,7 +169,7 @@ Assert-PeMachine -LiteralPath (Join-Path $root "sunpack-watch.exe") -BuildArch $
 Assert-PeSubsystem -LiteralPath (Join-Path $root "sunpack.exe") -Expected 3 -Description "sunpack.exe"
 Assert-PeSubsystem -LiteralPath (Join-Path $root "sunpack-watch.exe") -Expected 2 -Description "sunpack-watch.exe"
 Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "sunpack_native extension"
-Assert-PathMissing -LiteralPath (Join-Path $root "tools\7z.exe") -Description "build-only tools\7z.exe"
+Assert-PackagedRuntimeTools -PackageRoot $root
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip.dll") -BuildArch $Arch -Description "tools\sunpack_sevenzip.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip_worker.exe") -BuildArch $Arch -Description "tools\sunpack_sevenzip_worker.exe"

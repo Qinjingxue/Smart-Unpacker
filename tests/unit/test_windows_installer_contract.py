@@ -155,39 +155,43 @@ def test_windows_scripts_share_one_virtual_environment():
     assert "$repoRoot[dev]" in setup_script
     assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in build_script
     assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in setup_script
-    assert "Skipping model runtime dependencies" not in build_script
-    assert "Skipping model runtime dependencies" not in setup_script
+    assert 'if ($repairSystemMode -eq "full")' in build_script
+    assert 'if ($repairSystemMode -eq "full")' in setup_script
+    assert "Skipping model runtime dependencies for lite build." in build_script
+    assert "Skipping model runtime dependencies for lite environment." in setup_script
 
 
 def test_lite_build_excludes_model_runtime_from_shared_environment():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-    spec = (ROOT / "SunPack.spec").read_text(encoding="utf-8")
 
-    assert 'model_runtime_excludes = ["torch", "torch_geometric", "torchgen", "functorch"]' in spec
-    assert "excludes=[] if include_repair_models else model_runtime_excludes" in spec
-    assert "sunpack.detection.pipeline.rules.hard_stop" not in spec
-    assert "sunpack.detection.pipeline.rules.confirmation" not in spec
+    assert '"zstandard"' in build_script
+    assert '"--nofollow-import-to=$package"' in build_script
     assert "Assert-LitePackageExcludesModelRuntime -PackageRoot $distAppRoot" in build_script
 
 
-def test_build_supports_interactive_pyinstaller_and_nuitka_selection():
+def test_build_uses_nuitka_only():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert '[ValidateSet("pyinstaller", "nuitka")]' in build_script
-    assert "Select build packager: [N]uitka or [P]yInstaller" in build_script
-    assert 'return "nuitka"' in build_script
-    assert 'return "pyinstaller"' in build_script
-    assert '"-m", "PyInstaller", "--noconfirm", $specPath' in build_script
+    assert "Packager" not in build_script
+    assert "PyInstaller" not in build_script
+    assert not (ROOT / "SunPack.spec").exists()
     assert '"-m", "nuitka"' in build_script
     assert '"--standalone"' in build_script
     assert '"--windows-console-mode=$ConsoleMode"' in build_script
+    assert '"--lto=yes"' in build_script
+    assert '"--pgo-c"' in build_script
+    assert '"--pgo-args=$PgoArgs"' in build_script
+    assert '-PgoArgs "--help"' in build_script
+    assert '-PgoArgs "--once --no-tray"' in build_script
+    assert 'Remove-IfExists -LiteralPath (Join-Path $nuitkaWatchDist ".sunpack_watch")' in build_script
     assert '"--nofollow-import-to=$package"' in build_script
     assert "Invoke-NuitkaStandaloneBuild" in build_script
     assert '"sunpack.repair.model.policy"' in build_script
     assert "sunpack.detection.pipeline.rules.hard_stop" not in build_script
     assert "sunpack.detection.pipeline.rules.confirmation" not in build_script
     assert '"nuitka>=2"' in project
+    assert "pyinstaller" not in project.lower()
 
 
 def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
@@ -223,24 +227,31 @@ def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
     assert "Uninstaller left the local SunPack cache behind" in script
 
 
-def test_release_packages_exclude_build_only_7z_executable():
+def test_release_packages_copy_only_runtime_tool_files():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     verifier = (ROOT / "scripts" / "verify_windows_package_arch.ps1").read_text(encoding="utf-8")
 
-    assert '$packagedSevenZipExe = Join-Path $distToolsRoot "7z.exe"' in build_script
-    assert "Remove-Item -LiteralPath $packagedSevenZipExe" in build_script
-    assert 'Assert-PathMissing -LiteralPath (Join-Path $distToolsRoot "7z.exe")' in build_script
-    assert 'Assert-PathMissing -LiteralPath (Join-Path $root "tools\\7z.exe")' in verifier
+    for script in (build_script, verifier):
+        assert "function Get-PackagedRuntimeToolNames" in script
+        assert '"7z.dll"' in script
+        assert '"sunpack_sevenzip.dll"' in script
+        assert '"sunpack_sevenzip_worker.exe"' in script
+        assert "Assert-PackagedRuntimeTools" in script
+    assert "Copy-PackagedRuntimeTools -Source $toolsRoot -Destination $distToolsRoot" in build_script
+    assert 'Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "zstandard")' in build_script
+    assert 'Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force' not in build_script
 
 
-def test_release_packages_exclude_acceptance_only_archive_generators():
+def test_release_packages_exclude_test_only_python_runtime():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert "$acceptanceOnlyToolPatterns" in build_script
-    assert '"Rar.exe"' in build_script
-    assert '"WinRAR.exe"' in build_script
-    assert '"zstd.exe"' in build_script
-    assert "Acceptance-only tool files leaked into the release package" in build_script
+    assert '"zstandard",' in build_script
+    assert '"--nofollow-import-to=$package"' in build_script
+    assert 'if ($repairSystemMode -eq "lite")' in build_script
+    assert 'Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "zstandard")' in build_script
+    assert '"zstandard>=0.22.0"' not in project.split("[project.optional-dependencies]", 1)[0]
+    assert '"zstandard>=0.22.0"' in project
 
 
 def test_acceptance_setup_bootstraps_and_checks_real_archive_generators():
@@ -259,9 +270,8 @@ def test_acceptance_setup_bootstraps_and_checks_real_archive_generators():
 
 def test_release_package_includes_console_and_gui_executables():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-    spec = (ROOT / "SunPack.spec").read_text(encoding="utf-8")
 
     assert '$watchExeName = "sunpack-watch.exe"' in build_script
     assert "Packaged SunPack watch GUI executable" in build_script
-    assert "console=False" in spec
-    assert "watch_exe" in spec
+    assert 'ConsoleMode "force"' in build_script
+    assert 'ConsoleMode "disable"' in build_script

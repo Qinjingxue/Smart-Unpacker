@@ -788,7 +788,11 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[dev]")
-Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+if ($repairSystemMode -eq "full") {
+    Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+} else {
+    Write-Host "Skipping model runtime dependencies for lite environment." -ForegroundColor Yellow
+}
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = $repoRoot

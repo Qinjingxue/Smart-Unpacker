@@ -11,7 +11,7 @@ def test_nuitka_watch_executable_uses_gui_entrypoint(monkeypatch):
     assert entrypoint.main() == 17
 
 
-def test_pyinstaller_watch_executable_uses_gui_entrypoint(monkeypatch):
+def test_frozen_watch_executable_uses_gui_entrypoint(monkeypatch):
     monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\package\\sunpack-watch.exe")
     monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-runtime.exe"])
     monkeypatch.setattr(gui_main, "main", lambda: 23)

@@ -32,9 +32,9 @@ tools-arm64/              ARM64 外部工具和原生构建产物
 | Extra | 用途 |
 | --- | --- |
 | 默认 | SunPack 运行依赖，不包含模型运行时 |
-| `model-runtime` | x64 模型运行时依赖，包含 PyTorch 2.7 CPU 和 PyG |
-| `test` | pytest |
-| `build` | PyInstaller、Nuitka、maturin、CMake |
+| `model-runtime` | x64 模型运行时依赖，包含 PyTorch 2.10 CPU、PyG 和 zstandard |
+| `test` | pytest 与 zstandard 测试数据生成依赖 |
+| `build` | Nuitka、maturin、CMake |
 | `training` | 训练工具的附加依赖 |
 | `dev` | build、test、training 的并集，不包含 `model-runtime` |
 
@@ -177,8 +177,6 @@ python -m pytest tests\unit\test_model_runtime.py
 .\scripts\build_windows.ps1 -Arch x64
 .\scripts\build_windows.ps1 -Arch x64 -RepairSystem full
 .\scripts\build_windows.ps1 -Arch x64 -RepairSystem lite
-.\scripts\build_windows.ps1 -Packager nuitka
-.\scripts\build_windows.ps1 -Packager pyinstaller
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Version 1.2.3
@@ -195,12 +193,11 @@ python -m pytest tests\unit\test_model_runtime.py
 3. 构建并安装 Rust wheel
 4. 构建和测试 C++ bridge/worker
 5. 可选运行 acceptance tests
-6. 在交互终端选择 `[N]uitka` 或 `[P]yInstaller`；也可用 `-Packager nuitka|pyinstaller` 指定。非交互构建默认使用 PyInstaller。
-7. PyInstaller 使用 `SunPack.spec` 生成 onedir 包；Nuitka 分别构建 console 和 GUI standalone 包后合并到同一发行目录。
-8. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`，lite 构建显式排除并校验 torch/PyG 运行时
-9. 校验关键 PE 文件架构
-10. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check
-11. 用随附 7-Zip 创建并测试发布 ZIP
+6. Nuitka 分别构建 console 和 GUI standalone 包后合并到同一发行目录。
+7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`，lite 构建显式排除并校验 torch/PyG 运行时
+8. 校验关键 PE 文件架构
+9. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check
+10. 用随附 7-Zip 创建并测试发布 ZIP
 
 输出：
 
