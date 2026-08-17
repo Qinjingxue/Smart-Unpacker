@@ -701,6 +701,24 @@ function New-NuitkaEntrypoint {
     [System.IO.File]::WriteAllText($Path, $content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Embed-WindowsApplicationManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$EmbeddingScriptPath,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string[]]$ExecutablePaths
+    )
+
+    Assert-PathExists -LiteralPath $EmbeddingScriptPath -Description "Manifest resource embedding script"
+    Assert-PathExists -LiteralPath $ManifestPath -Description "Windows application manifest"
+    $arguments = @($EmbeddingScriptPath, "--manifest", $ManifestPath)
+    foreach ($executablePath in $ExecutablePaths) {
+        Assert-PathExists -LiteralPath $executablePath -Description "Nuitka executable for manifest embedding"
+        $arguments += @("--executable", $executablePath)
+    }
+    Invoke-Native -FilePath $PythonPath -Arguments $arguments
+}
+
 function Invoke-NuitkaStandaloneBuild {
     param(
         [Parameter(Mandatory = $true)]
@@ -867,6 +885,8 @@ $projectPath = Join-Path $repoRoot "pyproject.toml"
 $modelsRoot = Join-Path $repoRoot "models"
 $modelManifestPath = Join-Path $modelsRoot "manifest.json"
 $iconPath = Join-Path $repoRoot "sunpack.ico"
+$applicationManifestPath = Join-Path $repoRoot "sunpack.manifest"
+$manifestEmbeddingScriptPath = Join-Path $repoRoot "scripts\embed_windows_manifest.py"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
@@ -924,6 +944,8 @@ if (-not $SkipInstaller) {
     }
 }
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
+Assert-PathExists -LiteralPath $applicationManifestPath -Description "Windows application manifest"
+Assert-PathExists -LiteralPath $manifestEmbeddingScriptPath -Description "Manifest resource embedding script"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
@@ -1059,6 +1081,10 @@ Write-Step "Building Windows release with Nuitka"
     New-NuitkaEntrypoint -Path $nuitkaWatchEntryPath -RepairSystem $repairSystemMode
     Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaRuntimeEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $runtimeExeName -ConsoleMode "force" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--help" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-runtime-report.xml")
     Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaWatchEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $watchExeName -ConsoleMode "disable" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--once --no-tray" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-watch-report.xml")
+    Embed-WindowsApplicationManifest -PythonPath $venvPython -EmbeddingScriptPath $manifestEmbeddingScriptPath -ManifestPath $applicationManifestPath -ExecutablePaths @(
+        (Join-Path $nuitkaRuntimeDist $runtimeExeName),
+        (Join-Path $nuitkaWatchDist $watchExeName)
+    )
     Remove-IfExists -LiteralPath (Join-Path $nuitkaWatchDist ".sunpack_watch")
     Copy-NuitkaDistContents -Source $nuitkaRuntimeDist -Destination $distAppRoot
     Copy-NuitkaDistContents -Source $nuitkaWatchDist -Destination $distAppRoot

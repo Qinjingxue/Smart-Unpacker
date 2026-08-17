@@ -185,6 +185,8 @@ def test_build_uses_nuitka_only():
     assert '-PgoArgs "--help"' in build_script
     assert '-PgoArgs "--once --no-tray"' in build_script
     assert 'Remove-IfExists -LiteralPath (Join-Path $nuitkaWatchDist ".sunpack_watch")' in build_script
+    assert 'Embed-WindowsApplicationManifest -PythonPath $venvPython' in build_script
+    assert '"scripts\\embed_windows_manifest.py"' in build_script
     assert '"--nofollow-import-to=$package"' in build_script
     assert "Invoke-NuitkaStandaloneBuild" in build_script
     assert '"sunpack.repair.model.policy"' in build_script
