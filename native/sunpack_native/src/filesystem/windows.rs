@@ -6,6 +6,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 type Handle = *mut c_void;
 
@@ -25,10 +26,11 @@ const ALL_USN_REASONS: u32 = 0xffff_ffff;
 const USN_REASON_CLOSE: u32 = 0x8000_0000;
 const JOURNAL_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES_PER_OBSERVATION: usize = 1024 * 1024;
+const MAX_CACHED_VOLUME_CONTEXTS: usize = 64;
+const VOLUME_CONTEXT_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 // Volume journal reads normally require an elevated token. Cache capability
 // failures per volume so one inaccessible volume does not disable all others.
-static VOLUME_CONTEXTS: OnceLock<Mutex<HashMap<String, Arc<Mutex<VolumeContext>>>>> =
-    OnceLock::new();
+static VOLUME_CONTEXTS: OnceLock<Mutex<VolumeContextCache>> = OnceLock::new();
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
 const ERROR_INVALID_HANDLE: i32 = 6;
@@ -139,13 +141,115 @@ impl Drop for OwnedHandle {
 struct VolumeContext {
     handle: Option<OwnedHandle>,
     reason_read_unavailable_error: Option<i32>,
+    last_used: Instant,
 }
 
 impl VolumeContext {
-    fn new() -> Self {
+    fn new(now: Instant) -> Self {
         Self {
             handle: None,
             reason_read_unavailable_error: None,
+            last_used: now,
+        }
+    }
+}
+
+struct VolumeContextCache {
+    entries: HashMap<String, Arc<Mutex<VolumeContext>>>,
+    capacity: usize,
+    idle_ttl: Duration,
+    evictions: u64,
+    transient_fallbacks: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeContextStats {
+    pub(crate) count: usize,
+    pub(crate) capacity: usize,
+    pub(crate) evictions: u64,
+    pub(crate) transient_fallbacks: u64,
+}
+
+impl VolumeContextCache {
+    fn new(capacity: usize, idle_ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+            idle_ttl,
+            evictions: 0,
+            transient_fallbacks: 0,
+        }
+    }
+
+    fn context_for(&mut self, volume_key: String, now: Instant) -> Arc<Mutex<VolumeContext>> {
+        // Do this on every lookup rather than on a background thread. The
+        // cache stays bounded even during continuous watch activity, and this
+        // keeps the native module free from background-thread lifecycle work.
+        self.prune_expired(now, Some(volume_key.as_str()));
+        if let Some(context) = self.entries.get(volume_key.as_str()) {
+            return Arc::clone(context);
+        }
+
+        if self.entries.len() >= self.capacity {
+            self.evict_lru_inactive();
+        }
+        let context = Arc::new(Mutex::new(VolumeContext::new(now)));
+        if self.entries.len() < self.capacity {
+            self.entries.insert(volume_key, Arc::clone(&context));
+        } else {
+            // All cached contexts are in use. Avoid retaining another volume
+            // indefinitely; this one is released when the operation returns.
+            self.transient_fallbacks += 1;
+        }
+        context
+    }
+
+    fn prune_expired(&mut self, now: Instant, protected_key: Option<&str>) {
+        let mut removed = 0u64;
+        self.entries.retain(|key, context| {
+            if protected_key == Some(key.as_str()) || Arc::strong_count(context) != 1 {
+                return true;
+            }
+            let Ok(context) = context.try_lock() else {
+                return true;
+            };
+            let expired = now.saturating_duration_since(context.last_used) >= self.idle_ttl;
+            if expired {
+                removed += 1;
+            }
+            !expired
+        });
+        self.evictions += removed;
+    }
+
+    fn evict_lru_inactive(&mut self) {
+        let mut lru_key: Option<(String, Instant)> = None;
+        for (key, context) in &self.entries {
+            if Arc::strong_count(context) != 1 {
+                continue;
+            }
+            let Ok(context) = context.try_lock() else {
+                continue;
+            };
+            if lru_key
+                .as_ref()
+                .map_or(true, |(_, last_used)| context.last_used < *last_used)
+            {
+                lru_key = Some((key.clone(), context.last_used));
+            }
+        }
+        if let Some((key, _)) = lru_key {
+            self.entries.remove(&key);
+            self.evictions += 1;
+        }
+    }
+
+    fn stats(&self) -> VolumeContextStats {
+        VolumeContextStats {
+            count: self.entries.len(),
+            capacity: self.capacity,
+            evictions: self.evictions,
+            transient_fallbacks: self.transient_fallbacks,
         }
     }
 }
@@ -594,19 +698,21 @@ fn with_volume_context<T>(
     operation: impl FnOnce(Handle) -> io::Result<T>,
 ) -> io::Result<T> {
     let (volume_key, volume) = volume_device(path)?;
-    let contexts = VOLUME_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let contexts = VOLUME_CONTEXTS.get_or_init(|| {
+        Mutex::new(VolumeContextCache::new(
+            MAX_CACHED_VOLUME_CONTEXTS,
+            VOLUME_CONTEXT_IDLE_TTL,
+        ))
+    });
     let mut contexts = contexts
         .lock()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume handle cache poisoned"))?;
-    let context = Arc::clone(
-        contexts
-            .entry(volume_key)
-            .or_insert_with(|| Arc::new(Mutex::new(VolumeContext::new()))),
-    );
+    let context = contexts.context_for(volume_key, Instant::now());
     drop(contexts);
     let mut context = context
         .lock()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume context poisoned"))?;
+    context.last_used = Instant::now();
     if let Some(error_code) = context.reason_read_unavailable_error {
         return Err(io::Error::from_raw_os_error(error_code));
     }
@@ -640,14 +746,20 @@ fn with_volume_context<T>(
             context.handle.take();
         }
     }
+    context.last_used = Instant::now();
     result
 }
 
-pub(crate) fn volume_context_count() -> usize {
+pub(crate) fn volume_context_stats() -> VolumeContextStats {
     VOLUME_CONTEXTS
         .get()
-        .and_then(|contexts| contexts.lock().ok().map(|contexts| contexts.len()))
-        .unwrap_or(0)
+        .and_then(|contexts| contexts.lock().ok().map(|contexts| contexts.stats()))
+        .unwrap_or(VolumeContextStats {
+            count: 0,
+            capacity: MAX_CACHED_VOLUME_CONTEXTS,
+            evictions: 0,
+            transient_fallbacks: 0,
+        })
 }
 
 pub(crate) fn clear_volume_contexts() -> usize {
@@ -657,8 +769,8 @@ pub(crate) fn clear_volume_contexts() -> usize {
     let Ok(mut contexts) = contexts.lock() else {
         return 0;
     };
-    let removed = contexts.len();
-    contexts.clear();
+    let removed = contexts.entries.len();
+    contexts.entries.clear();
     removed
 }
 
@@ -767,5 +879,54 @@ mod tests {
 
         assert_eq!(reasons.all, 0x8000_0002);
         assert_eq!(reasons.without_close, 0x0000_0002);
+    }
+
+    #[test]
+    fn volume_context_cache_evicts_the_least_recently_used_inactive_entry() {
+        let now = Instant::now();
+        let mut cache = VolumeContextCache::new(2, Duration::from_secs(60));
+        drop(cache.context_for("volume-a".to_owned(), now));
+        drop(cache.context_for("volume-b".to_owned(), now + Duration::from_secs(1)));
+
+        drop(cache.context_for("volume-c".to_owned(), now + Duration::from_secs(2)));
+
+        assert_eq!(cache.entries.len(), 2);
+        assert!(!cache.entries.contains_key("volume-a"));
+        assert!(cache.entries.contains_key("volume-b"));
+        assert!(cache.entries.contains_key("volume-c"));
+        assert_eq!(cache.evictions, 1);
+    }
+
+    #[test]
+    fn volume_context_cache_expires_idle_entries() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(60);
+        let mut cache = VolumeContextCache::new(2, ttl);
+        drop(cache.context_for("expired".to_owned(), now));
+
+        drop(cache.context_for("fresh".to_owned(), now + ttl + Duration::from_secs(1)));
+
+        assert_eq!(cache.entries.len(), 1);
+        assert!(!cache.entries.contains_key("expired"));
+        assert!(cache.entries.contains_key("fresh"));
+        assert_eq!(cache.evictions, 1);
+    }
+
+    #[test]
+    fn volume_context_cache_keeps_active_entries_and_uses_a_transient_overflow_context() {
+        let now = Instant::now();
+        let mut cache = VolumeContextCache::new(2, Duration::from_secs(60));
+        let active_a = cache.context_for("active-a".to_owned(), now);
+        let active_b = cache.context_for("active-b".to_owned(), now + Duration::from_secs(1));
+
+        let transient = cache.context_for("overflow".to_owned(), now + Duration::from_secs(2));
+
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.entries.contains_key("active-a"));
+        assert!(cache.entries.contains_key("active-b"));
+        assert!(!cache.entries.contains_key("overflow"));
+        assert_eq!(Arc::strong_count(&transient), 1);
+        assert_eq!(cache.transient_fallbacks, 1);
+        drop((active_a, active_b, transient));
     }
 }

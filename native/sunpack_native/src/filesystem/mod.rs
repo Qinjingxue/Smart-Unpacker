@@ -85,10 +85,26 @@ pub(crate) fn validate_ntfs_watch_root(path: &str) -> PyResult<()> {
 pub(crate) fn watch_filesystem_resource_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     #[cfg(windows)]
-    let volume_contexts = windows::volume_context_count();
+    let volume_context_stats = windows::volume_context_stats();
     #[cfg(not(windows))]
-    let volume_contexts = 0usize;
-    dict.set_item("volume_contexts", volume_contexts)?;
+    let volume_context_stats = (0usize, 0usize, 0u64, 0u64);
+    #[cfg(windows)]
+    {
+        dict.set_item("volume_contexts", volume_context_stats.count)?;
+        dict.set_item("volume_context_capacity", volume_context_stats.capacity)?;
+        dict.set_item("volume_context_evictions", volume_context_stats.evictions)?;
+        dict.set_item(
+            "volume_context_transient_fallbacks",
+            volume_context_stats.transient_fallbacks,
+        )?;
+    }
+    #[cfg(not(windows))]
+    {
+        dict.set_item("volume_contexts", volume_context_stats.0)?;
+        dict.set_item("volume_context_capacity", volume_context_stats.1)?;
+        dict.set_item("volume_context_evictions", volume_context_stats.2)?;
+        dict.set_item("volume_context_transient_fallbacks", volume_context_stats.3)?;
+    }
     Ok(dict.unbind())
 }
 
