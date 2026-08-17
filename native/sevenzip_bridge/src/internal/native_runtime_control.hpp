@@ -17,6 +17,10 @@ namespace sunpack::sevenzip {
 
 struct NativeRuntimeSample {
     double cpu_percent = 0.0;
+    // Synthetic samples in tests and callers that populate cpu_percent directly
+    // are valid by default. The Windows sampler clears this until it has two
+    // system-time snapshots to compare.
+    bool cpu_percent_valid = true;
     std::size_t available_memory = 0;
 };
 
@@ -51,6 +55,9 @@ struct NativeRuntimeConfig {
     std::size_t medium_floor_jobs = 2;
     std::size_t high_floor_jobs = 3;
     double idle_decay_seconds = 30.0;
+    double idle_limit_recovery_seconds = 5.0;
+    double monitor_idle_stop_seconds = 10.0;
+    double resume_warmup_seconds = 1.0;
     std::size_t profile_window_size = 4;
     std::size_t profile_calibration_min_parallel = 2;
     int profile_calibration_max_delta = 1;
@@ -94,6 +101,9 @@ public:
           medium_floor_jobs_((std::max)(std::size_t{1}, config.medium_floor_jobs)),
           high_floor_jobs_((std::max)(config.medium_floor_jobs, config.high_floor_jobs)),
           idle_decay_seconds_((std::max)(0.0, config.idle_decay_seconds)),
+          idle_limit_recovery_seconds_((std::max)(0.0, config.idle_limit_recovery_seconds)),
+          monitor_idle_stop_seconds_((std::max)(0.0, config.monitor_idle_stop_seconds)),
+          resume_warmup_seconds_((std::max)(0.0, config.resume_warmup_seconds)),
           profile_window_size_((std::max)(std::size_t{4}, config.profile_window_size)),
           profile_calibration_min_parallel_((std::max)(std::size_t{1}, config.profile_calibration_min_parallel)),
           profile_calibration_max_delta_((std::max)(0, config.profile_calibration_max_delta)),
@@ -153,7 +163,8 @@ public:
         std::size_t active_jobs,
         std::size_t active_cpu,
         std::size_t active_memory,
-        double elapsed_seconds = 0.0
+        double elapsed_seconds = 0.0,
+        bool fast_scale_up = false
     ) {
         if (!adaptive_enabled_) {
             return false;
@@ -202,10 +213,12 @@ public:
                 : std::size_t{1};
         const bool backlog_wants_more = queued_jobs > (std::max)(std::size_t{1}, active_limit_) * 2;
 
-        if (backlog_wants_more && sample.cpu_percent < cpu_scale_up_percent_) {
+        if (sample.cpu_percent_valid &&
+            backlog_wants_more && sample.cpu_percent < cpu_scale_up_percent_) {
             ++cpu_scale_up_streak_;
             cpu_scale_down_streak_ = 0;
-        } else if (sample.cpu_percent > cpu_scale_down_percent_ &&
+        } else if (sample.cpu_percent_valid &&
+                   sample.cpu_percent > cpu_scale_down_percent_ &&
                    active_cpu >= (std::max)(std::size_t{1}, cpu_limit_ - 1)) {
             ++cpu_scale_down_streak_;
             cpu_scale_up_streak_ = 0;
@@ -227,14 +240,17 @@ public:
             memory_scale_down_streak_ = 0;
         }
 
-        if (cpu_scale_up_streak_ >= scale_up_streak_required_) {
+        const std::size_t scale_up_streak_required = fast_scale_up
+            ? std::size_t{1}
+            : scale_up_streak_required_;
+        if (cpu_scale_up_streak_ >= scale_up_streak_required) {
             cpu_limit_ = (std::min)(max_active_jobs_, cpu_limit_ + 1);
             cpu_scale_up_streak_ = 0;
         } else if (cpu_scale_down_streak_ >= scale_down_streak_required_) {
             cpu_limit_ = (std::max)(dynamic_floor, cpu_limit_ - 1);
             cpu_scale_down_streak_ = 0;
         }
-        if (memory_scale_up_streak_ >= scale_up_streak_required_) {
+        if (memory_scale_up_streak_ >= scale_up_streak_required) {
             memory_limit_ = (std::min)(max_active_jobs_, memory_limit_ + 1);
             memory_scale_up_streak_ = 0;
         } else if (memory_scale_down_streak_ >= scale_down_streak_required_) {
@@ -268,6 +284,75 @@ public:
             active_limit_, cpu_limit_, memory_limit_, memory_capacity_,
             active_jobs, active_cpu, active_memory,
         };
+    }
+
+    double monitor_idle_stop_seconds() const noexcept {
+        return monitor_idle_stop_seconds_;
+    }
+
+    double resume_warmup_seconds() const noexcept {
+        return resume_warmup_seconds_;
+    }
+
+    bool recover_limits_after_idle(double elapsed_seconds) noexcept {
+        if (!idle_recovery_started_) {
+            idle_recovery_start_cpu_limit_ = cpu_limit_;
+            idle_recovery_start_memory_limit_ = memory_limit_;
+            idle_recovery_started_ = true;
+            idle_recovery_completed_ = false;
+        }
+        if (idle_recovery_completed_) {
+            return false;
+        }
+
+        const double fraction = idle_limit_recovery_seconds_ <= 0.0
+            ? 1.0
+            : (std::min)(
+                1.0,
+                (std::max)(0.0, elapsed_seconds) / idle_limit_recovery_seconds_);
+        const std::size_t old_active = active_limit_;
+        const std::size_t old_cpu = cpu_limit_;
+        const std::size_t old_memory = memory_limit_;
+        cpu_limit_ = interpolate_toward(
+            idle_recovery_start_cpu_limit_, initial_active_jobs_, fraction);
+        memory_limit_ = interpolate_toward(
+            idle_recovery_start_memory_limit_, initial_active_jobs_, fraction);
+        active_limit_ = (std::min)(max_active_jobs_, (std::max)(cpu_limit_, memory_limit_));
+        if (fraction >= 1.0) {
+            memory_capacity_ = memory_budget_;
+            throughput_allows_scale_up_ = true;
+            cpu_scale_up_streak_ = 0;
+            cpu_scale_down_streak_ = 0;
+            memory_scale_up_streak_ = 0;
+            memory_scale_down_streak_ = 0;
+            idle_seconds_ = 0.0;
+            throughput_samples_.clear();
+            profile_samples_.clear();
+            idle_recovery_completed_ = true;
+        }
+        return old_active != active_limit_ || old_cpu != cpu_limit_ ||
+            old_memory != memory_limit_;
+    }
+
+    void cancel_idle_limit_recovery() noexcept {
+        idle_recovery_started_ = false;
+        idle_recovery_completed_ = false;
+    }
+
+    void reset_after_long_idle() noexcept {
+        memory_capacity_ = memory_budget_;
+        active_limit_ = initial_active_jobs_;
+        cpu_limit_ = initial_active_jobs_;
+        memory_limit_ = initial_active_jobs_;
+        throughput_allows_scale_up_ = true;
+        cpu_scale_up_streak_ = 0;
+        cpu_scale_down_streak_ = 0;
+        memory_scale_up_streak_ = 0;
+        memory_scale_down_streak_ = 0;
+        idle_seconds_ = 0.0;
+        throughput_samples_.clear();
+        profile_samples_.clear();
+        cancel_idle_limit_recovery();
     }
 
     NativeProfileAdjustment profile_adjustment(const std::string& profile_key) const noexcept {
@@ -451,6 +536,20 @@ public:
     }
 
 private:
+    static std::size_t interpolate_toward(
+        std::size_t start,
+        std::size_t target,
+        double fraction
+    ) noexcept {
+        const double clamped = (std::min)(1.0, (std::max)(0.0, fraction));
+        if (start <= target) {
+            return start + static_cast<std::size_t>(
+                static_cast<double>(target - start) * clamped);
+        }
+        return start - static_cast<std::size_t>(
+            static_cast<double>(start - target) * clamped);
+    }
+
     static std::size_t step_toward(std::size_t value, std::size_t target) noexcept {
         if (value < target) {
             return value + 1;
@@ -496,6 +595,9 @@ private:
     const std::size_t medium_floor_jobs_;
     const std::size_t high_floor_jobs_;
     const double idle_decay_seconds_;
+    const double idle_limit_recovery_seconds_;
+    const double monitor_idle_stop_seconds_;
+    const double resume_warmup_seconds_;
     const std::size_t profile_window_size_;
     const std::size_t profile_calibration_min_parallel_;
     const int profile_calibration_max_delta_;
@@ -503,6 +605,10 @@ private:
     const double profile_improvement_ratio_;
 
     double idle_seconds_ = 0.0;
+    std::size_t idle_recovery_start_cpu_limit_ = 1;
+    std::size_t idle_recovery_start_memory_limit_ = 1;
+    bool idle_recovery_started_ = false;
+    bool idle_recovery_completed_ = false;
     std::deque<ProfileSample> throughput_samples_;
     std::unordered_map<std::string, std::deque<ProfileSample>> profile_samples_;
     std::unordered_map<std::string, NativeProfileAdjustment> profile_adjustments_;

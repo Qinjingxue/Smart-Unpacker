@@ -360,6 +360,23 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
 
 
+def test_native_environment_configures_idle_monitor_windows():
+    environment = {}
+
+    _apply_native_environment(
+        environment,
+        {
+            "idle_limit_recovery_seconds": 5,
+            "monitor_idle_stop_seconds": 10,
+            "resume_warmup_seconds": 1,
+        },
+    )
+
+    assert environment["SUNPACK_NATIVE_IDLE_LIMIT_RECOVERY_SECONDS"] == "5.0"
+    assert environment["SUNPACK_NATIVE_MONITOR_IDLE_STOP_SECONDS"] == "10.0"
+    assert environment["SUNPACK_NATIVE_RESUME_WARMUP_SECONDS"] == "1.0"
+
+
 def test_native_environment_marks_background_worker_mode_explicitly():
     environment = {"SUNPACK_NATIVE_PROCESS_MODE": "background"}
 

@@ -1240,6 +1240,21 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         config.idle_decay_seconds,
         0.0,
         86400.0);
+    config.idle_limit_recovery_seconds = configured_native_double(
+        "SUNPACK_NATIVE_IDLE_LIMIT_RECOVERY_SECONDS",
+        config.idle_limit_recovery_seconds,
+        0.0,
+        86400.0);
+    config.monitor_idle_stop_seconds = configured_native_double(
+        "SUNPACK_NATIVE_MONITOR_IDLE_STOP_SECONDS",
+        config.monitor_idle_stop_seconds,
+        0.0,
+        86400.0);
+    config.resume_warmup_seconds = configured_native_double(
+        "SUNPACK_NATIVE_RESUME_WARMUP_SECONDS",
+        config.resume_warmup_seconds,
+        0.0,
+        60.0);
     config.profile_calibration_min_parallel = configured_native_size(
         "SUNPACK_NATIVE_PROFILE_MIN_PARALLEL", config.profile_calibration_min_parallel);
     config.memory_scale_down_available = configured_native_size(
@@ -1552,6 +1567,12 @@ private:
             ",\"next_sample_interval_ms\":" + std::to_string(next_interval_ms) + "}");
     }
 
+    static void print_controller_lifecycle_event(const char* event) noexcept {
+        print_json_line(
+            "{\"type\":\"native_controller\",\"event\":\"" +
+            std::string(event) + "\"}");
+    }
+
 #ifdef _WIN32
     static std::uint64_t filetime_ticks(const FILETIME& value) noexcept {
         ULARGE_INTEGER combined{};
@@ -1576,6 +1597,7 @@ private:
 
     sunpack::sevenzip::NativeRuntimeSample read_runtime_sample(double elapsed_seconds) noexcept {
         sunpack::sevenzip::NativeRuntimeSample sample;
+        sample.cpu_percent_valid = false;
 #ifdef _WIN32
         MEMORYSTATUSEX memory_status{};
         memory_status.dwLength = sizeof(memory_status);
@@ -1600,6 +1622,7 @@ private:
                 if (total_delta > 0 && idle_delta <= total_delta) {
                     sample.cpu_percent = 100.0 * static_cast<double>(total_delta - idle_delta) /
                         static_cast<double>(total_delta);
+                    sample.cpu_percent_valid = true;
                 }
             }
             previous_idle_time_ = idle;
@@ -1609,6 +1632,15 @@ private:
         }
 #endif
         return sample;
+    }
+
+    void reset_system_cpu_sample() noexcept {
+#ifdef _WIN32
+        has_system_cpu_sample_ = false;
+        previous_idle_time_ = 0;
+        previous_kernel_time_ = 0;
+        previous_user_time_ = 0;
+#endif
     }
 
     unsigned controller_interval_ms(
@@ -1628,20 +1660,92 @@ private:
 
     void controller_loop() noexcept {
         constexpr unsigned minimum_sample_interval_ms = 100;
+        constexpr unsigned idle_recheck_interval_ms = 1000;
         unsigned next_interval_ms = native_sample_interval_ms();
         auto last_sample_at = std::chrono::steady_clock::now();
+        auto idle_since = last_sample_at;
+        auto resume_warmup_until = last_sample_at;
+        bool idle_since_set = false;
+        bool monitor_parked = false;
         while (true) {
             std::unique_lock<std::mutex> wait_lock(mutex_);
-            controller_condition_.wait_for(
-                wait_lock,
-                std::chrono::milliseconds(next_interval_ms),
-                [this] { return stopping_ || controller_recheck_; });
+            if (monitor_parked) {
+                controller_condition_.wait(
+                    wait_lock,
+                    [this] { return stopping_ || controller_recheck_; });
+            } else {
+                controller_condition_.wait_for(
+                    wait_lock,
+                    std::chrono::milliseconds(next_interval_ms),
+                    [this] { return stopping_ || controller_recheck_; });
+            }
             if (stopping_) {
                 break;
             }
             controller_recheck_ = false;
             wait_lock.unlock();
             const auto now = std::chrono::steady_clock::now();
+            bool resumed_from_parked = false;
+            if (monitor_parked) {
+                monitor_parked = false;
+                resumed_from_parked = true;
+                idle_since_set = false;
+                last_sample_at = now - std::chrono::milliseconds(minimum_sample_interval_ms);
+                reset_system_cpu_sample();
+                print_controller_lifecycle_event("monitor_resumed");
+            }
+
+            bool fully_idle = false;
+            std::size_t observed_queued_jobs = 0;
+            sunpack::sevenzip::NativeRuntimeSnapshot observed_snapshot;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                observed_queued_jobs = queue_.size();
+                fully_idle = observed_queued_jobs == 0 && active_jobs_ == 0;
+                observed_snapshot = runtime_controller_.snapshot(
+                    active_jobs_, active_cpu_weight_, active_memory_);
+            }
+            if (resumed_from_parked &&
+                observed_queued_jobs > (std::max)(std::size_t{1}, observed_snapshot.active_limit) * 2) {
+                resume_warmup_until = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(runtime_controller_.resume_warmup_seconds()));
+            } else if (resumed_from_parked) {
+                resume_warmup_until = now;
+            }
+            if (fully_idle) {
+                if (!idle_since_set) {
+                    idle_since = now;
+                    idle_since_set = true;
+                }
+                const double idle_stop_seconds = runtime_controller_.monitor_idle_stop_seconds();
+                if (idle_stop_seconds > 0.0) {
+                    const double idle_seconds = std::chrono::duration<double>(now - idle_since).count();
+                    runtime_controller_.recover_limits_after_idle(idle_seconds);
+                    if (idle_seconds < idle_stop_seconds) {
+                        next_interval_ms = idle_recheck_interval_ms;
+                        continue;
+                    }
+                    bool parked = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (queue_.empty() && active_jobs_ == 0) {
+                            runtime_controller_.reset_after_long_idle();
+                            controller_recheck_ = false;
+                            parked = true;
+                        }
+                    }
+                    if (parked) {
+                        monitor_parked = true;
+                        last_sample_at = now;
+                        reset_system_cpu_sample();
+                        print_controller_lifecycle_event("monitor_paused");
+                        continue;
+                    }
+                }
+            } else {
+                idle_since_set = false;
+                runtime_controller_.cancel_idle_limit_recovery();
+            }
             const double elapsed_seconds = std::chrono::duration<double>(now - last_sample_at).count();
             if (elapsed_seconds * 1000.0 < minimum_sample_interval_ms) {
                 next_interval_ms = (std::max)(
@@ -1668,14 +1772,19 @@ private:
                     break;
                 }
                 queued_jobs = queue_.size();
+                const sunpack::sevenzip::NativeRuntimeSnapshot before_observation =
+                    runtime_controller_.snapshot(active_jobs_, active_cpu_weight_, active_memory_);
+                const bool fast_scale_up = now < resume_warmup_until &&
+                    queued_jobs > (std::max)(std::size_t{1}, before_observation.active_limit) * 2;
                 changed = runtime_controller_.observe(
                     sample,
                     queued_jobs,
                     active_jobs_,
                 active_cpu_weight_,
                 active_memory_,
-                elapsed_seconds);
-            snapshot = runtime_controller_.snapshot(
+                    elapsed_seconds,
+                    fast_scale_up);
+                snapshot = runtime_controller_.snapshot(
                     active_jobs_, active_cpu_weight_, active_memory_);
             }
             next_interval_ms = controller_interval_ms(snapshot, queued_jobs);

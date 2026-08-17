@@ -72,6 +72,90 @@ bool check_runtime_control_keeps_io_out_of_admission() {
         !controller.can_admit(3, 3, 0, 1, 0);
 }
 
+bool check_runtime_control_resets_after_long_idle() {
+    using namespace sunpack::sevenzip;
+    NativeRuntimeConfig config;
+    config.initial_active_jobs = 3;
+    config.scale_up_streak_required = 1;
+    NativeRuntimeControl controller(4, 0, config);
+
+    NativeRuntimeSample sample;
+    sample.available_memory = 4ULL << 30;
+    sample.cpu_percent = 10.0;
+    controller.observe(sample, 10, 3, 3, 0, 0.1);
+    if (controller.snapshot(0, 0, 0).active_limit != 4) {
+        return false;
+    }
+
+    controller.reset_after_long_idle();
+    const auto snapshot = controller.snapshot(0, 0, 0);
+    return snapshot.active_limit == 3 && snapshot.cpu_limit == 3 &&
+        snapshot.memory_limit == 3;
+}
+
+bool check_runtime_control_recovers_limits_over_idle_window() {
+    using namespace sunpack::sevenzip;
+    NativeRuntimeConfig config;
+    config.initial_active_jobs = 1;
+    config.scale_up_streak_required = 1;
+    config.idle_limit_recovery_seconds = 5.0;
+    NativeRuntimeControl controller(4, 0, config);
+
+    NativeRuntimeSample sample;
+    sample.available_memory = 4ULL << 30;
+    sample.cpu_percent = 10.0;
+    controller.observe(sample, 10, 1, 1, 0, 0.1);
+    controller.observe(sample, 10, 2, 2, 0, 0.1);
+    controller.observe(sample, 10, 3, 3, 0, 0.1);
+    if (controller.snapshot(0, 0, 0).active_limit != 4) {
+        return false;
+    }
+
+    controller.recover_limits_after_idle(0.0);
+    controller.recover_limits_after_idle(2.5);
+    if (controller.snapshot(0, 0, 0).active_limit != 3) {
+        return false;
+    }
+    controller.recover_limits_after_idle(5.0);
+    const auto snapshot = controller.snapshot(0, 0, 0);
+    return snapshot.active_limit == 1 && snapshot.cpu_limit == 1 &&
+        snapshot.memory_limit == 1;
+}
+
+bool check_runtime_control_ignores_unprimed_cpu_sample() {
+    using namespace sunpack::sevenzip;
+    NativeRuntimeConfig config;
+    config.initial_active_jobs = 1;
+    config.scale_up_streak_required = 1;
+    config.medium_backlog_threshold = 100;
+    config.high_backlog_threshold = 200;
+    NativeRuntimeControl controller(4, 0, config);
+
+    NativeRuntimeSample sample;
+    sample.cpu_percent_valid = false;
+    sample.cpu_percent = 0.0;
+    controller.observe(sample, 3, 1, 1, 0, 0.1);
+    return controller.snapshot(1, 1, 0).cpu_limit == 1;
+}
+
+bool check_runtime_control_fast_scale_up_after_resume() {
+    using namespace sunpack::sevenzip;
+    NativeRuntimeConfig config;
+    config.initial_active_jobs = 1;
+    config.scale_up_streak_required = 2;
+    config.medium_backlog_threshold = 100;
+    config.high_backlog_threshold = 200;
+    NativeRuntimeControl controller(4, 0, config);
+
+    NativeRuntimeSample sample;
+    sample.available_memory = 4ULL << 30;
+    sample.cpu_percent = 10.0;
+    controller.observe(sample, 3, 1, 1, 0, 0.1, true);
+    const auto snapshot = controller.snapshot(1, 1, 0);
+    return snapshot.active_limit == 2 && snapshot.cpu_limit == 2 &&
+        snapshot.memory_limit == 2;
+}
+
 }  // namespace
 #endif
 
@@ -92,6 +176,22 @@ int wmain(int argc, wchar_t** argv) {
     if (!check_runtime_control_keeps_io_out_of_admission()) {
         std::cerr << "runtime control CPU/memory check failed\n";
         return 5;
+    }
+    if (!check_runtime_control_resets_after_long_idle()) {
+        std::cerr << "runtime control idle reset check failed\n";
+        return 6;
+    }
+    if (!check_runtime_control_recovers_limits_over_idle_window()) {
+        std::cerr << "runtime control idle recovery check failed\n";
+        return 7;
+    }
+    if (!check_runtime_control_ignores_unprimed_cpu_sample()) {
+        std::cerr << "runtime control CPU baseline check failed\n";
+        return 8;
+    }
+    if (!check_runtime_control_fast_scale_up_after_resume()) {
+        std::cerr << "runtime control fast resume scale-up check failed\n";
+        return 9;
     }
 #endif
 
