@@ -165,6 +165,8 @@ def test_lite_build_excludes_model_runtime_from_shared_environment():
 
     assert 'model_runtime_excludes = ["torch", "torch_geometric", "torchgen", "functorch"]' in spec
     assert "excludes=[] if include_repair_models else model_runtime_excludes" in spec
+    assert "sunpack.detection.pipeline.rules.hard_stop" not in spec
+    assert "sunpack.detection.pipeline.rules.confirmation" not in spec
     assert "Assert-LitePackageExcludesModelRuntime -PackageRoot $distAppRoot" in build_script
 
 
@@ -180,8 +182,11 @@ def test_build_supports_interactive_pyinstaller_and_nuitka_selection():
     assert '"-m", "nuitka"' in build_script
     assert '"--standalone"' in build_script
     assert '"--windows-console-mode=$ConsoleMode"' in build_script
+    assert '"--nofollow-import-to=$package"' in build_script
     assert "Invoke-NuitkaStandaloneBuild" in build_script
     assert '"sunpack.repair.model.policy"' in build_script
+    assert "sunpack.detection.pipeline.rules.hard_stop" not in build_script
+    assert "sunpack.detection.pipeline.rules.confirmation" not in build_script
     assert '"nuitka>=2"' in project
 
 

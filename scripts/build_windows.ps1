@@ -765,6 +765,10 @@ function Invoke-NuitkaStandaloneBuild {
         foreach ($metadataDir in $metadataDirs) {
             $arguments += "--include-data-dir=$($metadataDir.FullName)=$($metadataDir.Name)"
         }
+    } else {
+        foreach ($package in @("torch", "torch_geometric", "torchgen", "functorch")) {
+            $arguments += "--nofollow-import-to=$package"
+        }
     }
 
     $arguments += $EntryPath
@@ -1000,10 +1004,8 @@ if ($packagerMode -eq "pyinstaller") {
         "sunpack.filesystem.filters.modules",
         "sunpack.detection.pipeline.facts.collectors",
         "sunpack.detection.pipeline.processors.modules",
-        "sunpack.detection.pipeline.rules.hard_stop",
         "sunpack.detection.pipeline.rules.precheck",
         "sunpack.detection.pipeline.rules.scoring",
-        "sunpack.detection.pipeline.rules.confirmation",
         "sunpack.analysis.structure_pipeline.modules",
         "sunpack.analysis.fuzzy_pipeline.modules",
         "sunpack.repair.pipeline.modules",

@@ -119,7 +119,7 @@ def test_previous_state_schema_is_intentionally_not_loaded(tmp_path):
 def test_previous_watch_group_schema_is_not_loaded_after_field_migration(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({
-        "version": watch_state_module.STATE_VERSION - 1,
+        "version": watch_state_module.STATE_VERSION - 2,
         "groups": {
             "group": {
                 "group_id": "group",
@@ -137,6 +137,33 @@ def test_previous_watch_group_schema_is_not_loaded_after_field_migration(tmp_pat
     state = WatchStateStore(str(state_path))
 
     assert not state.groups
+
+
+def test_legacy_successful_group_is_discarded_during_lifecycle_state_migration(tmp_path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({
+        "version": watch_state_module.STATE_VERSION - 1,
+        "groups": {
+            "group": {
+                "group_id": "group",
+                "directory": str(tmp_path),
+                "logical_name": "archive",
+                "split_family": "7z_numbered",
+                "head_path": str(tmp_path / "archive.7z.001"),
+                "input_paths": [str(tmp_path / "archive.7z.001")],
+                "owned_paths": [str(tmp_path / "archive.7z.001")],
+                "status": "done",
+                "input_fingerprint": "old-input",
+                "ownership_fingerprint": "old-ownership",
+                "last_attempted_input_fingerprint": "old-input",
+            }
+        },
+    }), encoding="utf-8")
+
+    state = WatchStateStore(str(state_path))
+
+    assert not state.groups
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == watch_state_module.STATE_VERSION
 
 
 def test_active_work_persists_force_cause_for_restart(tmp_path):

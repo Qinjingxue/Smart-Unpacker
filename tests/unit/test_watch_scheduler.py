@@ -19,6 +19,7 @@ from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
 from sunpack.filesystem.watcher.scanner import WatchCandidate
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
+from sunpack.support.path_keys import path_key
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
@@ -1501,6 +1502,71 @@ def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_ba
     handler.on_moved(SimpleNamespace(src_path=str(outside_path), dest_path=str(archive_path), is_directory=False))
 
     assert watcher.pending_count == 1
+    assert _await(watcher.run_once()).succeeded == 1
+    assert len(runs) == 2
+
+
+def test_watch_scheduler_reprocesses_split_group_after_source_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watch_root = tmp_path / "watched"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.7z.001"
+    output_dir = watch_root / "sample"
+    archive_path.write_bytes(b"split archive")
+    original_mtime = archive_path.stat().st_mtime
+    runs = []
+
+    def snapshot():
+        return scheduler_module.WatchGroupSnapshot(
+            group_id="split-group",
+            directory=str(watch_root),
+            logical_name="sample",
+            split_family="7z_numbered",
+            head_path=str(archive_path),
+            input_paths=(str(archive_path),),
+            companion_paths=(),
+            owned_paths=(str(archive_path),),
+            input_fingerprint="same-input",
+            ownership_fingerprint="same-owner",
+            complete=True,
+        )
+
+    class GroupCoordinator:
+        def resolve_paths(self, paths):
+            if not archive_path.exists():
+                return {}
+            current = snapshot()
+            return {path_key(path): current for path in paths}
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates={str(output_dir)}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            runs.append(list(paths))
+            output_dir.mkdir(exist_ok=True)
+            archive_path.unlink()
+            return FakeSummary()
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=".",
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
+        group_coordinator=GroupCoordinator(),
+    )
+
+    watcher.enqueue(str(archive_path))
+    assert _await(watcher.run_once()).succeeded == 1
+    assert watcher.state.group_state("split-group") is None
+
+    archive_path.write_bytes(b"split archive")
+    os.utime(archive_path, (original_mtime, original_mtime))
+    watcher.enqueue(str(archive_path), force=True)
+
     assert _await(watcher.run_once()).succeeded == 1
     assert len(runs) == 2
 

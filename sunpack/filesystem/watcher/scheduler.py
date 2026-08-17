@@ -1219,7 +1219,11 @@ class WatchScheduler:
             response,
         )
         if group is not None:
-            self.state.record_group_done(self._current_group_snapshot(group, candidate.path))
+            completed_group = self._current_group_snapshot(group, candidate.path)
+            if completed_group is None:
+                self.state.clear_group(group.group_id)
+            else:
+                self.state.record_group_done(completed_group)
         self.state.mark(
             candidate.path,
             candidate.size,
@@ -1235,14 +1239,18 @@ class WatchScheduler:
         self,
         submitted: WatchGroupSnapshot,
         candidate_path: str,
-    ) -> WatchGroupSnapshot:
-        """Use the latest group fingerprint after a successful async request."""
+    ) -> WatchGroupSnapshot | None:
+        """Return the still-present group only when it is the submitted input."""
 
         resolved = self.group_coordinator.resolve_paths([candidate_path])
         current = resolved.get(path_key(candidate_path))
-        if current is not None and current.group_id == submitted.group_id:
+        if (
+            current is not None
+            and current.group_id == submitted.group_id
+            and current.input_fingerprint == submitted.input_fingerprint
+        ):
             return current
-        return submitted
+        return None
 
     def _common_root_for(self, path: str) -> str:
         path = os.path.abspath(path)

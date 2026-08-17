@@ -4,6 +4,7 @@ from sunpack.filesystem.watcher.group_models import (
     WatchGroupState,
 )
 from sunpack.filesystem.watcher.group_dispatch import plan_watch_dispatches
+import sunpack.coordinator.watch_group_coordinator as coordinator_module
 from sunpack.filesystem.watcher.scanner import WatchCandidate
 from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
@@ -58,6 +59,39 @@ def test_companion_arrival_changes_ownership_without_restarting_same_input():
     snapshot = _snapshot("same-input", ownership_fingerprint="launcher-arrived")
 
     assert state.retry_ready(snapshot, password_generation=0) is False
+
+
+def test_split_group_fingerprint_includes_file_identity_and_usn(tmp_path, monkeypatch):
+    archive = tmp_path / "archive.7z.001"
+    archive.write_bytes(b"split volume")
+    group = type("Group", (), {
+        "split_volumes": [type("Volume", (), {
+            "number": 1,
+            "path": str(archive),
+            "style": "7z_numbered",
+            "source": "filename",
+        })()],
+        "input_paths": [str(archive)],
+        "companion_paths": [],
+        "owned_paths": [str(archive)],
+        "relation": type("Relation", (), {"split_family": "7z_numbered"})(),
+        "logical_name": "archive",
+        "split_group_complete": True,
+        "split_missing_reason": "",
+        "split_missing_indices": [],
+        "split_completeness_status": "complete",
+        "split_completeness_confidence": "proven",
+        "split_completeness_basis": [],
+        "encrypted_unresolved": False,
+    })()
+    observation = WatchCandidate(str(archive), archive.stat().st_size, archive.stat().st_mtime, "file-a", 10)
+    monkeypatch.setattr(coordinator_module, "watch_candidate_for_path", lambda _path: observation)
+    first = WatchGroupCoordinator({})._snapshot(group, str(tmp_path))
+
+    observation = WatchCandidate(str(archive), archive.stat().st_size, archive.stat().st_mtime, "file-b", 11)
+    second = WatchGroupCoordinator({})._snapshot(group, str(tmp_path))
+
+    assert first.input_fingerprint != second.input_fingerprint
 
 
 def test_watch_snapshot_uses_relation_owned_paths_for_launcher_events(tmp_path):

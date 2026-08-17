@@ -16,8 +16,8 @@ from .group_models import (
 )
 
 
-STATE_VERSION = 11
-LOADABLE_STATE_VERSIONS = {STATE_VERSION}
+STATE_VERSION = 12
+LOADABLE_STATE_VERSIONS = {11, STATE_VERSION}
 
 
 @dataclass
@@ -80,7 +80,10 @@ class WatchStateStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
             return
-        if not isinstance(payload, dict) or payload.get("version") not in LOADABLE_STATE_VERSIONS:
+        if not isinstance(payload, dict):
+            return
+        version = payload.get("version")
+        if version not in LOADABLE_STATE_VERSIONS:
             return
         try:
             self.password_generation = max(0, int(payload.get("password_generation", 0)))
@@ -91,6 +94,16 @@ class WatchStateStore:
         self.pending_work = self._load_records(payload.get("pending_work"), WatchInputSnapshot)
         self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
         self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
+        if version < STATE_VERSION:
+            # v11 treated a successful split group as a permanent content
+            # dedupe record. It cannot distinguish a re-arrival from the
+            # original lifecycle, so retain only unfinished retry state.
+            self.groups = {
+                group_id: group
+                for group_id, group in self.groups.items()
+                if group.status != "done"
+            }
+            self.save()
 
     @staticmethod
     def _load_records(payload, record_type, *, normalize_keys: bool = True) -> dict:
@@ -405,6 +418,12 @@ class WatchStateStore:
 
     def record_group_done(self, snapshot: WatchGroupSnapshot) -> None:
         self.record_group_terminal(snapshot, status="done")
+
+    def clear_group(self, group_id: str) -> bool:
+        if self.groups.pop(group_id, None) is None:
+            return False
+        self.save()
+        return True
 
     def _group_record(
         self,

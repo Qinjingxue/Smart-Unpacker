@@ -12,6 +12,7 @@ from sunpack.relations.scheduler import RelationsScheduler
 from sunpack.support.path_keys import path_key
 
 from sunpack.filesystem.watcher.group_models import WatchGroupSnapshot
+from sunpack.filesystem.watcher.scanner import watch_candidate_for_path
 
 
 class WatchPasswordProber(RelationsPasswordProber):
@@ -126,9 +127,16 @@ def _fingerprint(payload: dict) -> str:
     ).hexdigest()
 
 
-def _file_version(path: str) -> tuple[str, int, int]:
+def _file_version(path: str) -> tuple[str, int, int, str, int]:
     try:
         stat = os.stat(path)
     except OSError:
-        return path_key(path), 0, 0
-    return path_key(path), int(stat.st_size), int(stat.st_mtime_ns)
+        return path_key(path), 0, 0, "", 0
+    candidate = watch_candidate_for_path(path)
+    return (
+        path_key(path),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        str(candidate.file_id if candidate is not None else ""),
+        int(candidate.change_usn if candidate is not None else 0),
+    )
