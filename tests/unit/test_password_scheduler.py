@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
 import sunpack.passwords.scheduler as password_scheduler_module
-from sunpack.passwords.cache import PasswordAttemptCache
+from sunpack.passwords.cache import (
+    MAX_CACHED_NEGATIVE_ATTEMPTS,
+    MAX_CACHED_SUCCESSES,
+    PasswordAttemptCache,
+)
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.fingerprint import build_archive_fingerprint
 from sunpack.passwords.job import PasswordJob
@@ -85,6 +89,20 @@ def test_password_scheduler_skips_negative_cache_and_reuses_success(tmp_path):
     assert second.password == "secret"
     assert second.stopped_reason == "cache_hit"
     assert verifier.batches == [["bad"], ["secret"]]
+
+
+def test_password_attempt_cache_bounds_successes_and_negative_attempts():
+    cache = PasswordAttemptCache()
+
+    for index in range(MAX_CACHED_SUCCESSES + 1):
+        cache.remember_success(f"fingerprint-{index}", "secret")
+    assert cache.get_success("fingerprint-0") is None
+    assert cache.get_success(f"fingerprint-{MAX_CACHED_SUCCESSES}") == "secret"
+
+    for index in range(MAX_CACHED_NEGATIVE_ATTEMPTS + 1):
+        cache.remember_negative("fingerprint", f"password-{index}")
+    assert cache.has_negative("fingerprint", "password-0") is False
+    assert cache.has_negative("fingerprint", f"password-{MAX_CACHED_NEGATIVE_ATTEMPTS}") is True
 
 
 def test_password_scheduler_caps_batch_to_max_attempts(tmp_path):

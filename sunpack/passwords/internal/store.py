@@ -35,7 +35,7 @@ class PasswordStore:
             user_passwords=dedupe_passwords(cli_passwords or []),
             clipboard_passwords=dedupe_passwords(clipboard_passwords or []),
             builtin_passwords=dedupe_passwords(builtin_passwords or []),
-            recent_passwords=dedupe_passwords(recent_passwords or []),
+            recent_passwords=dedupe_passwords(recent_passwords or [])[:MAX_RECENT_PASSWORDS],
         )
 
     def candidates(self, directory_passwords: List[str] | None = None) -> List[str]:

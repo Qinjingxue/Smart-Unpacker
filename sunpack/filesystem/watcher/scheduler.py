@@ -51,6 +51,7 @@ from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
 from sunpack.passwords.internal.lists import dedupe_passwords
 from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
+from sunpack.passwords.internal.store import MAX_RECENT_PASSWORDS
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.collections import dedupe_normalized_paths
@@ -1534,6 +1535,7 @@ class WatchScheduler:
         incoming = dedupe_passwords([str(value) for value in list(passwords or []) if str(value)])
         with self._password_source_lock:
             updated = dedupe_passwords([*incoming, *self._recent_passwords])
+            updated = updated[:MAX_RECENT_PASSWORDS]
             if updated == self._recent_passwords:
                 return
             self._recent_passwords = updated

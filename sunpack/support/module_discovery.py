@@ -3,7 +3,7 @@ import pkgutil
 from functools import lru_cache
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=32)
 def discover_package_modules(package_name: str, *, recursive: bool = False) -> None:
     package = importlib.import_module(package_name)
     iterator = pkgutil.walk_packages if recursive else pkgutil.iter_modules
@@ -11,7 +11,7 @@ def discover_package_modules(package_name: str, *, recursive: bool = False) -> N
         importlib.import_module(module_info.name)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=32)
 def import_static_modules(module_names: tuple[str, ...]) -> None:
     """Import a fixed registry manifest once per process.
 

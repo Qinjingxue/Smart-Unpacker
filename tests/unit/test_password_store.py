@@ -41,6 +41,14 @@ def test_password_store_bounds_recent_success_history():
     assert store.recent_passwords[0] == f"password-{MAX_RECENT_PASSWORDS + 19}"
 
 
+def test_password_store_bounds_initial_recent_success_history():
+    store = PasswordStore.from_sources(
+        recent_passwords=[f"password-{index}" for index in range(MAX_RECENT_PASSWORDS + 1)]
+    )
+
+    assert len(store.recent_passwords) == MAX_RECENT_PASSWORDS
+
+
 def test_password_resolver_prefers_formal_password_probe_input():
     bag = FactBag()
     bag.set("archive.knowledge", {

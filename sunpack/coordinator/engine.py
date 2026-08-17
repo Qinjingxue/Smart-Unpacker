@@ -25,6 +25,7 @@ from sunpack.coordinator.target_groups import relation_group_to_fact_bag
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.i18n import I18nContext
 from sunpack.postprocess.actions import PostProcessActions
+from sunpack.passwords.internal.store import MAX_RECENT_PASSWORDS
 from sunpack.platform.windows.shell_notify import notify_shell_directories_updated
 from sunpack.rename.scheduler import OutputReservationRegistry, RenameScheduler
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
@@ -259,7 +260,7 @@ class PipelineEngine:
             if password in self._recent_passwords:
                 self._recent_passwords.remove(password)
             self._recent_passwords.insert(0, password)
-        del self._recent_passwords[20:]
+        del self._recent_passwords[MAX_RECENT_PASSWORDS:]
 
     @staticmethod
     def _normalize_target(target: str | PipelineTarget) -> PipelineTarget:
