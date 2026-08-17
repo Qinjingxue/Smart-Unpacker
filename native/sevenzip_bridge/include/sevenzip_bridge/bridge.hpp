@@ -52,6 +52,31 @@ struct ExtractInputTrace {
     unsigned long long position = 0;
     unsigned long long max_position_seen = 0;
     unsigned long long total_bytes_returned = 0;
+    // Populated only when SUNPACK_SEVENZIP_PROFILE_READS=1 in the worker
+    // environment. This is wall time spent in synchronous input ReadFile calls.
+    unsigned long long read_file_call_count = 0;
+    unsigned long long read_file_wall_ns = 0;
+    unsigned long long read_file_max_wall_ns = 0;
+    // Logical IInStream access pattern, populated only when input-read
+    // profiling is enabled, describing the access requested by 7z.dll.
+    unsigned long long logical_read_call_count = 0;
+    unsigned long long sequential_read_bytes = 0;
+    unsigned long long nonsequential_read_bytes = 0;
+    unsigned long long sequential_run_count = 0;
+    unsigned long long max_sequential_run_bytes = 0;
+    unsigned long long current_sequential_run_bytes = 0;
+    unsigned long long seek_count = 0;
+    unsigned long long seek_forward_bytes = 0;
+    unsigned long long seek_backward_bytes = 0;
+    // Prefetch state and counters, populated only when input-read profiling
+    // is enabled.
+    bool prefetch_enabled = false;
+    unsigned long long prefetch_hit_count = 0;
+    unsigned long long prefetch_miss_count = 0;
+    unsigned long long prefetch_invalidation_count = 0;
+    unsigned long long prefetch_consumer_wait_ns = 0;
+    unsigned long long last_logical_read_end = 0;
+    bool has_last_logical_read_end = false;
     unsigned long long last_read_virtual_offset = 0;
     unsigned long long last_read_source_offset = 0;
     unsigned long long last_seek_new_position = 0;
@@ -215,6 +240,7 @@ ExtractArchiveResult extract_archive_with_parts(
     ExtractProgressCallback progress = nullptr,
     bool dry_run = false,
     const std::vector<std::wstring>& canonical_names = {},
+    bool native_volume_input = false,
     std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
     std::size_t job_buffer_budget = 0,
     std::shared_ptr<std::atomic<bool>> cancel_token = nullptr

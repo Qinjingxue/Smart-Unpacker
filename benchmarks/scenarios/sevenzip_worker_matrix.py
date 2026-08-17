@@ -167,12 +167,41 @@ def _run_job(
     output = Path(str(job["output_dir"]))
     output_stats = _output_summary(output)
     status = str(result.get("status") or "")
+    worker_wall_ms = round((finished - started) / 1_000_000.0, 3)
+    input_trace = result.get("input_trace")
+    if not isinstance(input_trace, dict):
+        input_trace = {}
+    read_file_wall_ms = round(float(input_trace.get("read_file_wall_ns", 0) or 0) / 1_000_000.0, 3)
+    prefetch_wait_ms = round(float(input_trace.get("prefetch_consumer_wait_ns", 0) or 0) / 1_000_000.0, 3)
+    sequential_read_bytes = int(input_trace.get("sequential_read_bytes", 0) or 0)
+    nonsequential_read_bytes = int(input_trace.get("nonsequential_read_bytes", 0) or 0)
+    logical_read_bytes = sequential_read_bytes + nonsequential_read_bytes
     return {
         "job_id": job_id,
         "status": status,
         "passed": status == "ok",
-        "worker_wall_ms": round((finished - started) / 1_000_000.0, 3),
+        "worker_wall_ms": worker_wall_ms,
         "worker_cpu_ms": None if cpu_before is None or cpu_after is None else round(cpu_after - cpu_before, 3),
+        "input_stream_mode": input_trace.get("mode"),
+        "input_read_file_call_count": int(input_trace.get("read_file_call_count", 0) or 0),
+        "input_read_file_wall_ms": read_file_wall_ms,
+        "input_read_file_max_wall_ms": round(float(input_trace.get("read_file_max_wall_ns", 0) or 0) / 1_000_000.0, 3),
+        "input_read_file_wall_ratio": round(read_file_wall_ms / worker_wall_ms, 6) if worker_wall_ms else None,
+        "input_logical_read_call_count": int(input_trace.get("logical_read_call_count", 0) or 0),
+        "input_sequential_read_bytes": sequential_read_bytes,
+        "input_nonsequential_read_bytes": nonsequential_read_bytes,
+        "input_sequential_read_ratio": round(sequential_read_bytes / logical_read_bytes, 6) if logical_read_bytes else None,
+        "input_sequential_run_count": int(input_trace.get("sequential_run_count", 0) or 0),
+        "input_max_sequential_run_bytes": int(input_trace.get("max_sequential_run_bytes", 0) or 0),
+        "input_seek_count": int(input_trace.get("seek_count", 0) or 0),
+        "input_seek_forward_bytes": int(input_trace.get("seek_forward_bytes", 0) or 0),
+        "input_seek_backward_bytes": int(input_trace.get("seek_backward_bytes", 0) or 0),
+        "input_prefetch_enabled": bool(input_trace.get("prefetch_enabled", False)),
+        "input_prefetch_hit_count": int(input_trace.get("prefetch_hit_count", 0) or 0),
+        "input_prefetch_miss_count": int(input_trace.get("prefetch_miss_count", 0) or 0),
+        "input_prefetch_invalidation_count": int(input_trace.get("prefetch_invalidation_count", 0) or 0),
+        "input_prefetch_consumer_wait_ms": prefetch_wait_ms,
+        "input_consumer_read_blocking_ms": round(read_file_wall_ms + prefetch_wait_ms, 3),
         "worker_rss_before_mib": round(child_rss[0], 3) if child_rss else None,
         "worker_rss_peak_mib": round(max(child_rss), 3) if child_rss else None,
         "worker_rss_after_mib": round(child_rss[-1], 3) if child_rss else None,
@@ -198,15 +227,28 @@ def _case_job(
     dll_path: Path,
 ) -> dict[str, Any]:
     volumes = _volume_paths(case)
-    return {
+    archive_format = str(case["format"])
+    format_hint = archive_format.removesuffix("-split")
+    job = {
         "job_id": job_id,
         "seven_zip_dll_path": str(dll_path),
         "archive_path": str(volumes[0]),
         "part_paths": [str(path) for path in volumes],
         "output_dir": str(output_dir),
         "password": "",
-        "format_hint": "",
+        "format_hint": format_hint,
     }
+    if archive_format == "rar-split":
+        job["archive_input"] = {
+            "entry_path": str(volumes[0]),
+            "open_mode": "native_volumes",
+            "format_hint": "rar",
+            "parts": [
+                {"path": str(path), "volume_number": index, "canonical_name": path.name}
+                for index, path in enumerate(volumes, start=1)
+            ],
+        }
+    return job
 
 
 def _build_cases(workspace: BenchmarkWorkspace, profiles: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -277,7 +319,13 @@ def _write_csv(path: Path, samples: list[dict[str, Any]]) -> None:
     columns = [
         "case_id", "profile", "workload", "format", "run", "archive_bytes", "payload_bytes", "volume_count",
         "status", "passed", "worker_wall_ms", "worker_cpu_ms", "worker_rss_before_mib",
-        "worker_rss_peak_mib", "worker_rss_after_mib", "files_written", "bytes_written",
+        "worker_rss_peak_mib", "worker_rss_after_mib", "input_stream_mode", "input_read_file_call_count",
+        "input_read_file_wall_ms", "input_read_file_max_wall_ms", "input_read_file_wall_ratio", "files_written", "bytes_written",
+        "input_logical_read_call_count", "input_sequential_read_bytes", "input_nonsequential_read_bytes",
+        "input_sequential_read_ratio", "input_sequential_run_count", "input_max_sequential_run_bytes",
+        "input_seek_count", "input_seek_forward_bytes", "input_seek_backward_bytes",
+        "input_prefetch_enabled", "input_prefetch_hit_count", "input_prefetch_miss_count",
+        "input_prefetch_invalidation_count", "input_prefetch_consumer_wait_ms", "input_consumer_read_blocking_ms",
         "output_file_count", "output_total_bytes", "failure_stage", "failure_kind", "message",
     ]
     with path.open("w", encoding="utf-8", newline="") as stream:

@@ -18,6 +18,12 @@ python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cl
 python -m benchmarks scan hotspots . --mode full --json-out benchmarks/results/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out benchmarks/results/extraction-benchmark.json
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out benchmarks/results/sevenzip-worker-baseline.json
+python -m benchmarks extraction worker-read-blocking --runs 1 --payload-gib 1 --json-out benchmarks/results/worker-read-blocking.json
+python -m benchmarks extraction worker-read-patterns --runs 1 --json-out benchmarks/results/worker-read-patterns.json
+# Enable the production format-aware prefetch policy while tuning its defaults (512 KiB x 2).
+python -m benchmarks extraction worker-read-patterns --runs 2 --prefetch on --prefetch-window-kib 512 --prefetch-depth 2
+# Compare production-policy prefetch on/off in alternating order. Two 512 MiB members retain a meaningful solid-7z case.
+python -m benchmarks extraction worker-read-patterns --format tar --format rar-split --format 7z --7z-variant solid --large-files 2 --large-file-mib 512 --large-content random --runs 5 --prefetch compare
 python -m benchmarks extraction worker-small-file-scheduling --jobs 256 --clients 4 --capacities 1,2,4,8 --runs 3
 python -m benchmarks extraction worker-single-file-write --baseline-worker-path C:\path\to\before\sunpack_sevenzip_worker.exe --candidate-worker-path C:\path\to\after\sunpack_sevenzip_worker.exe --payload-gib 1 --writer-threads 4 --runs 3 --warmups 1
 python -m benchmarks extraction worker-resource-pressure --modes cpu,io,memory --controllers adaptive,fixed --capacities 1,2,4 --jobs 4

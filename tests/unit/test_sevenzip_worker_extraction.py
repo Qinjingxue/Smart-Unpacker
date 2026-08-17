@@ -1,5 +1,6 @@
 import binascii
 import json
+import os
 import subprocess
 import struct
 import tarfile
@@ -709,6 +710,108 @@ def test_worker_dry_run_hashes_output_when_source_crc_is_missing(tmp_path):
     assert item["crc_verified"] is True
 
 
+@pytest.mark.parametrize(
+    ("format_hint", "prefetch_enabled"),
+    [("tar", False), ("", True)],
+)
+def test_worker_applies_format_aware_prefetch_policy(tmp_path, format_hint, prefetch_enabled):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"prefetch policy payload")
+    archive = tmp_path / "payload.tar"
+    with tarfile.open(archive, "w") as handle:
+        handle.add(source, arcname=source.name)
+
+    environment = os.environ.copy()
+    environment["SUNPACK_SEVENZIP_PROFILE_READS"] = "1"
+    environment["SUNPACK_SEVENZIP_PREFETCH"] = "1"
+    result = subprocess.run(
+        [worker],
+        input=json.dumps({
+            "job_id": f"prefetch-policy-{format_hint or 'empty'}",
+            "seven_zip_dll_path": seven_zip_dll,
+            "archive_path": str(archive),
+            "output_dir": str(tmp_path / "out"),
+            "format_hint": format_hint,
+            "dry_run": True,
+        }),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["input_trace"]["prefetch_enabled"] is prefetch_enabled
+
+
+def test_worker_disables_prefetch_for_native_rar_volumes(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    first = tmp_path / "archive.part1.rar"
+    second = tmp_path / "archive.part2.rar"
+    first.write_bytes(b"Rar!\x1a\x07\x01\x00")
+    second.write_bytes(b"not a complete volume")
+    environment = os.environ.copy()
+    environment["SUNPACK_SEVENZIP_PROFILE_READS"] = "1"
+    environment["SUNPACK_SEVENZIP_PREFETCH"] = "1"
+    result = subprocess.run(
+        [worker],
+        input=json.dumps({
+            "job_id": "native-rar-prefetch-policy",
+            "seven_zip_dll_path": seven_zip_dll,
+            "archive_path": str(first),
+            "output_dir": str(tmp_path / "out"),
+            "format_hint": "rar",
+            "archive_input": {
+                "entry_path": str(first),
+                "open_mode": "native_volumes",
+                "format_hint": "rar",
+                "parts": [
+                    {"path": str(first), "volume_number": 1, "canonical_name": first.name},
+                    {"path": str(second), "volume_number": 2, "canonical_name": second.name},
+                ],
+            },
+        }),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode != 0
+    assert worker_result["input_trace"]["prefetch_enabled"] is False
+
+
+def test_worker_omits_input_profile_without_opt_in(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, _ = _create_7z(tmp_path, "profile-disabled", "profile disabled payload")
+    environment = os.environ.copy()
+    environment.pop("SUNPACK_SEVENZIP_PROFILE_READS", None)
+    result = subprocess.run(
+        [worker],
+        input=json.dumps({
+            "job_id": "profile-disabled",
+            "seven_zip_dll_path": seven_zip_dll,
+            "archive_path": str(archive),
+            "output_dir": str(tmp_path / "out"),
+            "format_hint": "7z",
+        }),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "input_trace" not in worker_result
+
+
 def test_worker_async_output_extracts_format_without_source_crc(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
@@ -895,7 +998,8 @@ def _worker_result(stdout: str) -> dict:
     return next(item for item in lines if item.get("type") == "result")
 
 
-def test_extraction_scheduler_uses_worker_for_file_range(tmp_path):
+def test_extraction_scheduler_uses_worker_for_file_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUNPACK_SEVENZIP_PROFILE_READS", "1")
     archive, filename = _create_7z(tmp_path, "payload", "range payload")
     data = archive.read_bytes()
     prefix = b"SHELLDATA"
@@ -913,6 +1017,7 @@ def test_extraction_scheduler_uses_worker_for_file_range(tmp_path):
 
     assert result.success is True
     assert (tmp_path / "out" / filename).read_text(encoding="utf-8") == "range payload"
+    assert result.diagnostics["result"]["input_trace"]["prefetch_enabled"] is True
 
 
 def test_extraction_scheduler_saves_worker_diagnostics_on_failure(tmp_path):
@@ -928,7 +1033,8 @@ def test_extraction_scheduler_saves_worker_diagnostics_on_failure(tmp_path):
     assert result.diagnostics["repro"]["request"]["archive_path"] == str(missing)
 
 
-def test_extraction_scheduler_uses_worker_for_concat_ranges(tmp_path):
+def test_extraction_scheduler_uses_worker_for_concat_ranges(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUNPACK_SEVENZIP_PROFILE_READS", "1")
     archive, filename = _create_7z(tmp_path, "payload", "concat payload")
     data = archive.read_bytes()
     midpoint = len(data) // 2
@@ -951,6 +1057,7 @@ def test_extraction_scheduler_uses_worker_for_concat_ranges(tmp_path):
 
     assert result.success is True
     assert (tmp_path / "out" / filename).read_text(encoding="utf-8") == "concat payload"
+    assert result.diagnostics["result"]["input_trace"]["prefetch_enabled"] is True
 
 
 def test_extraction_scheduler_uses_worker_archive_input_descriptor(tmp_path):

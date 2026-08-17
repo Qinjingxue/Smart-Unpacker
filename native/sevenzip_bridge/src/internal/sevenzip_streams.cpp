@@ -20,7 +20,9 @@ ComPtr<IInStream> open_archive_stream(
 
     ExtractInputTrace* trace,
 
-    bool structured_order
+    bool structured_order,
+
+    InputPrefetchConfig prefetch_config
 
 ) {
 
@@ -38,7 +40,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (!volumes.empty() && is_sfx_path(volumes.front())) {
 
-            auto* stream = new FileInStream(volumes.front(), trace, L"sfx_file");
+            auto* stream = new FileInStream(volumes.front(), trace, L"sfx_file", prefetch_config);
 
             opened = stream->is_open();
 
@@ -48,7 +50,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (volumes.size() > 1) {
 
-            auto* stream = new MultiFileInStream(std::move(volumes), trace);
+            auto* stream = new MultiFileInStream(std::move(volumes), trace, prefetch_config);
 
             opened = stream->is_open();
 
@@ -58,7 +60,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (volumes.size() == 1) {
 
-            auto* stream = new FileInStream(volumes.front(), trace, L"file");
+            auto* stream = new FileInStream(volumes.front(), trace, L"file", prefetch_config);
 
             opened = stream->is_open();
 
@@ -66,7 +68,7 @@ ComPtr<IInStream> open_archive_stream(
 
         }
 
-        auto* stream = new FileInStream(archive_path, trace, L"file");
+        auto* stream = new FileInStream(archive_path, trace, L"file", prefetch_config);
 
         opened = stream->is_open();
 
@@ -92,7 +94,7 @@ ComPtr<IInStream> open_archive_stream(
 
     if (paths.size() > 1) {
 
-        auto* stream = new MultiFileInStream(std::move(paths), trace);
+        auto* stream = new MultiFileInStream(std::move(paths), trace, prefetch_config);
 
         opened = stream->is_open();
 
@@ -102,7 +104,7 @@ ComPtr<IInStream> open_archive_stream(
 
 
 
-    auto* stream = new FileInStream(archive_path, trace, L"file");
+    auto* stream = new FileInStream(archive_path, trace, L"file", prefetch_config);
 
     opened = stream->is_open();
 

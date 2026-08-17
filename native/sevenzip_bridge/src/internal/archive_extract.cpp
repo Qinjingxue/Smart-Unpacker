@@ -229,6 +229,8 @@ ExtractArchiveResult extract_archive_internal(
 
     const std::vector<std::wstring>& canonical_names = {},
 
+    bool native_volume_input = false,
+
     std::shared_ptr<AsyncFileWriter> shared_writer = nullptr,
 
     std::size_t job_buffer_budget = 0,
@@ -281,6 +283,7 @@ ExtractArchiveResult extract_archive_internal(
 
 
     const auto formats = candidate_formats_for_hint(format_hint, archive_path, part_paths);
+    const auto prefetch_config = input_prefetch_config_for_archive(format_hint, native_volume_input);
 
     for (const GUID& format : formats) {
 
@@ -348,7 +351,7 @@ ExtractArchiveResult extract_archive_internal(
 
             if (!input_ranges.empty()) {
 
-                auto* range_stream = new MultiRangeInStream(input_ranges, &result.input_trace);
+                auto* range_stream = new MultiRangeInStream(input_ranges, &result.input_trace, prefetch_config);
 
                 stream_opened = range_stream->is_open();
 
@@ -361,7 +364,8 @@ ExtractArchiveResult extract_archive_internal(
                 part_paths,
                 stream_opened,
                 &result.input_trace,
-                !canonical_names.empty()
+                !canonical_names.empty(),
+                prefetch_config
             );
 
         }();
@@ -734,6 +738,8 @@ ExtractArchiveResult extract_archive_with_parts(
 
     const std::vector<std::wstring>& canonical_names,
 
+    bool native_volume_input,
+
     std::shared_ptr<AsyncFileWriter> shared_writer,
 
     std::size_t job_buffer_budget,
@@ -793,6 +799,7 @@ ExtractArchiveResult extract_archive_with_parts(
         dry_run,
 
         canonical_names,
+        native_volume_input,
         std::move(shared_writer),
         job_buffer_budget,
         std::move(cancel_token));
@@ -913,6 +920,7 @@ ExtractArchiveResult extract_archive_with_ranges(
 
         dry_run,
         {},
+        false,
         std::move(shared_writer),
         job_buffer_budget,
         std::move(cancel_token));
@@ -1041,6 +1049,7 @@ ExtractArchiveResult extract_archive_with_patches(
 
         dry_run,
         {},
+        false,
         std::move(shared_writer),
         job_buffer_budget,
         std::move(cancel_token));

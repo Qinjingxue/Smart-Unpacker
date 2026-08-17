@@ -36,6 +36,14 @@
 
 namespace {
 
+bool read_file_timing_enabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SUNPACK_SEVENZIP_PROFILE_READS");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -681,6 +689,22 @@ std::string input_trace_json(const sunpack::sevenzip::ExtractInputTrace& trace) 
         ",\"position\":" + std::to_string(trace.position) +
         ",\"max_position_seen\":" + std::to_string(trace.max_position_seen) +
         ",\"total_bytes_returned\":" + std::to_string(trace.total_bytes_returned) +
+        ",\"read_file_call_count\":" + std::to_string(trace.read_file_call_count) +
+        ",\"read_file_wall_ns\":" + std::to_string(trace.read_file_wall_ns) +
+        ",\"read_file_max_wall_ns\":" + std::to_string(trace.read_file_max_wall_ns) +
+        ",\"logical_read_call_count\":" + std::to_string(trace.logical_read_call_count) +
+        ",\"sequential_read_bytes\":" + std::to_string(trace.sequential_read_bytes) +
+        ",\"nonsequential_read_bytes\":" + std::to_string(trace.nonsequential_read_bytes) +
+        ",\"sequential_run_count\":" + std::to_string(trace.sequential_run_count) +
+        ",\"max_sequential_run_bytes\":" + std::to_string(trace.max_sequential_run_bytes) +
+        ",\"seek_count\":" + std::to_string(trace.seek_count) +
+        ",\"seek_forward_bytes\":" + std::to_string(trace.seek_forward_bytes) +
+        ",\"seek_backward_bytes\":" + std::to_string(trace.seek_backward_bytes) +
+        ",\"prefetch_enabled\":" + std::string(trace.prefetch_enabled ? "true" : "false") +
+        ",\"prefetch_hit_count\":" + std::to_string(trace.prefetch_hit_count) +
+        ",\"prefetch_miss_count\":" + std::to_string(trace.prefetch_miss_count) +
+        ",\"prefetch_invalidation_count\":" + std::to_string(trace.prefetch_invalidation_count) +
+        ",\"prefetch_consumer_wait_ns\":" + std::to_string(trace.prefetch_consumer_wait_ns) +
         ",\"read_error\":" + std::string(trace.read_error ? "true" : "false") +
         ",\"last_hresult\":" + std::to_string(trace.last_hresult) +
         ",\"last_hresult_hex\":\"" + hresult_hex(trace.last_hresult) +
@@ -959,7 +983,7 @@ int run_request(
         return !archive_input.patches.empty()
             ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run, shared_writer, static_cast<std::size_t>(job_buffer_budget), cancel_token)
             : archive_input.ranges.empty()
-            ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run, archive_input.canonical_names, shared_writer, static_cast<std::size_t>(job_buffer_budget), cancel_token)
+            ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run, archive_input.canonical_names, archive_input.open_mode == L"native_volumes", shared_writer, static_cast<std::size_t>(job_buffer_budget), cancel_token)
             : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, selected_password, output_dir, codepage, decoded_names, progress, dry_run, shared_writer, static_cast<std::size_t>(job_buffer_budget), cancel_token);
     };
 
@@ -997,6 +1021,8 @@ int run_request(
         ",\"hresult_hex\":\"" + hresult_hex(result.hresult) + "\"";
     const std::string diagnostic_fields = (!ok || dry_run) ?
         ",\"diagnostics\":" + diagnostics_json(result) : "";
+    const std::string input_trace_field = read_file_timing_enabled() ?
+        ",\"input_trace\":" + input_trace_json(result.input_trace) : "";
     print_json_line(
         "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
         "\",\"status\":\"" + std::string(ok ? "ok" : "failed") +
@@ -1034,7 +1060,7 @@ int run_request(
         "\",\"verified_manifest\":" + verified_manifest_json(result, ok && !dry_run) +
         ",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"" +
-        failure_fields + diagnostic_fields + "}");
+        failure_fields + input_trace_field + diagnostic_fields + "}");
     return ok ? 0 : 1;
 }
 
