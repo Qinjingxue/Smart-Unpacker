@@ -276,11 +276,21 @@ class WatchService:
                     sleep_seconds = None if next_scheduler_run is None else max(0.0, next_scheduler_run - now)
                 else:
                     sleep_seconds = None
-                timeout = 0.25 if sleep_seconds is None else max(0.0, sleep_seconds)
-                try:
-                    control_event = await asyncio.wait_for(self._control_queue.get(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    control_event = None
+                if sleep_seconds is None:
+                    # Every input that can make an idle scheduler runnable has
+                    # a control event: filesystem changes, password changes,
+                    # config reloads, pipeline completions, and service stop.
+                    # Do not wake four times per second merely to re-check an
+                    # empty scheduler.
+                    control_event = await self._control_queue.get()
+                else:
+                    try:
+                        control_event = await asyncio.wait_for(
+                            self._control_queue.get(),
+                            timeout=max(0.0, sleep_seconds),
+                        )
+                    except asyncio.TimeoutError:
+                        control_event = None
                 if control_event == CONTROL_SCHEDULER_WAKEUP and self.scheduler is not None:
                     # A pipeline completion wakes the service so run_once() can
                     # harvest the finished request.  Recomputing the delay here
@@ -310,7 +320,7 @@ class WatchService:
 
         def bridge() -> None:
             while not self._control_bridge_stop.is_set():
-                event = self.control_events.wait(0.25)
+                event = self.control_events.wait(None)
                 if event is not None and self._loop is not None and self._control_queue is not None:
                     self._loop.call_soon_threadsafe(self._control_queue.put_nowait, event)
 
@@ -323,6 +333,13 @@ class WatchService:
 
     def _stop_control_bridge(self) -> None:
         self._control_bridge_stop.set()
+        # The bridge waits indefinitely on Windows control events.  Wake it
+        # explicitly so teardown after an unexpected exception cannot leave a
+        # daemon thread blocked in WaitForMultipleObjects.
+        try:
+            self.control_events.wake_stop()
+        except Exception:
+            pass
         thread = self._control_bridge_thread
         self._control_bridge_thread = None
         if thread is not None:

@@ -232,7 +232,7 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
             pass
 
         def wait(self, timeout_seconds):
-            assert timeout_seconds == 0.25
+            assert timeout_seconds is None
             waiting.set()
             assert wake.wait(timeout=1.0)
             return CONTROL_STOP
@@ -263,6 +263,40 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
 
     assert not thread.is_alive()
     assert results == [0]
+
+
+def test_stop_control_bridge_wakes_indefinitely_blocked_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(tmp_path / ".sunpack_watch"), "roots": []}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    waiting = threading.Event()
+    wake = threading.Event()
+    wake_calls = []
+
+    class BlockingControlEvents:
+        def wait(self, timeout_seconds):
+            assert timeout_seconds is None
+            waiting.set()
+            assert wake.wait(timeout=1.0)
+            return None
+
+        def wake_stop(self):
+            wake_calls.append(True)
+            wake.set()
+            return True
+
+    service._loop = _TEST_LOOP
+    service._control_queue = asyncio.Queue()
+    service.control_events = BlockingControlEvents()
+    service._start_control_bridge()
+    assert waiting.wait(timeout=1.0)
+
+    service._stop_control_bridge()
+
+    assert wake_calls == [True]
 
 
 def test_watch_service_config_observer_targets_program_files(tmp_path, monkeypatch):
@@ -672,7 +706,7 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
 
         def wait(self, timeout_seconds):
             waits.append(timeout_seconds)
-            return CONTROL_STOP if len(waits) == 2 else None
+            return CONTROL_STOP
 
         def close(self):
             pass
@@ -692,7 +726,7 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
     service.control_events = FakeControlEvents()
     assert _await(service.run()) == 0
     assert len(scheduler_runs) == 1
-    assert waits and all(value == 0.25 for value in waits)
+    assert waits and all(value is None for value in waits)
 
 
 def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, monkeypatch):
@@ -751,7 +785,7 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
     service.control_events = FakeControlEvents()
     assert _await(service.run()) == 0
     assert len(scheduler_runs) == 2
-    assert waits and all(value == 0.25 for value in waits)
+    assert waits and all(value is None for value in waits)
 
 
 def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_path, monkeypatch):
@@ -812,7 +846,7 @@ def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_p
 
     assert _await(service.run()) == 0
     assert len(scheduler_runs) == 2
-    assert waits and waits[0] == 0.25
+    assert waits and waits[0] is None
 
 
 def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatch):
