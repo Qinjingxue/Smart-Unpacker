@@ -210,8 +210,16 @@ function Test-PythonImports {
     )
 
     $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
-    & $PythonPath -c "import importlib; modules = [$importList]; [importlib.import_module(name) for name in modules]" *> $null
-    return ($LASTEXITCODE -eq 0)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Python warnings are written to stderr.  Do not let PowerShell promote
+        # them to terminating errors; the interpreter exit code is authoritative.
+        $ErrorActionPreference = "Continue"
+        & $PythonPath -c "import importlib; modules = [$importList]; [importlib.import_module(name) for name in modules]" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Get-AcceptanceTestToolRequirements {
@@ -377,14 +385,23 @@ function Get-EnvironmentRefreshReasons {
         "zstandard",
         "torch",
         "torch_geometric",
-        "numpy"
+        "numpy",
+        "requests",
+        "charset_normalizer"
     )
     if (-not (Test-PythonImports -PythonPath $VenvPython -Modules $requiredPythonModules)) {
         $reasons.Add(".venv is missing or cannot import runtime, test, or model modules")
     }
 
-    & $VenvPython -c (Get-NativeSmokeCode) *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $VenvPython -c (Get-NativeSmokeCode) *> $null
+        $nativeSmokeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($nativeSmokeExitCode -ne 0) {
         $reasons.Add("sunpack_native is missing new native repair APIs")
     }
 
@@ -479,16 +496,17 @@ function Ensure-AcceptanceEnvironment {
 }
 
 function Wait-BeforeExit {
-    param([string]$Message = "Press any key to exit...")
+    param([string]$Message = "Press Enter to exit...")
     if ($NoWait) {
         return
     }
     Write-Host ""
     Write-Host $Message -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    $null = Read-Host
 }
 
 trap {
+    Write-Host ("ERROR: " + $_.Exception.Message) -ForegroundColor Red
     Wait-BeforeExit
     throw
 }
@@ -529,7 +547,7 @@ if ($failedResults.Count -gt 0) {
 }
 if (-not $NoWait) {
     if ($failedResults.Count -gt 0) {
-        Wait-BeforeExit ("{0} acceptance test step(s) failed. Press any key to exit..." -f $failedResults.Count)
+        Wait-BeforeExit ("{0} acceptance test step(s) failed. Press Enter to exit..." -f $failedResults.Count)
     } else {
         Wait-BeforeExit
     }

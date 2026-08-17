@@ -725,9 +725,16 @@ function Install-ModelRuntimeDependencies {
     } else {
         Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "$RepoRoot[model-runtime]")
     }
+    # A successful pip metadata check does not prove compiled Python modules are
+    # intact. Repair the character-detection dependency used by requests, which
+    # torch-geometric imports transitively.
+    Invoke-Native -FilePath $PythonPath -Arguments @(
+        "-m", "pip", "install", "--force-reinstall", "--no-cache-dir",
+        "requests>=2.31,<3", "charset-normalizer>=3.4,<4"
+    )
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "import torch, torch_geometric; print('torch', torch.__version__); print('torch_geometric', torch_geometric.__version__)"
+        "import requests, charset_normalizer, torch, torch_geometric; print('requests', requests.__version__); print('charset_normalizer', charset_normalizer.__version__); print('torch', torch.__version__); print('torch_geometric', torch_geometric.__version__)"
     )
 }
 

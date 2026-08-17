@@ -1177,7 +1177,7 @@ if (-not $SkipInstaller) {
 
 if (-not $NoPause -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
     Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Cyan
-    [Console]::ReadKey($true) | Out-Null
+    Write-Host "Press Enter to exit..." -ForegroundColor Cyan
+    $null = Read-Host
 }
 
