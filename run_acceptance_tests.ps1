@@ -36,11 +36,18 @@ function Invoke-TestStep {
 
     $startTime = Get-Date
     $joinedCommand = $Command -join " "
+    $junitReportPath = $null
+
+    if ($Command.Length -ge 3 -and $Command[1] -eq "-m" -and $Command[2] -eq "pytest") {
+        $junitReportPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+            "sunpack-acceptance-{0}-{1}.xml" -f $PID, [guid]::NewGuid().ToString("N")
+        )
+        $argsList += "--junitxml=$junitReportPath"
+    }
 
     if ($VerboseOutput) {
         Write-Host ("    " + $joinedCommand) -ForegroundColor DarkGray
     }
-    Write-Host ("    " + $joinedCommand) -ForegroundColor DarkGray
 
     $process = $null
     try {
@@ -51,11 +58,21 @@ function Invoke-TestStep {
 
         $timeoutMs = [Math]::Max(1, $TimeoutSeconds) * 1000
         if (-not $process.WaitForExit($timeoutMs)) {
+            $terminated = $false
             try {
-                $process.Kill($true)
+                # taskkill follows detached descendants that Process.Kill($true) can miss.
+                & taskkill.exe /PID $process.Id /T /F *> $null
+                $terminated = ($LASTEXITCODE -eq 0)
             } catch {
-                $process.Kill()
             }
+            if (-not $terminated -and -not $process.HasExited) {
+                try {
+                    $process.Kill($true)
+                } catch {
+                    $process.Kill()
+                }
+            }
+            $process.WaitForExit()
             $duration = ((Get-Date) - $startTime).TotalSeconds
             $script:StepResults += [pscustomobject]@{
                 Label = $Label
@@ -68,6 +85,24 @@ function Invoke-TestStep {
         }
 
         $exitCode = [int]$process.ExitCode
+        if ($junitReportPath) {
+            if (-not (Test-Path -LiteralPath $junitReportPath)) {
+                Write-Host "    FAIL - pytest did not produce its JUnit report" -ForegroundColor Red
+                $exitCode = if ($exitCode -eq 0) { -2 } else { $exitCode }
+            } else {
+                try {
+                    [xml]$junitReport = Get-Content -LiteralPath $junitReportPath -Raw
+                    $reportedFailures = @($junitReport.SelectNodes("//testcase/failure | //testcase/error")).Count
+                    if ($reportedFailures -gt 0) {
+                        Write-Host "    FAIL - pytest JUnit report contains $reportedFailures failure(s) or error(s)" -ForegroundColor Red
+                        $exitCode = if ($exitCode -eq 0) { 1 } else { $exitCode }
+                    }
+                } catch {
+                    Write-Host ("    FAIL - could not read pytest JUnit report: " + $_.Exception.Message) -ForegroundColor Red
+                    $exitCode = if ($exitCode -eq 0) { -2 } else { $exitCode }
+                }
+            }
+        }
         $duration = ((Get-Date) - $startTime).TotalSeconds
         $script:StepResults += [pscustomobject]@{
             Label = $Label
@@ -83,9 +118,23 @@ function Invoke-TestStep {
         Write-Host ("    FAIL ({0:N2}s)" -f $duration) -ForegroundColor Red
         Write-Host ("    Command: " + $joinedCommand) -ForegroundColor DarkGray
         return
+    } catch {
+        $duration = ((Get-Date) - $startTime).TotalSeconds
+        $script:StepResults += [pscustomobject]@{
+            Label = $Label
+            ExitCode = -1
+            DurationSeconds = [math]::Round($duration, 2)
+        }
+        Write-Host ("    FAIL ({0:N2}s) - could not start command" -f $duration) -ForegroundColor Red
+        Write-Host ("    Command: " + $joinedCommand) -ForegroundColor DarkGray
+        Write-Host ("    Error: " + $_.Exception.Message) -ForegroundColor DarkRed
+        return
     } finally {
         if ($process) {
             $process.Dispose()
+        }
+        if ($junitReportPath -and (Test-Path -LiteralPath $junitReportPath)) {
+            Remove-Item -LiteralPath $junitReportPath -Force
         }
     }
 }

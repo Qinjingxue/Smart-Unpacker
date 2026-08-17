@@ -15,7 +15,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$promptForAcceptanceTests = ($PSBoundParameters.Count -eq 0)
+$interactivePrompting = -not $NoPause -and -not [Console]::IsInputRedirected
+$promptForAcceptanceTests = ($PSBoundParameters.Count -eq 0) -and $interactivePrompting
 
 if ($SkipInstaller -and $RequireInstaller) {
     throw "-SkipInstaller and -RequireInstaller cannot be used together."
@@ -57,7 +58,9 @@ function Reset-StaleCMakeBuildDir {
         [Parameter(Mandatory = $true)]
         [string]$SourceDir,
         [Parameter(Mandatory = $true)]
-        [string]$BuildDir
+        [string]$BuildDir,
+        [Parameter(Mandatory = $true)]
+        [string]$CMakePlatform
     )
 
     $cachePath = Join-Path $BuildDir "CMakeCache.txt"
@@ -67,16 +70,25 @@ function Reset-StaleCMakeBuildDir {
 
     $expectedSource = ConvertTo-NormalizedFullPath -Path $SourceDir
     $actualSource = ""
+    $actualPlatform = ""
     foreach ($line in Get-Content -LiteralPath $cachePath) {
         if ($line -like "CMAKE_HOME_DIRECTORY:INTERNAL=*") {
             $actualSource = ConvertTo-NormalizedFullPath -Path ($line.Substring("CMAKE_HOME_DIRECTORY:INTERNAL=".Length))
-            break
+        } elseif ($line -like "CMAKE_GENERATOR_PLATFORM:INTERNAL=*") {
+            $actualPlatform = $line.Substring("CMAKE_GENERATOR_PLATFORM:INTERNAL=".Length)
         }
     }
 
     if ($actualSource -and $actualSource -ne $expectedSource) {
         Write-Host "CMake build cache points at a different source tree; recreating $BuildDir" -ForegroundColor Yellow
         Remove-IfExists -LiteralPath $BuildDir
+        return
+    }
+
+    if ($actualPlatform -ne $CMakePlatform) {
+        Write-Host "CMake build cache uses platform '$actualPlatform' instead of '$CMakePlatform'; resetting CMake metadata in $BuildDir" -ForegroundColor Yellow
+        Remove-IfExists -LiteralPath $cachePath
+        Remove-IfExists -LiteralPath (Join-Path $BuildDir "CMakeFiles")
     }
 }
 
@@ -523,7 +535,7 @@ function Build-SevenZipWrapper {
     Assert-PathExists -LiteralPath (Join-Path $WrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
     Assert-PathExists -LiteralPath $SevenZipDllPath -Description "Bundled 7z.dll"
     $cmakePlatform = Get-CMakePlatform -BuildArch $BuildArch
-    Reset-StaleCMakeBuildDir -SourceDir $WrapperRoot -BuildDir $BuildDir
+    Reset-StaleCMakeBuildDir -SourceDir $WrapperRoot -BuildDir $BuildDir -CMakePlatform $cmakePlatform
     Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
     Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
@@ -681,7 +693,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 $buildArch = $Arch.ToLowerInvariant()
 if (-not $PSBoundParameters.ContainsKey("RepairSystem")) {
-    $RepairSystem = Read-RepairSystemMode
+    $RepairSystem = if ($interactivePrompting) { Read-RepairSystemMode } else { "full" }
 }
 $repairSystemMode = $RepairSystem.ToLowerInvariant()
 $processArch = Get-ProcessBuildArch
@@ -841,6 +853,7 @@ if ($runAcceptanceTests) {
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $repoRoot "run_acceptance_tests.ps1"),
         "-NoWait",
+        "-SkipEnvironmentRefresh",
         "-Arch", $buildArch,
         "-RepairSystem", $repairSystemMode
     )
