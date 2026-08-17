@@ -51,13 +51,13 @@ def parse_args() -> argparse.Namespace:
         "--iocp-buffers",
         action="append",
         type=int,
-        help="Maximum in-flight IOCP buffers; repeat to sweep values (default: 8).",
+        help="Maximum in-flight IOCP buffers; repeat to sweep values (default: 2).",
     )
     parser.add_argument(
         "--iocp-workers",
         action="append",
         type=int,
-        help="IOCP scan workers; repeat to sweep values (default: 2).",
+        help="IOCP scan workers; repeat to sweep values (default: 4).",
     )
     parser.add_argument("--sample-interval", type=float, default=0.1)
     parser.add_argument("--cli-timeout", type=float, default=600.0, help="Wall-clock timeout for the CLI scan subprocess.")
@@ -217,9 +217,9 @@ def run_report(path: Path, args: argparse.Namespace, config: dict[str, object]) 
         raise SystemExit("sample-interval must be positive")
     if float(config.get("iocp_chunk_mib", 2.0)) <= 0:
         raise SystemExit("iocp-chunk-mib must be positive")
-    if int(config.get("iocp_buffers", 8)) < 2:
+    if int(config.get("iocp_buffers", 2)) < 2:
         raise SystemExit("iocp-buffers must be at least 2")
-    if int(config.get("iocp_workers", 8)) < 1:
+    if int(config.get("iocp_workers", 4)) < 1:
         raise SystemExit("iocp-workers must be positive")
     return {
         "path": str(path),
@@ -230,8 +230,8 @@ def run_report(path: Path, args: argparse.Namespace, config: dict[str, object]) 
             args.rounds,
             args.sample_interval,
             float(config.get("iocp_chunk_mib", 2.0)),
-            int(config.get("iocp_buffers", 8)),
-            int(config.get("iocp_workers", 2)),
+            int(config.get("iocp_buffers", 2)),
+            int(config.get("iocp_workers", 4)),
         ),
     }
 
@@ -241,8 +241,8 @@ def main() -> None:
     if args.generate_gib < 0:
         raise SystemExit("generate-gib must be nonnegative")
     iocp_chunks = args.iocp_chunk_mib or [2.0]
-    iocp_buffers = args.iocp_buffers or [8]
-    iocp_workers = args.iocp_workers or [2]
+    iocp_buffers = args.iocp_buffers or [2]
+    iocp_workers = args.iocp_workers or [4]
     configs = [
         {
             "io_mode": "iocp",

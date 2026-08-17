@@ -45,8 +45,8 @@ static EMBEDDED_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
 static EMBEDDED_PACKED_MATCHER: OnceLock<Option<packed::Searcher>> = OnceLock::new();
 
 const DEFAULT_IOCP_CHUNK_SIZE: usize = 2 * 1024 * 1024;
-const DEFAULT_IOCP_BUFFERS: usize = 8;
-const DEFAULT_IOCP_WORKERS: usize = 2;
+const DEFAULT_IOCP_BUFFERS: usize = 2;
+const DEFAULT_IOCP_WORKERS: usize = 4;
 const MAX_ARCHIVE_METADATA_RECORDS: usize = 1_000_000;
 const MAX_VALIDATION_RAW_HITS: usize = 1_000_000;
 #[cfg(test)]

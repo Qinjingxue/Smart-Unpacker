@@ -2,10 +2,11 @@
 //!
 //! This module deliberately owns a scan-local file handle and completion port.
 //! The normal reader, shared handle pool, and request cache remain synchronous
-//! and unchanged.  A scan submits a bounded number of reads, hands completed
-//! buffers to Rayon workers, and reuses a buffer only after its scan finishes.
+//! and unchanged. A scan keeps a bounded read window, hands completed buffers
+//! to Rayon workers, and immediately reissues the next sequential read with a
+//! separate pooled buffer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -18,6 +19,7 @@ type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 const INFINITE: u32 = u32::MAX;
 const ERROR_IO_PENDING: u32 = 997;
+const WORKER_COMPLETION_KEY: usize = usize::MAX;
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
@@ -68,6 +70,12 @@ unsafe extern "system" {
         overlapped: *mut *mut Overlapped,
         milliseconds: u32,
     ) -> i32;
+    fn PostQueuedCompletionStatus(
+        completion_port: Handle,
+        bytes_transferred: u32,
+        completion_key: usize,
+        overlapped: *mut Overlapped,
+    ) -> i32;
     fn CancelIoEx(file: Handle, overlapped: *mut Overlapped) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
     fn GetLastError() -> u32;
@@ -75,6 +83,13 @@ unsafe extern "system" {
 
 struct IocpSlot {
     overlapped: Overlapped,
+    buffer: Vec<u8>,
+    read_start: u64,
+    leading_overlap: usize,
+    bytes_read: usize,
+}
+
+struct ScanJob {
     buffer: Vec<u8>,
     read_start: u64,
     leading_overlap: usize,
@@ -335,17 +350,23 @@ where
         expected_read_operations = expected_read_operations.saturating_add(1);
         expected_base = visible_end;
     }
-    let handles = open_handles(path)?;
+    let handles = Arc::new(open_handles(path)?);
     let scan = &scan;
 
     let result = rayon::scope(|scope| -> io::Result<IocpScanOutput<T>> {
-        let (job_tx, job_rx) = mpsc::sync_channel::<Box<IocpSlot>>(buffer_count);
+        // Read slots stay owned by the IOCP producer. Completed bytes move to
+        // independent scan jobs, so the slot can issue its next predicted
+        // sequential read without waiting for matching to finish.
+        let job_capacity = buffer_count;
+        let slot_capacity = chunk_bytes.saturating_add(overlap);
+        let (job_tx, job_rx) = mpsc::sync_channel::<ScanJob>(job_capacity);
         let job_rx = Arc::new(Mutex::new(job_rx));
-        let (done_tx, done_rx) = mpsc::channel::<(Box<IocpSlot>, Vec<T>)>();
+        let (done_tx, done_rx) = mpsc::channel::<(Vec<u8>, Vec<T>)>();
 
         for _ in 0..worker_count {
             let job_rx = Arc::clone(&job_rx);
             let done_tx = done_tx.clone();
+            let worker_handles = Arc::clone(&handles);
             scope.spawn(move |_| loop {
                 let job = {
                     let receiver = job_rx
@@ -361,14 +382,27 @@ where
                     job.leading_overlap,
                     job.read_start,
                 );
-                if done_tx.send((job, hits)).is_err() {
+                if done_tx.send((job.buffer, hits)).is_err() {
                     break;
+                }
+                unsafe {
+                    let _ = PostQueuedCompletionStatus(
+                        worker_handles.port,
+                        0,
+                        WORKER_COMPLETION_KEY,
+                        null_mut(),
+                    );
                 }
             });
         }
         drop(done_tx);
 
         let mut pending = HashMap::<usize, Box<IocpSlot>>::new();
+        let mut completed_slots = VecDeque::<Box<IocpSlot>>::new();
+        let mut ready_jobs = VecDeque::<ScanJob>::new();
+        let mut available_buffers = (0..job_capacity.saturating_add(worker_count))
+            .map(|_| Vec::with_capacity(slot_capacity))
+            .collect::<Vec<_>>();
         let mut next_base = 0u64;
         let mut scan_jobs = 0usize;
         let mut all_results = Vec::new();
@@ -381,7 +415,7 @@ where
                 file_size,
                 chunk_bytes,
                 overlap,
-                Box::new(IocpSlot::new(chunk_bytes + overlap)),
+                Box::new(IocpSlot::new(slot_capacity)),
             ) {
                 Ok(true) => {}
                 Ok(false) => break,
@@ -398,26 +432,17 @@ where
         }
 
         let mut fatal_error = None;
-        while !pending.is_empty() || scan_jobs > 0 {
+        while !pending.is_empty()
+            || !completed_slots.is_empty()
+            || !ready_jobs.is_empty()
+            || scan_jobs > 0
+        {
             loop {
                 match done_rx.try_recv() {
-                    Ok((slot, hits)) => {
+                    Ok((buffer, hits)) => {
                         scan_jobs = scan_jobs.saturating_sub(1);
                         all_results.extend(hits);
-                        if fatal_error.is_none() {
-                            if let Err(error) = submit_next_slot(
-                                &handles,
-                                &mut pending,
-                                &mut next_base,
-                                file_size,
-                                chunk_bytes,
-                                overlap,
-                                slot,
-                            ) {
-                                fatal_error = Some(error);
-                                break;
-                            }
-                        }
+                        available_buffers.push(buffer);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -430,20 +455,25 @@ where
                 break;
             }
 
-            if pending.is_empty() {
-                if scan_jobs == 0 {
+            // Preserve the configured IO depth whenever there is a recycled
+            // buffer. A full CPU queue only consumes the separate job pool.
+            while let Some(mut slot) = completed_slots.pop_front() {
+                let Some(replacement_buffer) = available_buffers.pop() else {
+                    completed_slots.push_front(slot);
                     break;
-                }
-                let (slot, hits) = match done_rx.recv() {
-                    Ok(done) => done,
-                    Err(_) => {
-                        fatal_error = Some(io::Error::other("IOCP scanner workers stopped"));
-                        break;
-                    }
                 };
-                scan_jobs = scan_jobs.saturating_sub(1);
-                all_results.extend(hits);
-                if let Err(error) = submit_next_slot(
+                let job = ScanJob {
+                    buffer: std::mem::replace(&mut slot.buffer, replacement_buffer),
+                    read_start: slot.read_start,
+                    leading_overlap: slot.leading_overlap,
+                    bytes_read: slot.bytes_read,
+                };
+                if next_base >= file_size {
+                    available_buffers.push(slot.buffer);
+                    ready_jobs.push_back(job);
+                    continue;
+                }
+                match submit_next_slot(
                     &handles,
                     &mut pending,
                     &mut next_base,
@@ -452,12 +482,46 @@ where
                     overlap,
                     slot,
                 ) {
-                    fatal_error = Some(error);
-                    break;
+                    Ok(true) => ready_jobs.push_back(job),
+                    Ok(false) => {
+                        fatal_error = Some(io::Error::other("IOCP slot ended unexpectedly"));
+                        break;
+                    }
+                    Err(error) => {
+                        available_buffers.push(job.buffer);
+                        fatal_error = Some(error);
+                        break;
+                    }
                 }
-                continue;
+            }
+            if fatal_error.is_some() {
+                break;
             }
 
+            while let Some(job) = ready_jobs.pop_front() {
+                match job_tx.try_send(job) {
+                    Ok(()) => scan_jobs += 1,
+                    Err(mpsc::TrySendError::Full(job)) => {
+                        ready_jobs.push_front(job);
+                        break;
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        fatal_error = Some(io::Error::other("IOCP scanner workers stopped"));
+                        break;
+                    }
+                }
+            }
+            if fatal_error.is_some() {
+                break;
+            }
+
+            if pending.is_empty() && scan_jobs == 0 {
+                if completed_slots.is_empty() && ready_jobs.is_empty() {
+                    break;
+                }
+                fatal_error = Some(io::Error::other("IOCP scanner pipeline stalled"));
+                break;
+            }
             let mut bytes = 0u32;
             let mut completion_key = 0usize;
             let mut overlapped = null_mut();
@@ -470,6 +534,9 @@ where
                     INFINITE,
                 )
             };
+            if completion_key == WORKER_COMPLETION_KEY && overlapped.is_null() {
+                continue;
+            }
             if overlapped.is_null() {
                 fatal_error = Some(last_error());
                 break;
@@ -485,11 +552,9 @@ where
             }
             slot.bytes_read = (bytes as usize).min(slot.buffer.len());
             if slot.bytes_read > 0 {
-                if job_tx.send(slot).is_err() {
-                    fatal_error = Some(io::Error::other("IOCP scanner workers stopped"));
-                    break;
-                }
-                scan_jobs += 1;
+                completed_slots.push_back(slot);
+            } else {
+                available_buffers.push(slot.buffer);
             }
         }
 
@@ -521,5 +586,44 @@ mod tests {
         assert_eq!(slot.overlapped.offset, 116);
         assert_eq!(slot.overlapped.offset_high, 1);
         assert_eq!(slot.read_start, (4u64 << 30) + 116);
+    }
+
+    #[test]
+    fn keeps_io_slots_independent_of_slow_scan_workers() {
+        let chunk_bytes = 64 * 1024usize;
+        let data = vec![0x5a; chunk_bytes * 8 + 17];
+        let path = std::env::temp_dir().join(format!(
+            "sunpack_iocp_slow_worker_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::write(&path, &data).unwrap();
+
+        let output = scan_file(
+            &path,
+            data.len() as u64,
+            chunk_bytes,
+            2,
+            1,
+            0,
+            |_, _, base_offset| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                vec![base_offset]
+            },
+        )
+        .unwrap();
+
+        let expected = (0..data.len())
+            .step_by(chunk_bytes)
+            .map(|offset| offset as u64)
+            .collect::<Vec<_>>();
+        let mut actual = output.results;
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+        assert_eq!(output.read_operations, expected.len() as u64);
+        let _ = std::fs::remove_file(path);
     }
 }

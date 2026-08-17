@@ -547,7 +547,7 @@ impl NativeArchiveSession {
         crate::password::rar::rar_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
-    #[pyo3(signature = (iocp_chunk_bytes=2097152, iocp_buffers=8, iocp_workers=2))]
+    #[pyo3(signature = (iocp_chunk_bytes=2097152, iocp_buffers=2, iocp_workers=4))]
     fn scan_embedded_archives(
         &self,
         py: Python<'_>,
