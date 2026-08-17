@@ -4,11 +4,19 @@ import sunpack.support.resources as resources
 
 
 def test_nuitka_watch_executable_uses_gui_entrypoint(monkeypatch):
-    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\package\\sunpack-watch.exe")
-    monkeypatch.setattr(entrypoint, "__compiled__", object(), raising=False)
+    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\Python310\\python.exe")
+    monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-watch.exe"])
     monkeypatch.setattr(gui_main, "main", lambda: 17)
 
     assert entrypoint.main() == 17
+
+
+def test_pyinstaller_watch_executable_uses_gui_entrypoint(monkeypatch):
+    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\package\\sunpack-watch.exe")
+    monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-runtime.exe"])
+    monkeypatch.setattr(gui_main, "main", lambda: 23)
+
+    assert entrypoint.main() == 23
 
 
 def test_nuitka_resource_lookup_starts_at_the_executable_directory(tmp_path, monkeypatch):

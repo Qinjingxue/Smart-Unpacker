@@ -3,8 +3,7 @@ import sys
 
 
 def main() -> int:
-    is_compiled = getattr(sys, "frozen", False) or "__compiled__" in globals()
-    if is_compiled and os.path.basename(sys.executable).lower() == "sunpack-watch.exe":
+    if _is_watch_executable():
         from sunpack.gui.main import main as watch_main
 
         return watch_main()
@@ -17,3 +16,8 @@ def main() -> int:
     from sunpack.cli.cli import main as cli_main
 
     return cli_main()
+
+
+def _is_watch_executable() -> bool:
+    executable_names = (sys.executable, sys.argv[0] if sys.argv else "")
+    return any(os.path.basename(path).lower() == "sunpack-watch.exe" for path in executable_names)
