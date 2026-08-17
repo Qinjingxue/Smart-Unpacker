@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from sunpack.coordinator.engine import PipelineEngine
+from sunpack.coordinator.engine import DirectOutputCommitter, PipelineEngine
 import sunpack.analysis.engine as analysis_engine_module
 import sunpack.analysis.fuzzy_pipeline.modules.binary_profile as binary_profile_module
 import sunpack.analysis.structure_pipeline.modules.compression_streams as compression_streams_module
@@ -92,6 +92,7 @@ class RequestRuntimeProfiler:
         self.request_timings: list[TimingMap] = []
         self._active_timings: TimingMap | None = None
         self._factory_restore: tuple[Any, Callable[..., Any]] | None = None
+        self._instance_restores: list[tuple[Any, str, Any]] = []
         self._global_restores: list[tuple[Any, str, Any]] = []
         self._global_installed: set[tuple[int, str]] = set()
 
@@ -100,17 +101,26 @@ class RequestRuntimeProfiler:
         self._factory_restore = (runner, original_factory)
 
         def profiled_factory(*args: Any, **kwargs: Any):
-            runtime = original_factory(*args, **kwargs)
             if not self.enabled:
-                self._active_timings = None
-                return runtime
-            timings: TimingMap = defaultdict(list)
-            self.request_timings.append(timings)
-            self._active_timings = timings
+                return original_factory(*args, **kwargs)
+            timings = self._active_timings
+            if timings is None:
+                # The factory can also be invoked directly by focused tests.
+                timings = defaultdict(list)
+                self.request_timings.append(timings)
+                self._active_timings = timings
+            runtime = _measure(timings, "pipeline_runtime_create", original_factory, *args, **kwargs)
             self._instrument_runtime(runtime, timings)
             return runtime
 
         runner._request_runtime_factory = profiled_factory
+        self._install_pipeline_run_timer(runner)
+        self._install_instance_method(runner, "_normalize_target", "pipeline_normalize_target")
+        path_leases = _child(runner, "_path_leases")
+        self._install_instance_method(path_leases, "try_acquire", "pipeline_lease_acquire")
+        self._install_instance_method(path_leases, "try_replace", "pipeline_lease_replace")
+        self._install_instance_method(path_leases, "release", "pipeline_lease_release")
+        self._install_global_method(DirectOutputCommitter, "commit", "pipeline_output_commit")
         self._install_global_method(DirectoryScanner, "inventory_file_indices", "output_inventory_filter")
         self._install_global_method(DirectoryScanner, "snapshot_from_entries", "output_snapshot_filter")
         self._install_global_method(
@@ -157,8 +167,52 @@ class RequestRuntimeProfiler:
         while self._global_restores:
             owner, name, descriptor = self._global_restores.pop()
             setattr(owner, name, descriptor)
+        while self._instance_restores:
+            owner, name, original = self._instance_restores.pop()
+            setattr(owner, name, original)
         self._global_installed.clear()
         self._active_timings = None
+
+    def _install_pipeline_run_timer(self, runner: PipelineEngine) -> None:
+        if not hasattr(runner, "run"):
+            return
+        original = runner.run
+        self._instance_restores.append((runner, "run", original))
+
+        async def measured_run(*args: Any, **kwargs: Any) -> Any:
+            if not self.enabled:
+                return await original(*args, **kwargs)
+            timings: TimingMap = defaultdict(list)
+            self.request_timings.append(timings)
+            previous_timings = self._active_timings
+            self._active_timings = timings
+            try:
+                return await _measure_async(timings, "pipeline_run", original, *args, **kwargs)
+            finally:
+                self._active_timings = previous_timings
+
+        runner.run = measured_run
+
+    def _install_instance_method(self, owner: Any, name: str, label: str) -> None:
+        if owner is None or not hasattr(owner, name):
+            return
+        original = getattr(owner, name)
+        self._instance_restores.append((owner, name, original))
+        if inspect.iscoroutinefunction(original):
+
+            async def measured_async(*args: Any, **kwargs: Any) -> Any:
+                timings = self._active_timings
+                if timings is None:
+                    return await original(*args, **kwargs)
+                return await _measure_async(timings, label, original, *args, **kwargs)
+
+            setattr(owner, name, measured_async)
+            return
+
+        def measured(*args: Any, **kwargs: Any) -> Any:
+            return self._measure_active(label, original, *args, **kwargs)
+
+        setattr(owner, name, measured)
 
     def _install_global_method(self, owner: type, name: str, label: str) -> None:
         descriptor = owner.__dict__[name]
@@ -240,6 +294,11 @@ class RequestRuntimeProfiler:
         extractor = runtime.extractor
         output_scan = runtime.output_scan_policy
 
+        _wrap(runtime, "execute_async", timings, "pipeline_runtime_execute")
+        _wrap(runtime, "_plan_task_isolated", timings, "pipeline_plan_task_isolated")
+        _wrap(_child(runtime, "space_guard"), "bind_root", timings, "pipeline_space_bind")
+        _wrap(_child(runtime, "nested_extraction_policy"), "authorize_batch", timings, "pipeline_nested_authorize")
+
         _wrap(scanner, "direct_file_tasks", timings, "pipeline_direct_scan")
         _wrap(scanner, "scan_targets", timings, "pipeline_nested_scan")
 
@@ -317,6 +376,7 @@ class RequestRuntimeProfiler:
         reporter = runtime.reporter
         _wrap(reporter, "begin_round", timings, "batch_report_begin_round")
         _wrap(reporter, "task_finished", timings, "batch_report_task_finished")
+        _wrap(reporter, "log_final_summary", timings, "pipeline_final_report")
 
         _wrap(output_scan, "scan_roots_from_outputs", timings, "output_scan")
         _wrap(output_scan, "_snapshot_from_inventory", timings, "output_snapshot_from_inventory")
@@ -410,6 +470,20 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
         "worker_protocol_progress_sample",
         "worker_protocol_emit_progress",
     ))
+    planning_probe_children = sum(
+        sum(values)
+        for label, values in timings.items()
+        if label.startswith("planning_")
+    )
+    runtime_outside_batch_children = sum(total(label) for label in (
+        "pipeline_direct_scan",
+        "pipeline_plan_task_isolated",
+        "pipeline_nested_authorize",
+        "pipeline_space_bind",
+        "output_take_scan_session",
+        "pipeline_final_report",
+        "extractor_close",
+    ))
     return {
         "batch_overhead_excluding_extract": round(total("batch_execute") - total("extract_total"), 6),
         "batch_parent_python_residual": round(total("batch_execute") - batch_direct_children, 6),
@@ -424,6 +498,26 @@ def _derived_timing(timings: TimingMap) -> dict[str, float]:
         "planning_parent_residual": round(total("input_planning") - planning_children, 6),
         "planning_analysis_residual": round(
             total("planning_analyzer_analyze") - total("planning_engine_analyze_path"),
+            6,
+        ),
+        "pipeline_plan_task_unattributed": round(
+            total("pipeline_plan_task_isolated") - planning_probe_children,
+            6,
+        ),
+        "pipeline_runtime_outside_batch": round(
+            total("pipeline_runtime_execute") - total("batch_execute"),
+            6,
+        ),
+        "pipeline_runtime_outside_batch_residual": round(
+            total("pipeline_runtime_execute") - total("batch_execute") - runtime_outside_batch_children,
+            6,
+        ),
+        "pipeline_run_outside_batch": round(total("pipeline_run") - total("batch_execute"), 6),
+        "pipeline_run_outer_residual": round(
+            total("pipeline_run")
+            - total("pipeline_runtime_create")
+            - total("pipeline_runtime_execute")
+            - total("pipeline_output_commit"),
             6,
         ),
         "worker_wait_residual": round(total("sevenzip_worker") - worker_protocol_children, 6),
