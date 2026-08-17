@@ -7,6 +7,8 @@ param(
     [switch]$NoPause,
     [string]$Version,
     [string]$InnoCompilerPath,
+    [ValidateSet("pyinstaller", "nuitka")]
+    [string]$Packager,
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
@@ -679,6 +681,111 @@ function Read-RepairSystemMode {
     }
 }
 
+function Read-Packager {
+    while ($true) {
+        $rawAnswer = Read-Host "Select build packager: [N]uitka or [P]yInstaller"
+        $answer = if ($null -eq $rawAnswer) { "" } else { $rawAnswer.Trim() }
+        if ($answer -match "^(?i:n|nuitka)$") {
+            return "nuitka"
+        }
+        if ($answer -match "^(?i:p|pyinstaller)$") {
+            return "pyinstaller"
+        }
+        Write-Host "Please answer N or P." -ForegroundColor Yellow
+    }
+}
+
+function New-NuitkaEntrypoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("full", "lite")]
+        [string]$RepairSystem
+    )
+
+    $content = @(
+        "import os",
+        "os.environ['SUNPACK_REPAIR_SYSTEM'] = '$RepairSystem'",
+        "from sunpack.entrypoint import main",
+        "raise SystemExit(main())",
+        ""
+    ) -join [Environment]::NewLine
+    [System.IO.File]::WriteAllText($Path, $content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Invoke-NuitkaStandaloneBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$EntryPath,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ExecutableName,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("force", "disable")]
+        [string]$ConsoleMode,
+        [Parameter(Mandatory = $true)]
+        [string]$IconPath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$DynamicPackages,
+        [Parameter(Mandatory = $true)]
+        [string]$SitePackages,
+        [switch]$IncludeModelRuntime,
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath
+    )
+
+    $arguments = @(
+        "-m", "nuitka",
+        "--standalone",
+        "--assume-yes-for-downloads",
+        "--output-dir=$OutputRoot",
+        "--output-filename=$ExecutableName",
+        "--windows-console-mode=$ConsoleMode",
+        "--windows-icon-from-ico=$IconPath",
+        "--include-module=sunpack_native",
+        "--report=$ReportPath"
+    )
+    foreach ($package in $DynamicPackages) {
+        $arguments += "--include-package=$package"
+    }
+
+    if ($IncludeModelRuntime) {
+        foreach ($package in @("torch", "torch_geometric")) {
+            $arguments += "--include-package=$package"
+        }
+        $metadataDirs = Get-ChildItem -LiteralPath $SitePackages -Directory -Filter "*.dist-info" |
+            Where-Object {
+                $_.Name -like "torch-*.dist-info" -or $_.Name -like "torch_geometric-*.dist-info"
+            } |
+            Sort-Object -Property FullName -Unique
+        foreach ($metadataDir in $metadataDirs) {
+            $arguments += "--include-data-dir=$($metadataDir.FullName)=$($metadataDir.Name)"
+        }
+    }
+
+    $arguments += $EntryPath
+    Invoke-Native -FilePath $PythonPath -Arguments $arguments
+}
+
+function Copy-NuitkaDistContents {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    Assert-PathExists -LiteralPath $Source -Description "Nuitka standalone output"
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
+        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force
+    }
+}
+
 function Copy-IfExists {
     param(
         [string]$Source,
@@ -696,6 +803,10 @@ if (-not $PSBoundParameters.ContainsKey("RepairSystem")) {
     $RepairSystem = if ($interactivePrompting) { Read-RepairSystemMode } else { "full" }
 }
 $repairSystemMode = $RepairSystem.ToLowerInvariant()
+if (-not $PSBoundParameters.ContainsKey("Packager")) {
+    $Packager = if ($interactivePrompting) { Read-Packager } else { "pyinstaller" }
+}
+$packagerMode = $Packager.ToLowerInvariant()
 $processArch = Get-ProcessBuildArch
 $rustTarget = Get-RustTarget -BuildArch $buildArch
 
@@ -705,9 +816,10 @@ if ($env:OS -ne "Windows_NT") {
 }
 Write-Host "Requested architecture: $buildArch"
 Write-Host "Repair system: $repairSystemMode"
+Write-Host "Packager: $packagerMode"
 Write-Host "Build Python/process architecture: $processArch"
 if ($processArch -ne $buildArch) {
-    throw "Windows PyInstaller/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' sunpack.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
+    throw "Windows PyInstaller/Nuitka/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' sunpack.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
 }
 
 $pythonCommand = Get-PythonCommand
@@ -715,6 +827,7 @@ $venvPath = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "SunPack.spec"
+$sunpackEntryPath = Join-Path $repoRoot "sunpack.py"
 $installerScriptPath = Join-Path $repoRoot "installer\SunPack.iss"
 $projectPath = Join-Path $repoRoot "pyproject.toml"
 $modelsRoot = Join-Path $repoRoot "models"
@@ -745,6 +858,7 @@ $distExePath = Join-Path $distAppRoot $appExeName
 $distRuntimeExePath = Join-Path $distAppRoot $runtimeExeName
 $distWatchExePath = Join-Path $distAppRoot $watchExeName
 $distInternalRoot = Join-Path $distAppRoot "_internal"
+$nuitkaBuildRoot = Join-Path $buildRoot ("nuitka-" + $distFolderName)
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
@@ -760,10 +874,13 @@ if ($promptForAcceptanceTests) {
 }
 
 Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
+Assert-PathExists -LiteralPath $sunpackEntryPath -Description "SunPack entry point"
 if ($repairSystemMode -eq "full") {
     Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
 }
-Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
+if ($packagerMode -eq "pyinstaller") {
+    Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
+}
 if (-not $SkipInstaller) {
     Assert-PathExists -LiteralPath $installerScriptPath -Description "Inno Setup installer script"
     try {
@@ -861,12 +978,63 @@ if ($runAcceptanceTests) {
     Write-Host "Skipping acceptance tests by request." -ForegroundColor Yellow
 }
 
-Write-Step "Building Windows release with PyInstaller"
-$env:SUNPACK_DIST_NAME = $distFolderName
-$env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($runtimeExeName)
-$env:SUNPACK_WATCH_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($watchExeName)
-$env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
+Write-Step "Building Windows release with $packagerMode"
+if ($packagerMode -eq "pyinstaller") {
+    $env:SUNPACK_DIST_NAME = $distFolderName
+    $env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($runtimeExeName)
+    $env:SUNPACK_WATCH_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($watchExeName)
+    $env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
+    Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
+} else {
+    $nuitkaEntryRoot = Join-Path $nuitkaBuildRoot "entries"
+    $nuitkaRuntimeEntryPath = Join-Path $nuitkaEntryRoot "sunpack-runtime.py"
+    $nuitkaWatchEntryPath = Join-Path $nuitkaEntryRoot "sunpack-watch.py"
+    $nuitkaRuntimeDist = Join-Path $nuitkaBuildRoot ([System.IO.Path]::GetFileNameWithoutExtension($runtimeExeName) + ".dist")
+    $nuitkaWatchDist = Join-Path $nuitkaBuildRoot ([System.IO.Path]::GetFileNameWithoutExtension($watchExeName) + ".dist")
+    $sitePackages = Join-Path $venvPath "Lib\site-packages"
+    $nuitkaDynamicPackages = @(
+        "watchdog",
+        "zstandard",
+        "sunpack.cli.commands",
+        "sunpack.config.fields",
+        "sunpack.filesystem.filters.modules",
+        "sunpack.detection.pipeline.facts.collectors",
+        "sunpack.detection.pipeline.processors.modules",
+        "sunpack.detection.pipeline.rules.hard_stop",
+        "sunpack.detection.pipeline.rules.precheck",
+        "sunpack.detection.pipeline.rules.scoring",
+        "sunpack.detection.pipeline.rules.confirmation",
+        "sunpack.analysis.structure_pipeline.modules",
+        "sunpack.analysis.fuzzy_pipeline.modules",
+        "sunpack.repair.pipeline.modules",
+        "sunpack.repair.pipeline.modules.rar",
+        "sunpack.repair.pipeline.modules.seven_zip",
+        "sunpack.repair.pipeline.modules.zip",
+        "sunpack.repair.pipeline.modules.tar",
+        "sunpack.passwords.candidates",
+        "sunpack.extraction.internal",
+        "sunpack.rename.internal",
+        "sunpack.relations.internal",
+        "sunpack.postprocess.internal",
+        "sunpack.verification.methods",
+        "sunpack.repair.search"
+    )
+    if ($repairSystemMode -eq "full") {
+        $nuitkaDynamicPackages += @(
+            "sunpack.repair.model",
+            "sunpack.repair.model.diagnosis",
+            "sunpack.repair.model.policy"
+        )
+    }
+
+    New-Item -ItemType Directory -Path $nuitkaEntryRoot -Force | Out-Null
+    New-NuitkaEntrypoint -Path $nuitkaRuntimeEntryPath -RepairSystem $repairSystemMode
+    New-NuitkaEntrypoint -Path $nuitkaWatchEntryPath -RepairSystem $repairSystemMode
+    Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaRuntimeEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $runtimeExeName -ConsoleMode "force" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-runtime-report.xml")
+    Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaWatchEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $watchExeName -ConsoleMode "disable" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-watch-report.xml")
+    Copy-NuitkaDistContents -Source $nuitkaRuntimeDist -Destination $distAppRoot
+    Copy-NuitkaDistContents -Source $nuitkaWatchDist -Destination $distAppRoot
+}
 Copy-Item -LiteralPath $launcherBuildPath -Destination $distExePath -Force
 
 Write-Step "Validating packaged outputs"
@@ -878,11 +1046,15 @@ Assert-PeSubsystem -LiteralPath $distExePath -Expected 3 -Description "Packaged 
 Assert-PathExists -LiteralPath $distWatchExePath -Description "Packaged SunPack watch GUI executable"
 Assert-PeMachine -LiteralPath $distWatchExePath -BuildArch $buildArch -Description "Packaged SunPack watch GUI executable"
 Assert-PeSubsystem -LiteralPath $distWatchExePath -Expected 2 -Description "Packaged SunPack watch GUI executable"
-Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
+if ($packagerMode -eq "pyinstaller") {
+    Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
+}
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
-Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
-Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_config.json") -Description "Duplicate internal config file"
-Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_advanced_config.json") -Description "Duplicate internal advanced config file"
+if ($packagerMode -eq "pyinstaller") {
+    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
+    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_config.json") -Description "Duplicate internal config file"
+    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_advanced_config.json") -Description "Duplicate internal advanced config file"
+}
 
 Write-Step "Adding release metadata and helper scripts"
 $distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"

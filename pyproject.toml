@@ -23,6 +23,7 @@ model-runtime = [
 ]
 build = [
     "pyinstaller>=6",
+    "nuitka>=2",
     "maturin>=1.8,<2",
     "cmake>=3.25",
 ]
@@ -30,6 +31,7 @@ test = ["pytest>=9"]
 training = ["numpy>=2"]
 dev = [
     "pyinstaller>=6",
+    "nuitka>=2",
     "maturin>=1.8,<2",
     "cmake>=3.25",
     "pytest>=9",

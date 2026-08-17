@@ -168,6 +168,23 @@ def test_lite_build_excludes_model_runtime_from_shared_environment():
     assert "Assert-LitePackageExcludesModelRuntime -PackageRoot $distAppRoot" in build_script
 
 
+def test_build_supports_interactive_pyinstaller_and_nuitka_selection():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '[ValidateSet("pyinstaller", "nuitka")]' in build_script
+    assert "Select build packager: [N]uitka or [P]yInstaller" in build_script
+    assert 'return "nuitka"' in build_script
+    assert 'return "pyinstaller"' in build_script
+    assert '"-m", "PyInstaller", "--noconfirm", $specPath' in build_script
+    assert '"-m", "nuitka"' in build_script
+    assert '"--standalone"' in build_script
+    assert '"--windows-console-mode=$ConsoleMode"' in build_script
+    assert "Invoke-NuitkaStandaloneBuild" in build_script
+    assert '"sunpack.repair.model.policy"' in build_script
+    assert '"nuitka>=2"' in project
+
+
 def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
     smoke_scripts = (
         ROOT / "scripts" / "build_windows.ps1",

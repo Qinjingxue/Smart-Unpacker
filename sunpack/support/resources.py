@@ -24,7 +24,7 @@ def first_existing_path(paths: list[Path]) -> Path | None:
 def candidate_resource_roots() -> list[Path]:
     roots: list[Path] = []
 
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
         roots.append(Path(sys.executable).resolve().parent)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
