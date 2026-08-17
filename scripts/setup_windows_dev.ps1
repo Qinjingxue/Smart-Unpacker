@@ -282,7 +282,9 @@ function Remove-PreviousNativeExtension {
         return
     }
 
-    Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "uninstall", "--yes", "sunpack-native")
+    # Keep exactly one extension: remove the registered distribution and every
+    # stale module/dist-info residue before installing this build's wheel.
+    Invoke-Native -FilePath "uv" -Arguments @("pip", "uninstall", "--python", $PythonPath, "sunpack-native")
     $leftovers = Get-ChildItem -LiteralPath $sitePackages -Force |
         Where-Object {
             $_.Name -eq "sunpack_native" -or
@@ -574,38 +576,6 @@ function Get-CTestCommand {
     throw "ctest executable not found. Install CMake or make CTest available in PATH."
 }
 
-function Ensure-Maturin {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string]$VenvScripts
-    )
-
-    try {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "maturin>=1.8,<2") | Out-Host
-    } catch {
-        Write-Warning "maturin install failed. Falling back to already-available maturin executable."
-    }
-    return Get-MaturinCommand -VenvScripts $VenvScripts
-}
-
-function Ensure-CMake {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string]$VenvScripts
-    )
-
-    try {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "cmake>=3.25") | Out-Host
-    } catch {
-        Write-Warning "CMake install failed. Falling back to already-available cmake executable."
-    }
-    return Get-CMakeCommand -VenvScripts $VenvScripts
-}
-
 function Build-SevenZipWrapper {
     param(
         [Parameter(Mandatory = $true)]
@@ -716,20 +686,20 @@ function Install-ModelRuntimeDependencies {
 
     Write-Step "Installing model runtime dependencies"
     if ($BuildArch -eq "arm64") {
-        Invoke-Native -FilePath $PythonPath -Arguments @(
-            "-m", "pip", "install",
+        Invoke-Native -FilePath "uv" -Arguments @(
+            "pip", "install", "--python", $PythonPath,
             "torch==2.7.0",
             "--index-url", "https://download.pytorch.org/whl/cpu"
         )
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "torch-geometric==2.8.0")
+        Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $PythonPath, "torch-geometric==2.8.0")
     } else {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "$RepoRoot[model-runtime]")
+        Invoke-Native -FilePath "uv" -Arguments @("sync", "--locked", "--extra", "dev", "--extra", "model-runtime", "--python", $PythonPath)
     }
     # A successful pip metadata check does not prove compiled Python modules are
     # intact. Repair the character-detection dependency used by requests, which
     # torch-geometric imports transitively.
-    Invoke-Native -FilePath $PythonPath -Arguments @(
-        "-m", "pip", "install", "--force-reinstall", "--no-cache-dir",
+    Invoke-Native -FilePath "uv" -Arguments @(
+        "pip", "install", "--python", $PythonPath, "--reinstall", "--no-cache",
         "requests>=2.31,<3", "charset-normalizer>=3.4,<4"
     )
     Invoke-Native -FilePath $PythonPath -Arguments @(
@@ -775,6 +745,7 @@ $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
+Assert-CommandExists -Command "uv" -Description "uv dependency manager"
 if ($Clean) {
     Write-Step "Cleaning local virtual environment"
     Remove-IfExists -LiteralPath $venvPath
@@ -789,12 +760,7 @@ if (Test-Path -LiteralPath $venvConfigPath) {
         Remove-IfExists -LiteralPath $venvPath
     }
 }
-if (-not (Test-Path -LiteralPath $venvPython)) {
-    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", $venvPath)
-}
-
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[dev]")
+Invoke-Native -FilePath "uv" -Arguments @("sync", "--locked", "--extra", "dev", "--python", $pythonCommand)
 if ($repairSystemMode -eq "full") {
     Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
 } else {
@@ -807,7 +773,7 @@ $env:VIRTUAL_ENV = $venvPath
 $env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 
 Write-Step "Building and installing Rust native extension"
-$maturinCommand = Ensure-Maturin -PythonPath $venvPython -VenvScripts $venvScripts
+$maturinCommand = Get-MaturinCommand -VenvScripts $venvScripts
 Remove-PreviousNativeExtension -PythonPath $venvPython -VenvPath $venvPath
 New-Item -ItemType Directory -Path $nativeWheelRoot -Force | Out-Null
 Invoke-Native -FilePath "cargo" -Arguments @("--version")
@@ -820,14 +786,14 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
     "--out", $nativeWheelRoot
 )
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--force-reinstall", $nativeWheelPath)
+Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $venvPython, "--reinstall", $nativeWheelPath)
 Test-NativeImport -PythonPath $venvPython
 
 Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZipLicensePath -BuildArch $buildArch
 if ($buildArch -eq "x64" -and -not $SkipAcceptanceTestTools) {
     Ensure-AcceptanceTestTools -RepoRoot $repoRoot -ToolsRoot $toolsRoot
 }
-$cmakeCommand = Ensure-CMake -PythonPath $venvPython -VenvScripts $venvScripts
+$cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
 Test-SevenZipWrapper -PythonPath $venvPython

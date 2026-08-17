@@ -136,9 +136,12 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
           architecture: ${{ matrix.python_arch }}
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Set up Rust
         shell: pwsh
@@ -274,9 +277,12 @@ jobs:
         with:
           python-version: "3.11"
           architecture: x64
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Set up Rust
         shell: pwsh

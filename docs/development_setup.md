@@ -7,6 +7,7 @@ SunPack 只维护一套公开源码、一套依赖声明和一条 Windows 构建
 - Windows 10/11
 - PowerShell 5.1 或更新版本
 - Python 3.10 或更新版本，架构必须与目标发行包一致
+- `uv` 0.12 或更新版本
 - Rust MSVC toolchain，提供 `cargo`
 - Visual Studio Build Tools 2022，包含 C++17 编译器
 - 网络连接，用于首次安装 Python 依赖和准备 7-Zip 文件
@@ -41,15 +42,15 @@ tools-arm64/              ARM64 外部工具和原生构建产物
 常用安装方式：
 
 ```powershell
-python -m pip install -e .
-python -m pip install -e ".[test]"
-python -m pip install -e ".[dev]"
-python -m pip install -e ".[model-runtime]"
+uv sync --locked
+uv sync --locked --extra test
+uv sync --locked --extra dev
+uv sync --locked --extra model-runtime
 ```
 
 ARM64 的模型运行时由脚本使用 PyTorch CPU wheel 源单独安装；不要直接依赖 `model-runtime` extra 解析 ARM64 PyTorch。
 
-开发环境脚本创建普通 venv，不启用 `--system-site-packages`。如果检测到旧 `.venv` 曾启用全局 site-packages，脚本会自动删除并重建，避免本机全局包影响依赖解析。
+开发环境由 `uv` 管理并锁定在 `uv.lock`，环境目录仍为 `.venv`。如果检测到旧 `.venv` 曾启用全局 site-packages，脚本会自动删除并重建，避免本机全局包影响依赖解析。
 
 ## 一键准备开发环境
 
@@ -59,10 +60,10 @@ ARM64 的模型运行时由脚本使用 PyTorch CPU wheel 源单独安装；不�
 
 脚本会：
 
-1. 创建或复用隔离的 `.venv`
-2. 从 `pyproject.toml` 安装统一的 `dev` extra（开发、测试和构建依赖）
-3. 安装模型运行时依赖；full 和 lite 共用同一套完整环境
-4. 构建并安装 `sunpack_native`
+1. 用 `uv sync --locked` 创建或复用隔离的 `.venv`
+2. 从 `uv.lock` 安装统一的 `dev` extra（开发、测试和构建依赖）
+3. 仅在 full 模式安装模型运行时依赖
+4. 清理所有旧 `sunpack_native` 残留，构建并只安装最新 wheel
 5. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
 6. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
 7. 把 C++ 产物复制到工具目录
@@ -93,12 +94,13 @@ ARM64 开发环境：
 ### Rust/PyO3
 
 ```powershell
-python -m pip install -e ".[build]"
-python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64 --out build\native-wheels-dev
+uv sync --locked --extra build
+.\.venv\Scripts\maturin.exe build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64 --out build\native-wheels-dev
 $wheel = Get-ChildItem build\native-wheels-dev\sunpack_native-*.whl |
     Sort-Object LastWriteTimeUtc -Descending |
     Select-Object -First 1 -ExpandProperty FullName
-python -m pip install --force-reinstall $wheel
+uv pip uninstall --python .\.venv\Scripts\python.exe sunpack-native
+uv pip install --python .\.venv\Scripts\python.exe --reinstall $wheel
 ```
 
 ### C++ 7-Zip bridge

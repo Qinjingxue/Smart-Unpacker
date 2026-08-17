@@ -11,21 +11,22 @@ is Windows/COM/7z.dll-specific.
 ## Build
 
 ```powershell
-python -m pip install -e ".[build]"
-python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64
+uv sync --locked --extra build
+.\.venv\Scripts\maturin.exe build --manifest-path native\sunpack_native\Cargo.toml --release --target-dir .cache\rust-target\x64
 ```
 
 Install the generated wheel:
 
 ```powershell
 $wheel = Get-ChildItem .cache\rust-target\x64\wheels\sunpack_native-*.whl | Select-Object -First 1 -ExpandProperty FullName
-python -m pip install --force-reinstall $wheel
+uv pip uninstall --python .\.venv\Scripts\python.exe sunpack-native
+uv pip install --python .\.venv\Scripts\python.exe --reinstall $wheel
 ```
 
 Smoke test:
 
 ```powershell
-python -c "import sunpack_native; print(sunpack_native.native_available(), sunpack_native.scanner_version())"
+.\.venv\Scripts\python.exe -c "import sunpack_native; print(sunpack_native.native_available(), sunpack_native.scanner_version())"
 ```
 
 ## API

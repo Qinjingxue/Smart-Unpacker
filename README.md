@@ -68,8 +68,8 @@ app/config
 安装测试依赖并运行默认测试：
 
 ```powershell
-python -m pip install -e ".[test]"
-python -m pytest
+uv sync --locked --extra test
+uv run --locked pytest
 ```
 
 验收测试：

@@ -147,7 +147,9 @@ function Remove-PreviousNativeExtension {
         return
     }
 
-    Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "uninstall", "--yes", "sunpack-native")
+    # Keep exactly one extension: remove the registered distribution and every
+    # stale module/dist-info residue before installing this build's wheel.
+    Invoke-Native -FilePath "uv" -Arguments @("pip", "uninstall", "--python", $PythonPath, "sunpack-native")
     $leftovers = Get-ChildItem -LiteralPath $sitePackages -Force |
         Where-Object {
             $_.Name -eq "sunpack_native" -or
@@ -483,14 +485,14 @@ function Install-ModelRuntimeDependencies {
 
     Write-Step "Installing model runtime dependencies"
     if ($BuildArch -eq "arm64") {
-        Invoke-Native -FilePath $PythonPath -Arguments @(
-            "-m", "pip", "install",
+        Invoke-Native -FilePath "uv" -Arguments @(
+            "pip", "install", "--python", $PythonPath,
             "torch==2.7.0",
             "--index-url", "https://download.pytorch.org/whl/cpu"
         )
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "torch-geometric==2.8.0")
+        Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $PythonPath, "torch-geometric==2.8.0")
     } else {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "$RepoRoot[model-runtime]")
+        Invoke-Native -FilePath "uv" -Arguments @("sync", "--locked", "--extra", "dev", "--extra", "model-runtime", "--python", $PythonPath)
     }
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
@@ -952,6 +954,7 @@ Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executa
 Assert-PathExists -LiteralPath $sevenZipDllPath -Description "Bundled 7-Zip runtime DLL"
 Assert-PathExists -LiteralPath $sevenZipLicensePath -Description "7-Zip license file"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
+Assert-CommandExists -Command "uv" -Description "uv dependency manager"
 Assert-PeMachine -LiteralPath $sevenZipPath -BuildArch $buildArch -Description "Bundled 7-Zip executable"
 Assert-PeMachine -LiteralPath $sevenZipDllPath -BuildArch $buildArch -Description "Bundled 7-Zip runtime DLL"
 
@@ -968,18 +971,13 @@ if (Test-Path -LiteralPath (Join-Path $venvPath "pyvenv.cfg")) {
         Remove-IfExists -LiteralPath $venvPath
     }
 }
-if (-not (Test-Path -LiteralPath $venvPython)) {
-    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", $venvPath)
-}
-
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[dev]")
+Invoke-Native -FilePath "uv" -Arguments @("sync", "--locked", "--extra", "dev", "--python", $pythonCommand)
 if ($repairSystemMode -eq "full") {
     Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
 } else {
     Write-Host "Skipping model runtime dependencies for lite build." -ForegroundColor Yellow
 }
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "check")
+Invoke-Native -FilePath "uv" -Arguments @("pip", "check", "--python", $venvPython)
 if ($repairSystemMode -eq "full") {
     Invoke-Native -FilePath $venvPython -Arguments @(
         "-c",
@@ -1013,7 +1011,7 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
     "--out", $nativeWheelRoot
 )
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--force-reinstall", $nativeWheelPath)
+Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $venvPython, "--reinstall", $nativeWheelPath)
 Test-NativeImport -PythonPath $venvPython
 
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch

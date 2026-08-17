@@ -20,8 +20,8 @@ pytest 收集。pytest 中只保留行为断言；资源或时序稳定性断言
 运行默认 pytest 套件：
 
 ```powershell
-python -m pip install -e ".[test]"
-python -m pytest
+uv sync --locked --extra test
+uv run --locked pytest
 ```
 
 列出性能场景：
