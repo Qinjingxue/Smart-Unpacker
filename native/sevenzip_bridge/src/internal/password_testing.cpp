@@ -308,6 +308,7 @@ PasswordTestResult test_one_password(
                     extract_callback.get());
 
                 last_op_res = raw_extract_callback->operation_result();
+                result.operation_result = last_op_res;
                 last_encryption_evidence = last_encryption_evidence || raw_extract_callback->password_requested();
 
             }
@@ -346,7 +347,8 @@ PasswordTestResult test_one_password(
 
                 result.status = PasswordTestStatus::Damaged;
 
-                result.message = "archive appears damaged";
+                result.message = std::string("archive appears damaged [operation_result=") +
+                    operation_result_name(last_op_res) + "]";
 
                 break;
 
@@ -378,7 +380,8 @@ PasswordTestResult test_one_password(
 
             result.status = PasswordTestStatus::Damaged;
 
-            result.message = "archive appears damaged";
+            result.message = std::string("archive appears damaged [operation_result=") +
+                operation_result_name(last_op_res) + "]";
 
         } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
@@ -521,6 +524,7 @@ PasswordTestResult test_one_password_reuse_stream(
         last_hr = hr;
 
         last_op_res = raw_extract_callback->operation_result();
+        result.operation_result = last_op_res;
         last_encryption_evidence = last_encryption_evidence || raw_extract_callback->password_requested();
 
         archive->Close();
@@ -555,7 +559,8 @@ PasswordTestResult test_one_password_reuse_stream(
 
             result.status = PasswordTestStatus::Damaged;
 
-            result.message = "archive appears damaged";
+            result.message = std::string("archive appears damaged [operation_result=") +
+                operation_result_name(last_op_res) + "]";
 
             return result;
 
@@ -581,7 +586,8 @@ PasswordTestResult test_one_password_reuse_stream(
 
         result.status = PasswordTestStatus::Damaged;
 
-        result.message = "archive appears damaged";
+        result.message = std::string("archive appears damaged [operation_result=") +
+            operation_result_name(last_op_res) + "]";
 
     } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
@@ -865,6 +871,13 @@ PasswordTestResult test_passwords_with_parts(
 
         }
 
+        if (current.status == PasswordTestStatus::Damaged &&
+            current.operation_result == kOpHeadersError) {
+
+            continue;
+
+        }
+
         if (current.status == PasswordTestStatus::BackendUnavailable ||
 
             current.status == PasswordTestStatus::Damaged ||
@@ -1008,6 +1021,13 @@ PasswordTestResult test_passwords_with_ranges(
             current.matched_index = i;
 
             return current;
+
+        }
+
+        if (current.status == PasswordTestStatus::Damaged &&
+            current.operation_result == kOpHeadersError) {
+
+            continue;
 
         }
 

@@ -15,6 +15,7 @@ from sunpack.passwords.verifier.sevenzip_dll import SevenZipDllVerifier
 from sunpack.passwords.verifier.registry import PasswordVerifierChain
 from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 from sunpack.support.sevenzip_bridge import (
+    OPERATION_RESULT_HEADERS_ERROR,
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_DAMAGED,
     STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED,
@@ -125,6 +126,67 @@ def test_final_confirmation_tail_failure_does_not_reject_fast_match():
     assert result.final_confirmation_required is False
 
 
+def test_headers_error_confirmation_rejects_only_weak_rar_candidate():
+    fast = _SequencedVerifier([
+        PasswordBatchVerification(
+            ok=True,
+            status="match",
+            matched_index=0,
+            attempts=1,
+            final_confirmation_required=True,
+            match_evidence="rar4_hp_header",
+        ),
+        PasswordBatchVerification(
+            ok=False,
+            status="no_match",
+            attempts=1,
+            error_text="RAR4 -hp header did not match",
+        ),
+    ])
+    final = _StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="damaged",
+        attempts=1,
+        error_text="archive appears damaged [operation_result=headers_error]",
+        test_result=SimpleNamespace(operation_result=OPERATION_RESULT_HEADERS_ERROR),
+        terminal=True,
+    ))
+
+    result = PasswordVerifierChain([fast], final).verify_batch(
+        "sample.rar",
+        ["weak-match", "later-wrong-password"],
+    )
+
+    assert result.status == "no_match"
+    assert result.attempts == 2
+    assert fast.batches == [["weak-match", "later-wrong-password"], ["later-wrong-password"]]
+
+
+def test_non_header_damage_after_weak_match_remains_terminal():
+    fast = _StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        attempts=1,
+        final_confirmation_required=True,
+    ))
+    final = _StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="damaged",
+        attempts=1,
+        error_text="archive appears damaged [operation_result=data_error]",
+        terminal=True,
+    ))
+
+    result = PasswordVerifierChain([fast], final).verify_batch(
+        "sample.rar",
+        ["weak-match", "later-password"],
+    )
+
+    assert result.status == "damaged"
+    assert result.terminal is True
+
+
 @pytest.mark.parametrize(
     ("native_status", "expected"),
     [
@@ -201,6 +263,16 @@ class _StaticVerifier:
         return self.result
 
 
+class _SequencedVerifier:
+    def __init__(self, results):
+        self.results = list(results)
+        self.batches = []
+
+    def verify_batch(self, archive_path, passwords, *, part_paths=None, archive_input=None):
+        self.batches.append(list(passwords))
+        return self.results.pop(0)
+
+
 class _NativeTester:
     def __init__(self, status):
         self.status = status
@@ -212,6 +284,7 @@ class _NativeTester:
             matched_index=-1,
             attempts=len(passwords),
             message="native diagnostic",
+            operation_result=0,
         )
 
 

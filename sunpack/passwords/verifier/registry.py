@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification, PasswordVerifier
+from sunpack.support.sevenzip_bridge import OPERATION_RESULT_HEADERS_ERROR
 
 
 @dataclass
@@ -95,6 +96,11 @@ class PasswordVerifierChain:
                         final_confirmation_required=True,
                         match_evidence=fast_outcome.match_evidence,
                     )
+                if _is_headers_error(confirmation):
+                    next_offset = fast_outcome.matched_index + 1
+                    remaining = remaining[next_offset:]
+                    offset = candidate_index + 1
+                    continue
                 if confirmation.status in {"damaged", "needs_volume_or_tail_damaged"}:
                     return PasswordBatchVerification(
                         ok=False,
@@ -308,3 +314,11 @@ def _normalize_archive_format(value: str) -> str:
     if normalized in {"zip", "rar", "7z"}:
         return normalized
     return ""
+
+
+def _is_headers_error(confirmation: PasswordBatchVerification) -> bool:
+    if confirmation.status != "damaged":
+        return False
+    if getattr(confirmation.test_result, "operation_result", None) == OPERATION_RESULT_HEADERS_ERROR:
+        return True
+    return "operation_result=headers_error" in (confirmation.error_text or "").lower()

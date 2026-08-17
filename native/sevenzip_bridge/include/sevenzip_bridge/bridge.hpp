@@ -26,6 +26,7 @@ struct PasswordTestResult {
     int matched_index = -1;
     int attempts = 0;
     unsigned long long archive_offset = 0;
+    int operation_result = 0;
     std::wstring archive_type;
     std::string message;
 };
@@ -441,6 +442,7 @@ struct Sup7zOperationResult {
     int attempts;
     unsigned long long archive_offset;
     int item_count;
+    int operation_result;
     wchar_t archive_type[64];
     wchar_t message[512];
 };

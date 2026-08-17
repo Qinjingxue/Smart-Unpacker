@@ -47,6 +47,7 @@ class SevenZipDllVerifier:
             stdout="" if native_attempt.ok else native_attempt.message,
             stderr="" if native_attempt.ok else native_attempt.message,
         )
+        native_result.operation_result = native_attempt.operation_result
         error_text = (native_attempt.message or "").lower()
         if native_attempt.ok:
             password = normalized_passwords[native_attempt.matched_index]

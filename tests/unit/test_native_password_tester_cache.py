@@ -269,6 +269,7 @@ class _ArchiveInputAwareTester(NativePasswordTester):
             matched_index=0,
             attempts=1,
             message="ctypes",
+            operation_result=0,
         )
 
 

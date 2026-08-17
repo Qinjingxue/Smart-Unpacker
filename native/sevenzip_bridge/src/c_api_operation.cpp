@@ -26,6 +26,7 @@ void init_result(Sup7zOperationResult* result) {
     result->attempts = 0;
     result->archive_offset = 0;
     result->item_count = 0;
+    result->operation_result = 0;
     result->archive_type[0] = L'\0';
     result->message[0] = L'\0';
 }
@@ -103,6 +104,7 @@ void copy_result(const ArchiveOperationResult& source, Sup7zOperationResult* des
     destination->attempts = source.attempts;
     destination->archive_offset = source.archive_offset;
     destination->item_count = source.item_count;
+    destination->operation_result = source.operation_result;
     sunpack::sevenzip::capi::copy_wide(destination->archive_type, 64, source.archive_type);
     sunpack::sevenzip::capi::copy_message(destination->message, 512, source.message);
 }

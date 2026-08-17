@@ -31,6 +31,7 @@ struct ArchiveOperationResult {
     int attempts = 0;
     unsigned long long archive_offset = 0;
     int item_count = 0;
+    int operation_result = 0;
     std::wstring archive_type;
     std::string message;
 };

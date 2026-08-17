@@ -64,6 +64,7 @@ ArchiveOperationResult from_password_result(const ArchiveOperationRequest& reque
     output.archive_offset = result.archive_offset;
     output.archive_type = operation_archive_type(request, result);
     output.item_count = result.status == PasswordTestStatus::Ok ? 1 : 0;
+    output.operation_result = result.operation_result;
     output.message = result.message;
     return output;
 }

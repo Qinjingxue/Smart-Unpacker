@@ -16,6 +16,7 @@ STATUS_UNSUPPORTED = 3
 STATUS_BACKEND_UNAVAILABLE = 4
 STATUS_ERROR = 5
 STATUS_NEEDS_VOLUME_OR_TAIL_DAMAGED = 6
+OPERATION_RESULT_HEADERS_ERROR = 8
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class NativePasswordAttempt:
     matched_index: int
     attempts: int
     message: str
+    operation_result: int
 
     @property
     def ok(self) -> bool:
@@ -211,6 +213,7 @@ class _Sup7zOperationResult(ctypes.Structure):
         ("attempts", ctypes.c_int),
         ("archive_offset", ctypes.c_ulonglong),
         ("item_count", ctypes.c_int),
+        ("operation_result", ctypes.c_int),
         ("archive_type", ctypes.c_wchar * 64),
         ("message", ctypes.c_wchar * 512),
     ]
@@ -400,6 +403,7 @@ class NativePasswordTester:
                 matched_index=int(matched_index.value),
                 attempts=int(attempts.value),
                 message=message.value,
+                operation_result=0,
             )
         result = self._run_operation(
             SUP7Z_OPERATION_TRY_PASSWORDS,
@@ -413,6 +417,7 @@ class NativePasswordTester:
             matched_index=int(result.matched_index),
             attempts=int(result.attempts),
             message=result.message,
+            operation_result=int(result.operation_result),
         )
 
     def test_archive(
