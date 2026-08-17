@@ -291,7 +291,6 @@ def _watch_config() -> dict:
             "quiet_max_seconds": 20.0,
             "boundary_confirmation_seconds": 0.5,
             "observer_stop_timeout_seconds": 2.0,
-            "output_suppression_seconds": 0.0,
         }
     }
 
@@ -335,7 +334,6 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
         out_dir=str(base / scenario.name / "out"),
         state_path=str(state_path),
         quiet_seconds=1.0,
-        recursive=False,
         initial_scan=False,
         observer_stop_timeout_seconds=2.0,
         pipeline_engine=object(),

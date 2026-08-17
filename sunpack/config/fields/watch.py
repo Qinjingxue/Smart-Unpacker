@@ -38,7 +38,6 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
         0.0,
         _float_field(config, "runtime_cache_cleanup_idle_seconds"),
     )
-    config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config["password_retry_include_subtree"])
     config.pop("partial_output_policy", None)

@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.failures import FailureKind
@@ -130,7 +129,6 @@ class WatchScheduler:
         out_dir: str,
         state_path: str,
         quiet_seconds: float | None = None,
-        recursive: bool | None = None,
         initial_scan: bool | None = None,
         observer_stop_timeout_seconds: float | None = None,
         pipeline_engine=None,
@@ -155,7 +153,7 @@ class WatchScheduler:
             float(configured_cold_start if quiet_seconds is None else quiet_seconds),
         )
         self.quiet_seconds = self.cold_start_seconds
-        self.recursive = directory_scan_is_recursive(config) if recursive is None else bool(recursive)
+        self.recursive = False
         self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
         self.observer_stop_timeout_seconds = max(
             0.0,
@@ -185,14 +183,6 @@ class WatchScheduler:
         self._active_states: dict[str, _ActiveCandidateState] = {}
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
-        self._active_output_roots: dict[str, int] = {}
-        self._recent_output_roots: dict[str, float] = {}
-        self._known_output_roots: list[str] = self.state.generated_output_roots()
-        if not self._relative_out_dir and not any(
-            _is_under_any_root(watch_root, [self.out_dir]) for watch_root in self.watch_roots
-        ):
-            self._known_output_roots = _compact_paths([*self._known_output_roots, self.out_dir])
-            self.state.remember_output_roots([self.out_dir])
         self._observer = Observer()
         self._started = False
         self._run_wakeup = threading.Event()
@@ -237,7 +227,6 @@ class WatchScheduler:
                 )
             ),
         )
-        self.output_suppression_seconds = max(0.0, float(watch_config["output_suppression_seconds"]))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config["password_retry_debounce_seconds"]))
         self.password_retry_include_subtree = bool(watch_config["password_retry_include_subtree"])
         self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
@@ -602,13 +591,6 @@ class WatchScheduler:
         if not self._is_under_watched_root(candidate.path):
             self._log_candidate_ignored(candidate.path, "outside_watched_roots")
             return
-        output_reason = self._output_suppression_reason(candidate.path)
-        if output_reason:
-            self._log_candidate_ignored(candidate.path, output_reason)
-            return
-        if self._is_under_broad_output_root(candidate.path):
-            self._log_candidate_ignored(candidate.path, "under_output_root")
-            return
         if self._is_under_metadata_dir(candidate.path):
             self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
@@ -711,7 +693,7 @@ class WatchScheduler:
     def should_ignore_event_path(self, path: str) -> bool:
         if not path:
             return True
-        return self._is_under_metadata_dir(path) or self._is_under_probe_root(path) or bool(self._output_suppression_reason(path))
+        return self._is_under_metadata_dir(path) or self._is_under_probe_root(path)
 
     def _log_candidate_ignored(self, path: str, reason: str, **payload) -> None:
         normalized = os.path.normcase(os.path.abspath(str(path))) if path else ""
@@ -1065,16 +1047,10 @@ class WatchScheduler:
             "common_root": final_output_config["output"]["common_root"],
         }
         predicted_probe_dirs = self._predicted_output_dirs(candidate.path, run_config)
-        self._activate_output_roots([probe_workspace, *predicted_probe_dirs])
-        try:
-            task = asyncio.create_task(self.pipeline_engine.run(
-                [PipelineTarget(candidate.path, output=run_config["output"])],
-                output_committer=IdentityOutputCommitter(),
-            ))
-        except Exception:
-            self._release_output_roots([probe_workspace, *predicted_probe_dirs])
-            self._cleanup_probe_workspace(probe_workspace)
-            raise
+        task = asyncio.create_task(self.pipeline_engine.run(
+            [PipelineTarget(candidate.path, output=run_config["output"])],
+            output_committer=IdentityOutputCommitter(),
+        ))
         self._reset_idle_cache_cleanup()
         task.add_done_callback(lambda _task: self._wake_service())
         return _ActivePipelineRequest(
@@ -1095,8 +1071,6 @@ class WatchScheduler:
         except Exception:
             self._cleanup_probe_workspace(request.probe_workspace)
             raise
-        finally:
-            self._release_output_roots([request.probe_workspace, *request.predicted_probe_dirs])
         summary = response.summary
         self._remember_recent_passwords(response.recent_passwords)
         target_result = _target_result_for_path(summary, candidate.path)
@@ -1244,8 +1218,6 @@ class WatchScheduler:
             request.config,
             response,
         )
-        self._remember_recent_output_roots(generated_output_dirs)
-        self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
             self.state.record_group_done(self._current_group_snapshot(group, candidate.path))
         self.state.mark(
@@ -1411,19 +1383,15 @@ class WatchScheduler:
                 await asyncio.sleep(PROBE_PROMOTION_RETRY_SECONDS)
 
     def _is_under_watched_root(self, path: str) -> bool:
-        return _longest_matching_root(path, self.watch_roots) is not None
-
-    def _is_under_broad_output_root(self, path: str) -> bool:
-        if not self.out_dir:
-            return False
-        if self._relative_out_dir:
-            if self.out_dir in {"", "."}:
-                return False
-            normalized = os.path.abspath(path)
-            return any(_is_relative_to(normalized, os.path.join(root, self.out_dir)) for root in self.watch_roots)
-        if any(_is_relative_to(root, self.out_dir) for root in self.watch_roots):
-            return False
-        return _is_relative_to(os.path.abspath(path), self.out_dir)
+        normalized = os.path.normcase(os.path.abspath(path))
+        for root in self.watch_roots:
+            normalized_root = os.path.normcase(os.path.abspath(root))
+            if os.path.isdir(root):
+                if os.path.normcase(os.path.dirname(normalized)) == normalized_root:
+                    return True
+            elif normalized == normalized_root:
+                return True
+        return False
 
     def _is_under_metadata_dir(self, path: str) -> bool:
         normalized = os.path.abspath(path)
@@ -1447,21 +1415,6 @@ class WatchScheduler:
         member_keys = {path_key(path) for path in snapshot.input_paths}
         return path_key(candidate.path) in member_keys
 
-    def _output_suppression_reason(self, path: str) -> str:
-        normalized = os.path.abspath(path)
-        now = time.time()
-        self._prune_recent_output_roots(now)
-        with self._lock:
-            active_roots = list(self._active_output_roots)
-            recent_roots = [root for root, expires_at in self._recent_output_roots.items() if expires_at > now]
-        if _is_under_any_root(normalized, active_roots):
-            return "under_active_output_root"
-        if _is_under_any_root(normalized, recent_roots):
-            return "under_recent_output_root"
-        if _is_under_any_root(normalized, self._known_output_roots):
-            return "under_known_output_root"
-        return ""
-
     def _predicted_output_dirs(self, path: str, run_config: dict) -> list[str]:
         try:
             task = ArchiveTask(
@@ -1473,46 +1426,6 @@ class WatchScheduler:
             return dedupe_normalized_paths([default_output_dir_for_task(task, run_config.get("output", {}))])
         except Exception:
             return []
-
-    def _activate_output_roots(self, roots: list[str]) -> None:
-        if not roots:
-            return
-        with self._lock:
-            for root in dedupe_normalized_paths(roots):
-                self._active_output_roots[root] = self._active_output_roots.get(root, 0) + 1
-
-    def _release_output_roots(self, roots: list[str]) -> None:
-        if not roots:
-            return
-        with self._lock:
-            for root in dedupe_normalized_paths(roots):
-                count = self._active_output_roots.get(root, 0)
-                if count <= 1:
-                    self._active_output_roots.pop(root, None)
-                else:
-                    self._active_output_roots[root] = count - 1
-        self._remember_recent_output_roots(roots)
-
-    def _remember_recent_output_roots(self, roots: list[str]) -> None:
-        if not roots or self.output_suppression_seconds <= 0:
-            return
-        expires_at = time.time() + self.output_suppression_seconds
-        with self._lock:
-            for root in dedupe_normalized_paths(roots):
-                self._recent_output_roots[root] = max(expires_at, self._recent_output_roots.get(root, 0.0))
-
-    def _remember_known_output_roots(self, roots: list[str]) -> None:
-        if not roots:
-            return
-        with self._lock:
-            self._known_output_roots = _compact_paths([*self._known_output_roots, *roots])
-        self.state.remember_output_roots(roots)
-
-    def _prune_recent_output_roots(self, now: float) -> None:
-        with self._lock:
-            for root, expires_at in list(self._recent_output_roots.items()):
-                if expires_at <= now:
-                    self._recent_output_roots.pop(root, None)
 
     def _refresh_password_sources(self) -> str:
         with self._password_source_lock:
@@ -1748,16 +1661,6 @@ def _next_nonexisting_path(path: str) -> str:
     while os.path.exists(f"{base}_{index}"):
         index += 1
     return f"{base}_{index}"
-
-
-def _compact_paths(paths: Iterable[str]) -> list[str]:
-    compacted: list[str] = []
-    for path in sorted(dedupe_normalized_paths(paths), key=len):
-        if _is_under_any_root(path, compacted):
-            continue
-        compacted = [root for root in compacted if not _is_under_any_root(root, [path])]
-        compacted.append(path)
-    return compacted
 
 
 def _password_source_signature(

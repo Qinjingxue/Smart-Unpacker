@@ -595,7 +595,7 @@ def test_watch_service_reads_roots_from_txt_not_config(tmp_path, monkeypatch):
     assert service.roots == [str(txt_root.resolve())]
 
 
-def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tmp_path, monkeypatch):
+def test_watch_service_scheduler_never_recurses(tmp_path, monkeypatch):
     roots_path = tmp_path / "sunpack_watch_roots.txt"
     watch_root = tmp_path / "watch-root"
     watch_root.mkdir()
@@ -623,7 +623,7 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
         service_module,
         "load_config",
         lambda: {
-            "filesystem": {"directory_scan_mode": "current_dir_only", "scan_filters": []},
+            "filesystem": {"directory_scan_mode": "recursive", "scan_filters": []},
             "watch": {
                 "state_dir": str(state_dir),
                 "recursive": True,

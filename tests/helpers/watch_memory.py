@@ -390,7 +390,6 @@ def _state_stats(watcher: WatchScheduler, state_path: Path) -> dict[str, Any]:
         "pending_work": len(state.pending_work),
         "entries": len(state.entries),
         "groups": len(state.groups),
-        "owned_output_roots": len(state.owned_output_roots),
         "password_generation": int(state.password_generation),
     }
     try:

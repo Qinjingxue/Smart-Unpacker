@@ -749,7 +749,7 @@ def test_watch_scheduler_observes_builtin_password_file_directory(tmp_path, monk
     _await(watcher.start())
 
     scheduled = {(Path(path), recursive) for _handler, path, recursive in watcher._observer.scheduled}
-    assert (watch_root.resolve(), True) in scheduled
+    assert (watch_root.resolve(), False) in scheduled
     assert (builtin_path.parent.resolve(), False) in scheduled
 
 
@@ -795,7 +795,7 @@ def test_watch_scheduler_start_cleans_probe_contents_but_keeps_probe_root(tmp_pa
     _await(watcher.stop())
 
 
-def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_path, monkeypatch):
+def test_watch_scheduler_never_recurses_for_current_directory_scan_mode(tmp_path, monkeypatch):
     FakeObserver.started_count = 0
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
@@ -821,7 +821,7 @@ def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_pa
     assert pending_names == {"root.zip"}
 
 
-def test_watch_scheduler_uses_directory_scan_mode_for_recursive_watch(tmp_path, monkeypatch):
+def test_watch_scheduler_never_recurses_for_recursive_directory_scan_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     watch_root = tmp_path / "in"
@@ -841,9 +841,9 @@ def test_watch_scheduler_uses_directory_scan_mode_for_recursive_watch(tmp_path, 
 
     _await(watcher.start())
 
-    assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), True)
+    assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), False)
     pending_names = {Path(path).name for path in watcher._pending}
-    assert pending_names == {"root.zip", "nested.zip"}
+    assert pending_names == {"root.zip"}
 
 
 def test_watch_scheduler_uses_stop_timeout_without_suffix_prefilter(tmp_path, monkeypatch):
@@ -1098,7 +1098,7 @@ def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path,
     assert len(filter_calls) == 2
 
 
-def test_watch_scheduler_processes_quiet_candidate_with_watch_root_common_root(tmp_path, monkeypatch):
+def test_watch_scheduler_processes_direct_quiet_candidate_with_watch_root_common_root(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     captured = {}
 
@@ -1111,9 +1111,8 @@ def test_watch_scheduler_processes_quiet_candidate_with_watch_root_common_root(t
             return FakeSummary()
 
     watch_root = tmp_path / "in"
-    nested = watch_root / "nested"
-    nested.mkdir(parents=True)
-    archive_path = nested / "sample.zip"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
     _write_zip(archive_path)
 
     watcher = WatchScheduler(
@@ -1333,7 +1332,7 @@ def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_
     target.write_bytes(b"%PDF-" + b"x" * 1024)
 
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False, "output_suppression_seconds": 0}},
+        {"watch": {"clipboard_monitor_enabled": False}},
         [str(watch_root)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
@@ -1357,7 +1356,7 @@ def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_
     assert '"event":"done"' not in log_text
 
 
-def test_watch_scheduler_ignores_output_root_events(tmp_path, monkeypatch):
+def test_watch_scheduler_ignores_nested_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     watch_root = tmp_path
@@ -1422,9 +1421,6 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
         observed.file_id,
         observed.change_usn,
     )
-    assert str((tmp_path / "sample").resolve()) in watcher.state.generated_output_roots()
-
-
 def test_watch_scheduler_does_not_reprocess_unchanged_input_when_output_is_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive_path = tmp_path / "sample.zip"
@@ -1625,74 +1621,17 @@ def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path,
     assert captured["output"]["common_root"] == str(second_root.resolve())
 
 
-def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_extract(tmp_path, monkeypatch):
-    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    watcher = None
-
-    class FakePipelineRunner:
-        def __init__(self, config):
-            self.output_dir = Path(config["output"]["root"]) / "outer"
-            self.context = SimpleNamespace(flatten_candidates={str(self.output_dir)}, recovered_outputs=[])
-
-        def run_targets(self, paths):
-            self.output_dir.mkdir(parents=True)
-            nested = self.output_dir / "inner.zip"
-            _write_zip(nested)
-            watcher.enqueue(str(nested))
-            return FakeSummary()
-
-    archive_path = tmp_path / "outer.zip"
-    _write_zip(archive_path)
-
-    watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
-        [str(tmp_path)],
-        out_dir=str(tmp_path),
-        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
-        quiet_seconds=0,
-        initial_scan=False,
-        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
-    )
-    watcher.enqueue(str(archive_path))
-
-    result = _await(watcher.run_once())
-
-    assert result.processed == 1
-    assert watcher.pending_count == 0
-
-
-def test_watch_scheduler_initial_scan_skips_known_outputs_when_output_root_matches_watch_root(tmp_path, monkeypatch):
+def test_watch_scheduler_initial_scan_ignores_nested_archives(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
-    old_archive = tmp_path / "old.zip"
     output_dir = tmp_path / "old"
     output_dir.mkdir()
     nested = output_dir / "nested.zip"
     fresh = tmp_path / "fresh.zip"
-    _write_zip(old_archive)
     _write_zip(nested)
     _write_zip(fresh)
 
     state_path = tmp_path / ".sunpack_watch" / "state.json"
-    first = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
-        [str(tmp_path)],
-        out_dir=str(tmp_path),
-        state_path=str(state_path),
-        quiet_seconds=0,
-        initial_scan=False,
-    )
-    observed = scheduler_module._candidate_for_event_path(str(old_archive))
-    first.state.record_attempt(
-        observed.path,
-        observed.size,
-        observed.mtime,
-        observed.file_id,
-        observed.change_usn,
-    )
-    first.state.complete_work([str(old_archive)])
-    first.state.remember_output_roots([str(output_dir)])
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],

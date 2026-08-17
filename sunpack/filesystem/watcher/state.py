@@ -14,7 +14,6 @@ from .group_models import (
     WatchGroupSnapshot,
     WatchGroupState,
 )
-from sunpack.support.collections import dedupe_normalized_paths
 
 
 STATE_VERSION = 11
@@ -70,7 +69,6 @@ class WatchStateStore:
         self.pending_work: dict[str, WatchInputSnapshot] = {}
         self.entries: dict[str, WatchStateEntry] = {}
         self.groups: dict[str, WatchGroupState] = {}
-        self.owned_output_roots: list[str] = []
         self.password_generation = 0
         self.password_source_signature = ""
         self.load()
@@ -93,8 +91,6 @@ class WatchStateStore:
         self.pending_work = self._load_records(payload.get("pending_work"), WatchInputSnapshot)
         self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
         self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
-        roots = payload.get("owned_output_roots")
-        self.owned_output_roots = dedupe_normalized_paths(roots if isinstance(roots, list) else [])
 
     @staticmethod
     def _load_records(payload, record_type, *, normalize_keys: bool = True) -> dict:
@@ -123,7 +119,6 @@ class WatchStateStore:
                 "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
                 "entries": {key: asdict(value) for key, value in self.entries.items()},
                 "groups": {key: asdict(value) for key, value in self.groups.items()},
-                "owned_output_roots": list(self.owned_output_roots),
             }
             temp_path: Path | None = None
             try:
@@ -238,14 +233,6 @@ class WatchStateStore:
             if any(_path_matches(member, normalized, recursive=recursive) for member in members if member):
                 self.groups.pop(group_id, None)
                 changed = True
-        retained_roots = [
-            root
-            for root in self.owned_output_roots
-            if not _paths_overlap_for_departure(root, normalized, recursive=recursive)
-        ]
-        if retained_roots != self.owned_output_roots:
-            self.owned_output_roots = retained_roots
-            changed = True
         if changed:
             self.save()
         return changed
@@ -452,29 +439,8 @@ class WatchStateStore:
             updated_at=time.time(),
         )
 
-    def generated_output_roots(self) -> list[str]:
-        return list(self.owned_output_roots)
-
-    def remember_output_roots(self, roots: Iterable[str]) -> None:
-        updated = _compact_paths([*self.owned_output_roots, *roots])
-        if updated != self.owned_output_roots:
-            self.owned_output_roots = updated
-            self.save()
-
-
 def _path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
-
-
-def _compact_paths(paths: Iterable[str]) -> list[str]:
-    compacted: list[str] = []
-    for path in sorted(dedupe_normalized_paths(paths), key=len):
-        key = _path_key(path)
-        if any(_is_path_under(key, _path_key(root)) for root in compacted):
-            continue
-        compacted = [root for root in compacted if not _is_path_under(_path_key(root), key)]
-        compacted.append(path)
-    return compacted
 
 
 def _path_matches(path: str, expected: str, *, recursive: bool) -> bool:
