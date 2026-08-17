@@ -82,11 +82,15 @@ try {
 
     $appPath = Join-Path $installRoot "sunpack.exe"
     $watchAppPath = Join-Path $installRoot "sunpack-watch.exe"
+    $builtinPasswordsPath = Join-Path $installRoot "builtin_passwords.txt"
     if (-not (Test-Path -LiteralPath $appPath)) {
         throw "Installed executable was not found: $appPath"
     }
     if (-not (Test-Path -LiteralPath $watchAppPath)) {
         throw "Installed watch GUI executable was not found: $watchAppPath"
+    }
+    if (-not (Test-Path -LiteralPath $builtinPasswordsPath)) {
+        throw "Installed builtin password file was not found: $builtinPasswordsPath"
     }
     Invoke-Checked -FilePath $appPath -Arguments @("--help")
 
@@ -112,6 +116,13 @@ try {
     $watchRootsPath = Join-Path $installRoot "sunpack_watch_roots.txt"
     $watchRootsContent = "D:\Archives`nE:\Incoming`n"
     Set-Content -LiteralPath $watchRootsPath -Value $watchRootsContent -Encoding UTF8 -NoNewline
+    $builtinPasswordsContent = "installer-smoke-user-password`n"
+    Set-Content -LiteralPath $builtinPasswordsPath -Value $builtinPasswordsContent -Encoding UTF8 -NoNewline
+    $staleUpgradeMarker = Join-Path $installRoot "stale-upgrade-marker.json"
+    Set-Content -LiteralPath $staleUpgradeMarker -Value "stale" -Encoding UTF8
+    $staleConfigDir = Join-Path $installRoot "config"
+    New-Item -ItemType Directory -Path $staleConfigDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $staleConfigDir "old-settings.json") -Value "stale" -Encoding UTF8
     Invoke-Checked -FilePath $resolvedInstaller -Arguments @(
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
@@ -125,7 +136,18 @@ try {
     if ($watchRootsAfterUpgrade -ne $watchRootsContent) {
         throw "Upgrade install overwrote the existing watch roots file: $watchRootsPath"
     }
+    $builtinPasswordsAfterUpgrade = Get-Content -LiteralPath $builtinPasswordsPath -Raw -Encoding UTF8
+    if ($builtinPasswordsAfterUpgrade -ne $builtinPasswordsContent) {
+        throw "Upgrade install overwrote the existing builtin password file: $builtinPasswordsPath"
+    }
+    if (Test-Path -LiteralPath $staleUpgradeMarker) {
+        throw "Upgrade install left stale application data behind: $staleUpgradeMarker"
+    }
+    if (Test-Path -LiteralPath $staleConfigDir) {
+        throw "Upgrade install left stale configuration data behind: $staleConfigDir"
+    }
     Remove-Item -LiteralPath $watchRootsPath -Force
+    Remove-Item -LiteralPath $builtinPasswordsPath -Force
     $watchStateDir = Join-Path $installRoot ".sunpack_watch"
     New-Item -ItemType Directory -Path $watchStateDir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $watchStateDir "watch.stop") -Value "installer-smoke" -Encoding UTF8

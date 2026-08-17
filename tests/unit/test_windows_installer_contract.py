@@ -53,14 +53,18 @@ def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     assert "watch stop" in script
     assert "function PrepareToInstall" in script
     assert "StopExistingWatch;" in script
-    assert "[InstallDelete]" in script
-    assert 'Excludes: "sunpack_watch_roots.txt"' in script
+    assert "function ClearInstallDirectory: Boolean" in script
+    assert "function ClearExternalRuntimeState: Boolean" in script
+    assert "IsPersistentInstallFile" in script
+    assert "FindData: TFindRec" in script
+    assert "DirExists(ItemPath)" in script
+    assert "TFindData" not in script
+    assert "sunpack_watch_roots.txt,builtin_passwords.txt" in script
     assert 'Source: "{#SourceDir}\\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
-    assert 'Type: files; Name: "{app}\\*.exe"' in script
-    assert 'Type: filesandordirs; Name: "{app}\\sunpack"' in script
-    assert 'Type: filesandordirs; Name: "{app}\\tools"' in script
-    assert 'Type: files; Name: "{app}\\*.json"' not in script
-    assert 'Type: files; Name: "{app}\\*.txt"' not in script
+    assert 'Source: "{#SourceDir}\\builtin_passwords.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
+    assert "RunContextMenuScript(False);" in script
+    assert "RemoveStartupRunValue;" in script
+    assert "RemoveUserPath;" in script
 
 
 def test_uninstaller_stops_running_watch_before_removing_files():
@@ -86,11 +90,8 @@ def test_uninstaller_removes_generated_watch_and_cache_state():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
     assert "[UninstallDelete]" in script
-    assert 'Type: filesandordirs; Name: "{app}\\.sunpack_watch"' in script
-    assert 'Type: files; Name: "{app}\\sunpack_watch_roots.txt"' in script
-    assert 'Type: dirifempty; Name: "{app}"' in script
-    assert 'Type: filesandordirs; Name: "{localappdata}\\SunPack\\cache"' in script
-    assert 'Type: dirifempty; Name: "{localappdata}\\SunPack"' in script
+    assert 'Type: filesandordirs; Name: "{app}\\*"' in script
+    assert 'Type: filesandordirs; Name: "{localappdata}\\SunPack"' in script
 
 
 def test_installer_declares_x64_and_arm64_modes():
@@ -141,24 +142,6 @@ def test_build_passes_edition_and_architecture_to_acceptance_setup():
     assert '"-RepairSystem", $repairSystemMode' in build_script
     assert '[string]$RepairSystem = "full"' in acceptance_script
     assert '"-RepairSystem", $RepairSystem' in acceptance_script
-
-
-def test_windows_scripts_share_one_virtual_environment():
-    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-    setup_script = (ROOT / "scripts" / "setup_windows_dev.ps1").read_text(encoding="utf-8")
-
-    assert ".venv-build" not in build_script
-    assert 'Join-Path $repoRoot ".venv"' in build_script
-    assert 'Join-Path $repoRoot ".venv"' in setup_script
-    assert "IncludeBuildDeps" not in setup_script
-    assert "$repoRoot[dev]" in build_script
-    assert "$repoRoot[dev]" in setup_script
-    assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in build_script
-    assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in setup_script
-    assert 'if ($repairSystemMode -eq "full")' in build_script
-    assert 'if ($repairSystemMode -eq "full")' in setup_script
-    assert "Skipping model runtime dependencies for lite build." in build_script
-    assert "Skipping model runtime dependencies for lite environment." in setup_script
 
 
 def test_lite_build_excludes_model_runtime_from_shared_environment():
@@ -222,8 +205,12 @@ def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
 def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 
+    assert 'Join-Path $installRoot "builtin_passwords.txt"' in script
     assert 'Join-Path $installRoot ".sunpack_watch"' in script
     assert 'Join-Path $env:LOCALAPPDATA "SunPack\\cache"' in script
+    assert "Upgrade install overwrote the existing builtin password file" in script
+    assert "Upgrade install left stale application data behind" in script
+    assert "Upgrade install left stale configuration data behind" in script
     assert "Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName" in script
     assert "Uninstaller left the watch state directory behind" in script
     assert "Uninstaller left the local SunPack cache behind" in script

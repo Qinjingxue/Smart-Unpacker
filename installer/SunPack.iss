@@ -59,32 +59,13 @@ Name: "contextmenu"; Description: "Register the SunPack folder context menu"; Gr
 Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt,builtin_passwords.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
-
-[InstallDelete]
-Type: files; Name: "{app}\*.pyd"
-Type: files; Name: "{app}\*.dll"
-Type: files; Name: "{app}\*.exe"
-Type: files; Name: "{app}\*.manifest"
-Type: files; Name: "{app}\*.ico"
-Type: files; Name: "{app}\*.py"
-Type: filesandordirs; Name: "{app}\_internal"
-Type: filesandordirs; Name: "{app}\analysis"
-Type: filesandordirs; Name: "{app}\config"
-Type: filesandordirs; Name: "{app}\licenses"
-Type: filesandordirs; Name: "{app}\models"
-Type: filesandordirs; Name: "{app}\native"
-Type: filesandordirs; Name: "{app}\scripts"
-Type: filesandordirs; Name: "{app}\sunpack"
-Type: filesandordirs; Name: "{app}\tools"
+Source: "{#SourceDir}\builtin_passwords.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\.sunpack_watch"
-Type: files; Name: "{app}\sunpack_watch_roots.txt"
-Type: dirifempty; Name: "{app}"
-Type: filesandordirs; Name: "{localappdata}\SunPack\cache"
-Type: dirifempty; Name: "{localappdata}\SunPack"
+Type: filesandordirs; Name: "{app}\*"
+Type: filesandordirs; Name: "{localappdata}\SunPack"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-watch.exe"""; Tasks: autostart; Flags: uninsdeletevalue
@@ -303,6 +284,71 @@ begin
   Result := WaitForExistingWatchToExit;
 end;
 
+function IsPersistentInstallFile(const FileName: string): Boolean;
+begin
+  Result :=
+    (CompareText(FileName, 'sunpack_watch_roots.txt') = 0) or
+    (CompareText(FileName, 'builtin_passwords.txt') = 0);
+end;
+
+function ClearInstallDirectory: Boolean;
+var
+  AppPath: string;
+  SearchPath: string;
+  ItemPath: string;
+  FindData: TFindRec;
+begin
+  Result := True;
+  AppPath := ExpandConstant('{app}');
+  if not DirExists(AppPath) then
+    Exit;
+
+  SearchPath := AddBackslash(AppPath) + '*';
+  if not FindFirst(SearchPath, FindData) then
+    Exit;
+  try
+    repeat
+      if (FindData.Name <> '.') and (FindData.Name <> '..') then
+      begin
+        ItemPath := AddBackslash(AppPath) + FindData.Name;
+        if DirExists(ItemPath) then
+        begin
+          if not DelTree(ItemPath, True, True, True) and DirExists(ItemPath) then
+          begin
+            Log('Failed to remove old SunPack directory: ' + ItemPath);
+            Result := False;
+          end;
+        end
+        else if not IsPersistentInstallFile(FindData.Name) then
+        begin
+          if not DeleteFile(ItemPath) and FileExists(ItemPath) then
+          begin
+            Log('Failed to remove old SunPack file: ' + ItemPath);
+            Result := False;
+          end;
+        end;
+      end;
+    until not FindNext(FindData);
+  finally
+    FindClose(FindData);
+  end;
+end;
+
+function ClearExternalRuntimeState: Boolean;
+var
+  StateRoot: string;
+begin
+  StateRoot := ExpandConstant('{localappdata}\SunPack');
+  if not DirExists(StateRoot) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  Result := DelTree(StateRoot, True, True, True) or not DirExists(StateRoot);
+  if not Result then
+    Log('Failed to remove old SunPack external runtime state: ' + StateRoot);
+end;
+
 procedure InitializeWizard();
 begin
   WizardForm.LicenseAcceptedRadio.Checked := True;
@@ -310,7 +356,24 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  StopExistingWatchAndWait;
+  if not StopExistingWatchAndWait then
+  begin
+    Result := 'SunPack Watch is still running. Please stop it and run the installer again.';
+    Exit;
+  end;
+  RunContextMenuScript(False);
+  RemoveStartupRunValue;
+  RemoveUserPath;
+  if not ClearInstallDirectory then
+  begin
+    Result := 'Some old SunPack files could not be removed. Close SunPack and run the installer again.';
+    Exit;
+  end;
+  if not ClearExternalRuntimeState then
+  begin
+    Result := 'Some old SunPack runtime state could not be removed. Close SunPack and run the installer again.';
+    Exit;
+  end;
   Result := '';
 end;
 
