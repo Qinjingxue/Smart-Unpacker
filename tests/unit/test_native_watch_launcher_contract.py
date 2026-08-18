@@ -35,7 +35,8 @@ def test_native_launcher_has_one_install_identity_context():
     )
 
     assert "struct InstallContext" in source
-    assert "GetFinalPathNameByHandleW" in source
+    assert "GetFinalPathNameByHandleW" not in source
+    assert "normalized_final_path" not in source
     assert "const InstallContext context = install_context();" in source
     assert "state_path(const InstallContext& context)" in source
     assert "std::wstring state_path()" not in source

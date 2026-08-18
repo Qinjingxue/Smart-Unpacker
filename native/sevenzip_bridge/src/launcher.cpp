@@ -21,38 +21,12 @@ constexpr char kStreamMagic[] = "SPS1";
 constexpr char kRuntimeIdentityArgumentPrefix[] = "--_sunpack-runtime-id=";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
 
-std::wstring normalized_final_path(const std::wstring& path) {
-    std::wstring fallback = path;
-    CharLowerBuffW(fallback.data(), static_cast<DWORD>(fallback.size()));
-    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return fallback;
-    const DWORD required = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (required == 0) {
-        CloseHandle(handle);
-        return fallback;
-    }
-    std::vector<wchar_t> buffer(static_cast<std::size_t>(required) + 1);
-    const DWORD written = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    CloseHandle(handle);
-    if (written == 0 || written >= buffer.size()) return fallback;
-    std::wstring result(buffer.data(), written);
-    if (result.rfind(L"\\\\?\\UNC\\", 0) == 0) {
-        result = L"\\\\" + result.substr(8);
-    } else if (result.rfind(L"\\\\?\\", 0) == 0) {
-        result.erase(0, 4);
-    }
-    CharLowerBuffW(result.data(), static_cast<DWORD>(result.size()));
-    return result;
-}
-
 std::wstring current_executable_path() {
     std::vector<wchar_t> buffer(32768);
     const DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
     std::wstring path(buffer.data(), size);
-    return normalized_final_path(path);
+    CharLowerBuffW(path.data(), static_cast<DWORD>(path.size()));
+    return path;
 }
 
 std::string utf8(const std::wstring& value) {
