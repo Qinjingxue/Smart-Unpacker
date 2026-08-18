@@ -17,6 +17,7 @@ from sunpack.cli.cli_parsers import (
 )
 from sunpack.cli.cli_reporter import CliReporter
 from sunpack.cli.cli_types import CliCommandResult
+from sunpack.support.runtime_identity import runtime_id_available
 
 CURRENT_CLI_LANG = DEFAULT_CLI_LANG
 _PARSER_CACHE: dict[str, argparse.ArgumentParser] = {}
@@ -224,7 +225,7 @@ async def async_main(
 
 
 def _should_submit_to_persistent_server(argv: list[str]) -> bool:
-    if not argv or any(item in {"-h", "--help"} for item in argv):
+    if not runtime_id_available() or not argv or any(item in {"-h", "--help"} for item in argv):
         return False
     # The watch service itself is long-lived and continues to have its own
     # process lifecycle. Its management subcommands are short requests.

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -17,17 +18,42 @@ namespace {
 
 constexpr char kRequestMagic[] = "SPK1";
 constexpr char kStreamMagic[] = "SPS1";
+constexpr char kRuntimeIdentityArgumentPrefix[] = "--_sunpack-runtime-id=";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
 constexpr std::size_t kRuntimeDiagnosticTailBytes = 16u * 1024u;
 
-std::wstring executable_directory() {
+std::wstring normalized_final_path(const std::wstring& path) {
+    std::wstring fallback = path;
+    CharLowerBuffW(fallback.data(), static_cast<DWORD>(fallback.size()));
+    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return fallback;
+    const DWORD required = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (required == 0) {
+        CloseHandle(handle);
+        return fallback;
+    }
+    std::vector<wchar_t> buffer(static_cast<std::size_t>(required) + 1);
+    const DWORD written = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(handle);
+    if (written == 0 || written >= buffer.size()) return fallback;
+    std::wstring result(buffer.data(), written);
+    if (result.rfind(L"\\\\?\\UNC\\", 0) == 0) {
+        result = L"\\\\" + result.substr(8);
+    } else if (result.rfind(L"\\\\?\\", 0) == 0) {
+        result.erase(0, 4);
+    }
+    CharLowerBuffW(result.data(), static_cast<DWORD>(result.size()));
+    return result;
+}
+
+std::wstring current_executable_path() {
     std::vector<wchar_t> buffer(32768);
     const DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
     std::wstring path(buffer.data(), size);
-    const auto slash = path.find_last_of(L"\\/");
-    path.resize(slash == std::wstring::npos ? 0 : slash);
-    CharLowerBuffW(path.data(), static_cast<DWORD>(path.size()));
-    return path;
+    return normalized_final_path(path);
 }
 
 std::string utf8(const std::wstring& value) {
@@ -57,6 +83,29 @@ std::wstring wide_utf8(const std::string& value) {
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
                         result.data(), size);
     return result;
+}
+
+std::string fnv1a_hex(const std::string& value) {
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    for (const unsigned char byte : value) {
+        hash ^= byte;
+        hash *= 0x100000001b3ULL;
+    }
+    std::array<char, 17> text{};
+    std::snprintf(text.data(), text.size(), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(text.data());
+}
+
+struct InstallContext {
+    std::wstring directory;
+    std::string runtime_id;
+};
+
+InstallContext install_context() {
+    std::wstring path = current_executable_path();
+    const auto slash = path.find_last_of(L"\\/");
+    path.resize(slash == std::wstring::npos ? 0 : slash);
+    return {path, "v2-" + fnv1a_hex(utf8(path))};
 }
 
 bool file_exists(const std::wstring& path) {
@@ -214,30 +263,21 @@ std::string cli_language_from_config(const std::wstring& launcher_dir, const std
     return normalize_language(language);
 }
 
-std::wstring state_path() {
-    const std::wstring directory = executable_directory();
-    const std::string encoded = utf8(directory);
-    std::uint64_t hash = 0xcbf29ce484222325ULL;
-    for (const unsigned char byte : encoded) {
-        hash ^= byte;
-        hash *= 0x100000001b3ULL;
-    }
+std::wstring state_path(const InstallContext& context) {
     std::array<wchar_t, 32768> local{};
     DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local.data(), static_cast<DWORD>(local.size()));
     if (length == 0 || length >= local.size()) {
         length = GetTempPathW(static_cast<DWORD>(local.size()), local.data());
     }
-    wchar_t suffix[64]{};
-    swprintf_s(suffix, L"\\SunPack\\runtime-%016llx.state", static_cast<unsigned long long>(hash));
-    return std::wstring(local.data(), length) + suffix;
+    return std::wstring(local.data(), length) + L"\\SunPack\\runtime-" + wide_utf8(context.runtime_id) + L".state";
 }
 
-std::wstring runtime_log_path() {
-    return state_path() + L".log";
+std::wstring runtime_log_path(const InstallContext& context) {
+    return state_path(context) + L".log";
 }
 
-std::string read_runtime_diagnostics() {
-    std::ifstream stream(runtime_log_path(), std::ios::binary);
+std::string read_runtime_diagnostics(const InstallContext& context) {
+    std::ifstream stream(runtime_log_path(context), std::ios::binary);
     if (!stream) return {};
     stream.seekg(0, std::ios::end);
     const std::streamoff end = stream.tellg();
@@ -254,8 +294,8 @@ std::string read_runtime_diagnostics() {
     return data;
 }
 
-bool parse_state(std::wstring& pipe_name, std::array<unsigned char, 32>& token) {
-    std::ifstream stream(state_path());
+bool parse_state(const InstallContext& context, std::wstring& pipe_name, std::array<unsigned char, 32>& token) {
+    std::ifstream stream(state_path(context));
     std::string pipe_text;
     std::string token_text;
     if (!std::getline(stream, pipe_text) || !std::getline(stream, token_text) || token_text.size() != 64) return false;
@@ -341,11 +381,11 @@ std::string read_input_line() {
     return std::string(buffer.data(), read);
 }
 
-bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code,
+bool request(const InstallContext& context, const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code,
              const std::wstring& request_cwd) {
     std::wstring pipe_name;
     std::array<unsigned char, 32> token{};
-    if (!parse_state(pipe_name, token)) return false;
+    if (!parse_state(context, pipe_name, token)) return false;
     HANDLE pipe = connect_pipe(pipe_name);
     if (pipe == INVALID_HANDLE_VALUE) return false;
 
@@ -432,12 +472,13 @@ std::wstring quote_argument(const std::wstring& value) {
     return result;
 }
 
-bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr,
-                   const std::wstring& working_directory = {}, DWORD* spawn_error = nullptr,
+bool spawn_runtime(const InstallContext& context, const std::vector<std::wstring>& arguments, bool detached,
+                   DWORD* exit_code = nullptr, DWORD* spawn_error = nullptr,
                    HANDLE* detached_process = nullptr) {
-    const std::wstring runtime = executable_directory() + L"\\sunpack-runtime.exe";
+    const std::wstring runtime = context.directory + L"\\sunpack-runtime.exe";
     std::wstring command = quote_argument(runtime);
     for (const auto& argument : arguments) command += L" " + quote_argument(argument);
+    command += L" " + quote_argument(wide_utf8(std::string(kRuntimeIdentityArgumentPrefix) + context.runtime_id));
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -446,7 +487,7 @@ bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DW
     if (spawn_error) *spawn_error = ERROR_SUCCESS;
     if (detached_process) *detached_process = nullptr;
     if (detached) {
-        const std::wstring log_path = runtime_log_path();
+        const std::wstring log_path = runtime_log_path(context);
         const std::size_t slash = log_path.find_last_of(L"\\/");
         if (slash != std::wstring::npos) {
             const std::wstring directory = log_path.substr(0, slash);
@@ -481,7 +522,7 @@ bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DW
         startup.hStdError = diagnostic;
     }
     const DWORD flags = detached ? CREATE_NO_WINDOW : 0;
-    const wchar_t* child_cwd = working_directory.empty() ? nullptr : working_directory.c_str();
+    const wchar_t* child_cwd = context.directory.empty() ? nullptr : context.directory.c_str();
     const BOOL created = CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? TRUE : FALSE, flags,
                                         nullptr, child_cwd, &startup, &process);
     const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
@@ -508,16 +549,17 @@ bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DW
     return true;
 }
 
-bool spawn_watch(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr,
-                 const std::wstring& working_directory = {}) {
-    const std::wstring watch = executable_directory() + L"\\sunpack-watch.exe";
+bool spawn_watch(const InstallContext& context, const std::vector<std::wstring>& arguments, bool detached,
+                 DWORD* exit_code = nullptr) {
+    const std::wstring watch = context.directory + L"\\sunpack-watch.exe";
     std::wstring command = quote_argument(watch);
     for (const auto& argument : arguments) command += L" " + quote_argument(argument);
+    command += L" " + quote_argument(wide_utf8(std::string(kRuntimeIdentityArgumentPrefix) + context.runtime_id));
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
     const DWORD flags = detached ? (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS) : 0;
-    const wchar_t* child_cwd = working_directory.empty() ? nullptr : working_directory.c_str();
+    const wchar_t* child_cwd = context.directory.empty() ? nullptr : context.directory.c_str();
     if (!CreateProcessW(watch.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
                         child_cwd,
                         &startup, &process)) return false;
@@ -564,7 +606,8 @@ std::string localized(const std::string& language, const wchar_t* english, const
 
 int wmain(int argc, wchar_t** argv) {
     const std::wstring invocation_cwd = current_directory();
-    const std::wstring launcher_cwd = executable_directory();
+    const InstallContext context = install_context();
+    const std::wstring& launcher_cwd = context.directory;
     if (!launcher_cwd.empty()) SetCurrentDirectoryW(launcher_cwd.c_str());
     const bool shutdown_request = argc >= 2 && wcscmp(argv[1], L"--persistent-shutdown") == 0;
     const bool watch_start = argc >= 3 && wcscmp(argv[1], L"watch") == 0 && wcscmp(argv[2], L"start") == 0;
@@ -577,7 +620,7 @@ int wmain(int argc, wchar_t** argv) {
             once = once || wcscmp(argv[index], L"--once") == 0;
         }
         DWORD code = 1;
-        if (!spawn_watch(watch_arguments, !once, &code, launcher_cwd)) return 1;
+        if (!spawn_watch(context, watch_arguments, !once, &code)) return 1;
         return once ? static_cast<int>(code) : 0;
     }
     const bool shutdown = shutdown_request;
@@ -598,13 +641,13 @@ int wmain(int argc, wchar_t** argv) {
         request_arguments.emplace_back(L"--no-pause");
     }
     int code = 1;
-    bool ok = request(request_arguments, shutdown, code, invocation_cwd);
+    bool ok = request(context, request_arguments, shutdown, code, invocation_cwd);
     if (!ok && !shutdown) {
         DWORD spawn_error = ERROR_SUCCESS;
         HANDLE runtime_process = nullptr;
         DWORD runtime_exit_code = STILL_ACTIVE;
         bool runtime_failed = false;
-        if (spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd, &spawn_error, &runtime_process)) {
+        if (spawn_runtime(context, {L"--persistent-server"}, true, nullptr, &spawn_error, &runtime_process)) {
             for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
                 if (runtime_process != nullptr && WaitForSingleObject(runtime_process, 0) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(runtime_process, &runtime_exit_code);
@@ -612,7 +655,7 @@ int wmain(int argc, wchar_t** argv) {
                     break;
                 }
                 Sleep(25);
-                ok = request(request_arguments, false, code, invocation_cwd);
+                ok = request(context, request_arguments, false, code, invocation_cwd);
             }
             if (runtime_process != nullptr) CloseHandle(runtime_process);
         } else {
@@ -626,7 +669,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (!ok && shutdown) code = 0;
-    if (ok && code == 0 && start_after_add && !spawn_watch({}, true, nullptr, launcher_cwd)) {
+    if (ok && code == 0 && start_after_add && !spawn_watch(context, {}, true, nullptr)) {
         code = 1;
     }
     std::string language;
@@ -635,7 +678,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!ok && !shutdown) {
         write_stream(STD_ERROR_HANDLE, localized(language, kPersistentTimeoutEn, kPersistentTimeoutZh) + "\n");
-        const std::string diagnostics = read_runtime_diagnostics();
+        const std::string diagnostics = read_runtime_diagnostics(context);
         if (!diagnostics.empty()) {
             write_stream(STD_ERROR_HANDLE, "Runtime startup diagnostics:\n" + diagnostics + "\n");
         }

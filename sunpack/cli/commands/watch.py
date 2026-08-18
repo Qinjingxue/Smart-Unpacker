@@ -18,6 +18,7 @@ from sunpack.filesystem.watcher.service import (
     signal_reload,
     signal_stop,
 )
+from sunpack.support.runtime_identity import runtime_id, runtime_id_argument
 
 
 COMMAND = "watch"
@@ -196,8 +197,13 @@ def _watch_cli_start_argv(args) -> list[str]:
     if bool(getattr(args, "no_tray", False)):
         command.append("--no-tray")
     if getattr(sys, "frozen", False):
-        return [str(Path(sys.executable).resolve()), *command]
-    entry = Path(__file__).resolve().parents[3] / "sunpack.py"
-    if entry.is_file():
-        return [str(Path(sys.executable).resolve()), str(entry), *command]
-    return [str(Path(sys.executable).resolve()), "-m", "sunpack", *command]
+        argv = [str(Path(sys.executable).resolve()), *command]
+    else:
+        entry = Path(__file__).resolve().parents[3] / "sunpack.py"
+        if entry.is_file():
+            argv = [str(Path(sys.executable).resolve()), str(entry), *command]
+        else:
+            argv = [str(Path(sys.executable).resolve()), "-m", "sunpack", *command]
+    if runtime_id() is not None:
+        argv.append(runtime_id_argument())
+    return argv

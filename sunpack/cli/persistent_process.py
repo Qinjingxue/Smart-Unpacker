@@ -10,6 +10,12 @@ from typing import Any, Callable
 from sunpack.config.cli_settings import load_cli_language_from_config
 from sunpack.i18n import I18nContext
 from sunpack.support.runtime_cwd import runtime_working_directory
+from sunpack.support.runtime_identity import (
+    require_runtime_id,
+    runtime_id,
+    runtime_id_argument,
+    runtime_id_available,
+)
 
 
 SERVER_ARG = "--persistent-server"
@@ -35,20 +41,12 @@ def handle_early_argv(argv: list[str]) -> int | None:
     return None
 
 
-def _runtime_digest() -> int:
-    executable_dir = os.path.normcase(os.path.dirname(os.path.abspath(sys.executable)))
-    digest = 0xCBF29CE484222325
-    for byte in executable_dir.encode("utf-8", "surrogatepass"):
-        digest ^= byte
-        digest = (digest * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return digest
-
-
 def state_path() -> str:
     import tempfile
 
     root = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "SunPack")
-    return os.path.join(root, f"runtime-{_runtime_digest():016x}.state")
+    identity = runtime_id() or "direct"
+    return os.path.join(root, f"runtime-{identity}.state")
 
 
 def runtime_log_path() -> str:
@@ -70,16 +68,22 @@ def _read_runtime_diagnostics() -> str:
 
 
 def pipe_name() -> str:
-    return f"{_PIPE_PREFIX}{_runtime_digest():016x}"
+    identity = require_runtime_id()
+    return f"{_PIPE_PREFIX}{identity}"
 
 
 def server_command() -> list[str]:
     if getattr(sys, "frozen", False):
-        return [sys.executable, SERVER_ARG]
-    entry = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "sunpack.py"))
-    if os.path.isfile(entry):
-        return [sys.executable, entry, SERVER_ARG]
-    return [sys.executable, "-m", "sunpack", SERVER_ARG]
+        command = [sys.executable, SERVER_ARG]
+    else:
+        entry = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "sunpack.py"))
+        if os.path.isfile(entry):
+            command = [sys.executable, entry, SERVER_ARG]
+        else:
+            command = [sys.executable, "-m", "sunpack", SERVER_ARG]
+    if runtime_id_available():
+        command.append(runtime_id_argument())
+    return command
 
 
 def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
@@ -132,6 +136,14 @@ def _client_terminal_columns(stream) -> int:
 
 
 def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
+    if not runtime_id_available():
+        if payload.get("shutdown"):
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+        return {
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "SunPack persistent process requires the native launcher runtime identity.\n",
+        }
     response = _try_send(payload)
     if response is not None:
         return response
@@ -579,9 +591,15 @@ class _PipeRequestProtocol(asyncio.Protocol):
 async def run_server() -> int:
     if os.name != "nt":
         return 1
+    try:
+        identity = require_runtime_id()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 2
     import secrets
 
     print("[persistent] run_server entered", file=sys.stderr, flush=True)
+    print(f"[persistent] runtime_id={identity}", file=sys.stderr, flush=True)
     print("[persistent] acquiring lock", file=sys.stderr, flush=True)
     lock_stream = _acquire_server_lock()
     print(

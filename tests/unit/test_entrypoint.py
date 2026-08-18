@@ -1,6 +1,7 @@
-import sunpack.entrypoint as entrypoint
+import sunpack.support.entrypoint as entrypoint
 import sunpack.gui.main as gui_main
 import sunpack.support.resources as resources
+from sunpack.support import runtime_identity
 
 
 def test_nuitka_watch_executable_uses_gui_entrypoint(monkeypatch):
@@ -9,6 +10,24 @@ def test_nuitka_watch_executable_uses_gui_entrypoint(monkeypatch):
     monkeypatch.setattr(gui_main, "main", lambda: 17)
 
     assert entrypoint.main() == 17
+
+
+def test_entrypoint_consumes_private_runtime_identity_before_gui(monkeypatch):
+    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\Python310\\python.exe")
+    monkeypatch.setattr(
+        entrypoint.sys,
+        "argv",
+        [r"C:\\package\\sunpack-watch.exe", "--_sunpack-runtime-id=v2-0123456789abcdef", "--once"],
+    )
+
+    def fake_main():
+        assert entrypoint.sys.argv[1:] == ["--once"]
+        assert runtime_identity.runtime_id() == "v2-0123456789abcdef"
+        return 19
+
+    monkeypatch.setattr(gui_main, "main", fake_main)
+
+    assert entrypoint.main() == 19
 
 
 def test_frozen_watch_executable_uses_gui_entrypoint(monkeypatch):

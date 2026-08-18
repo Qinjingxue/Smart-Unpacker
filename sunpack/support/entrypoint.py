@@ -3,6 +3,17 @@ import sys
 
 
 def main() -> int:
+    from sunpack.support.runtime_identity import consume_runtime_id
+
+    try:
+        public_argv = consume_runtime_id(sys.argv[1:])
+    except ValueError as exc:
+        print(f"SunPack startup failed: {exc}", file=sys.stderr, flush=True)
+        return 2
+    # Existing CLI and GUI entry points read sys.argv directly.  Remove the
+    # native launcher's private identity argument before either is entered.
+    sys.argv[:] = [sys.argv[0], *public_argv]
+
     if _is_watch_executable():
         from sunpack.gui.main import main as watch_main
 

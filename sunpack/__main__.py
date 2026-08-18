@@ -1,4 +1,4 @@
-from sunpack.entrypoint import main
+from sunpack.support.entrypoint import main
 
 
 if __name__ == "__main__":

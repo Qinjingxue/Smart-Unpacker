@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import sunpack.filesystem.watcher.service as service_module
 import sunpack.coordinator.watch_runtime as watch_runtime
 import sunpack.cli.commands.watch as watch_command
+from sunpack.support import runtime_identity
 from sunpack.filesystem.watcher.service import (
     CONTROL_RELOAD,
     CONTROL_SCHEDULER_WAKEUP,
@@ -157,10 +158,21 @@ def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):
 def test_watch_cli_elevation_argv_preserves_runtime_flags(monkeypatch):
     monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
     monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
+    monkeypatch.setattr(runtime_identity, "_runtime_id", None)
 
     argv = watch_command._watch_cli_start_argv(SimpleNamespace(once=True, no_tray=True))
 
     assert argv[1:] == ["watch", "start", "--once", "--no-tray"]
+
+
+def test_watch_cli_elevation_argv_forwards_runtime_identity(monkeypatch):
+    monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
+    monkeypatch.setattr(runtime_identity, "_runtime_id", "v2-0123456789abcdef")
+
+    argv = watch_command._watch_cli_start_argv(SimpleNamespace(once=False, no_tray=False))
+
+    assert argv[-1] == "--_sunpack-runtime-id=v2-0123456789abcdef"
 
 
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):

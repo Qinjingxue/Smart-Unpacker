@@ -6,6 +6,11 @@ import struct
 import threading
 
 from sunpack.cli import persistent_process
+from sunpack.support import runtime_identity
+
+
+def _enable_test_runtime_identity(monkeypatch):
+    monkeypatch.setattr(runtime_identity, "_runtime_id", "v2-0123456789abcdef")
 
 
 class _AsyncWriter:
@@ -96,6 +101,7 @@ def test_extract_is_submitted_to_persistent_server_by_default(monkeypatch):
     from sunpack.cli import cli
     from sunpack.cli import runtime_state
 
+    _enable_test_runtime_identity(monkeypatch)
     submitted = []
     monkeypatch.setattr(runtime_state, "server_runtime_active", lambda: False)
     monkeypatch.setattr(persistent_process, "submit_request", lambda argv: submitted.append(argv) or 6)
@@ -108,6 +114,7 @@ def test_all_short_commands_are_submitted_to_persistent_server(monkeypatch):
     from sunpack.cli import cli
     from sunpack.cli import runtime_state
 
+    _enable_test_runtime_identity(monkeypatch)
     submitted = []
     monkeypatch.setattr(runtime_state, "server_runtime_active", lambda: False)
     monkeypatch.setattr(persistent_process, "submit_request", lambda argv: submitted.append(argv) or 0)
@@ -397,6 +404,7 @@ def test_persistent_config_snapshot_reuses_a_source_without_mtime_checks(tmp_pat
 
 
 def test_server_process_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+    _enable_test_runtime_identity(monkeypatch)
     captured = {}
     attempts = iter([None, {"exit_code": 0, "stdout": "", "stderr": ""}])
 
@@ -412,6 +420,7 @@ def test_server_process_starts_in_neutral_working_directory(tmp_path, monkeypatc
 
 
 def test_server_start_failure_reports_runtime_diagnostics(tmp_path, monkeypatch):
+    _enable_test_runtime_identity(monkeypatch)
     monkeypatch.setattr(persistent_process, "_try_send", lambda _payload: None)
     monkeypatch.setattr(persistent_process, "runtime_log_path", lambda: str(tmp_path / "runtime.log"))
 

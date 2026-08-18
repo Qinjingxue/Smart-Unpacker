@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from sunpack.support.runtime_identity import runtime_id, runtime_id_argument
+
 
 WATCH_EXECUTABLE_NAME = "sunpack-watch.exe"
 
@@ -29,6 +31,8 @@ def watch_launch_argv(
             if pythonw.is_file():
                 executable = pythonw
         argv = [str(executable), "-m", "sunpack.gui"]
+    if runtime_id() is not None:
+        argv.append(runtime_id_argument())
     if once:
         argv.append("--once")
     if no_tray:

@@ -708,7 +708,7 @@ function New-NuitkaEntrypoint {
         )
     }
     $content += @(
-        "from sunpack.entrypoint import main",
+        "from sunpack.support.entrypoint import main",
         "raise SystemExit(main())",
         ""
     )

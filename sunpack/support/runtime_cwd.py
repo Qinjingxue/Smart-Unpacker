@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import hashlib
 import os
-import sys
 import tempfile
 from pathlib import Path
+
+from sunpack.support.runtime_identity import runtime_id
 
 
 def runtime_working_directory() -> str:
     """Return a process cwd that cannot pin an input, output, or install directory."""
-    executable_dir = os.path.normcase(os.path.dirname(os.path.abspath(sys.executable)))
-    identity = hashlib.sha256(executable_dir.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    # Packaged processes receive the opaque namespace from the native
+    # launcher. Direct source execution uses a deliberately separate fixed
+    # namespace and never participates in the packaged persistent protocol.
+    identity = runtime_id() or "direct"
     root = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "SunPack" / "runtime-cwd"
     target = root / identity
     target.mkdir(parents=True, exist_ok=True)
