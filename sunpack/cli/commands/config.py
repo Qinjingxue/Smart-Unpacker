@@ -2,7 +2,7 @@ from sunpack.cli.cli_constants import EXIT_USAGE
 from sunpack.cli.cli_parsers import CliHelpFormatter, build_config_output_parser, localize_help_action
 from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.config_validator import validate_config_payload
-from sunpack.config.payload_io import read_config_payload
+from sunpack.cli.persistent_runtime import load_request_config_payload
 from sunpack.support.json_format import to_json_text
 
 COMMAND = "config"
@@ -32,11 +32,11 @@ def register(subparsers, ctx):
 def handle(args, ctx):
     reporter = ctx.reporter
     try:
-        config_path, payload = read_config_payload()
+        config_path, payload = load_request_config_payload(ctx.cwd)
         item = payload
         if args.config_action == "show":
             if not args.json and not args.quiet:
-                print(to_json_text(payload), flush=True)
+                print(to_json_text(payload), file=ctx.stdout, flush=True)
         elif args.config_action == "validate":
             item = validate_config_payload(payload)
             if not item["ok"]:

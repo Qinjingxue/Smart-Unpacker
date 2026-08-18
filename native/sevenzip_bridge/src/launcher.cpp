@@ -1,13 +1,10 @@
 #ifdef _WIN32
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
 
 #include <algorithm>
 #include <array>
-#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
@@ -234,15 +231,14 @@ std::wstring state_path() {
     return std::wstring(local.data(), length) + suffix;
 }
 
-bool parse_state(std::uint16_t& port, std::array<unsigned char, 32>& token) {
+bool parse_state(std::wstring& pipe_name, std::array<unsigned char, 32>& token) {
     std::ifstream stream(state_path());
-    std::string port_text;
+    std::string pipe_text;
     std::string token_text;
-    if (!std::getline(stream, port_text) || !std::getline(stream, token_text) || token_text.size() != 64) return false;
+    if (!std::getline(stream, pipe_text) || !std::getline(stream, token_text) || token_text.size() != 64) return false;
     try {
-        const unsigned long value = std::stoul(port_text);
-        if (value == 0 || value > 65535) return false;
-        port = static_cast<std::uint16_t>(value);
+        pipe_name = wide_utf8(pipe_text);
+        if (pipe_name.rfind(L"\\\\.\\pipe\\SunPack-", 0) != 0) return false;
         for (std::size_t index = 0; index < token.size(); ++index) {
             token[index] = static_cast<unsigned char>(std::stoul(token_text.substr(index * 2, 2), nullptr, 16));
         }
@@ -252,35 +248,56 @@ bool parse_state(std::uint16_t& port, std::array<unsigned char, 32>& token) {
     }
 }
 
-bool send_all(SOCKET socket, const char* data, std::size_t size) {
+HANDLE connect_pipe(const std::wstring& pipe_name) {
+    if (!WaitNamedPipeW(pipe_name.c_str(), 2000)) return INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        HANDLE pipe = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) {
+            DWORD mode = PIPE_READMODE_BYTE;
+            if (SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) return pipe;
+            CloseHandle(pipe);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (GetLastError() != ERROR_PIPE_BUSY || !WaitNamedPipeW(pipe_name.c_str(), 500)) break;
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+bool write_all(HANDLE pipe, const char* data, std::size_t size) {
     while (size != 0) {
-        const int chunk = send(socket, data, static_cast<int>(std::min<std::size_t>(size, INT_MAX)), 0);
-        if (chunk <= 0) return false;
-        data += chunk;
-        size -= static_cast<std::size_t>(chunk);
+        DWORD written = 0;
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(size, 0x7fffffff));
+        if (!WriteFile(pipe, data, chunk, &written, nullptr) || written == 0) return false;
+        data += written;
+        size -= written;
     }
     return true;
 }
 
-bool recv_all(SOCKET socket, char* data, std::size_t size) {
+bool read_all(HANDLE pipe, char* data, std::size_t size) {
     while (size != 0) {
-        const int chunk = recv(socket, data, static_cast<int>(std::min<std::size_t>(size, INT_MAX)), 0);
-        if (chunk <= 0) return false;
-        data += chunk;
-        size -= static_cast<std::size_t>(chunk);
+        DWORD read = 0;
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(size, 0x7fffffff));
+        if (!ReadFile(pipe, data, chunk, &read, nullptr) || read == 0) return false;
+        data += read;
+        size -= read;
     }
     return true;
 }
 
 void append_u32(std::string& target, std::uint32_t value) {
-    value = htonl(value);
-    target.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    target.push_back(static_cast<char>((value >> 24) & 0xff));
+    target.push_back(static_cast<char>((value >> 16) & 0xff));
+    target.push_back(static_cast<char>((value >> 8) & 0xff));
+    target.push_back(static_cast<char>(value & 0xff));
 }
 
 std::uint32_t read_u32(const char* source) {
-    std::uint32_t value = 0;
-    memcpy(&value, source, sizeof(value));
-    return ntohl(value);
+    return (static_cast<std::uint32_t>(static_cast<unsigned char>(source[0])) << 24)
+           | (static_cast<std::uint32_t>(static_cast<unsigned char>(source[1])) << 16)
+           | (static_cast<std::uint32_t>(static_cast<unsigned char>(source[2])) << 8)
+           | static_cast<std::uint32_t>(static_cast<unsigned char>(source[3]));
 }
 
 void write_stream(DWORD handle_id, const std::string& text);
@@ -303,24 +320,17 @@ std::string read_input_line() {
 
 bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code,
              const std::wstring& request_cwd) {
-    std::uint16_t port = 0;
+    std::wstring pipe_name;
     std::array<unsigned char, 32> token{};
-    if (!parse_state(port, token)) return false;
-    SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (socket == INVALID_SOCKET) return false;
-    const DWORD timeout_ms = 2000;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR) {
-        closesocket(socket);
-        return false;
-    }
+    if (!parse_state(pipe_name, token)) return false;
+    HANDLE pipe = connect_pipe(pipe_name);
+    if (pipe == INVALID_HANDLE_VALUE) return false;
 
     const std::string cwd = utf8(request_cwd);
+    if (cwd.size() > kMaxFieldBytes || arguments.size() > 4096) {
+        CloseHandle(pipe);
+        return false;
+    }
     std::string wire(kRequestMagic, 4);
     wire.append(reinterpret_cast<const char*>(token.data()), token.size());
     DWORD console_mode = 0;
@@ -333,32 +343,34 @@ bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exi
     wire.append(cwd);
     for (const auto& argument : arguments) {
         const std::string encoded = utf8(argument);
+        if (encoded.size() > kMaxFieldBytes) {
+            CloseHandle(pipe);
+            return false;
+        }
         append_u32(wire, static_cast<std::uint32_t>(encoded.size()));
         wire.append(encoded);
     }
-    if (!send_all(socket, wire.data(), wire.size())) {
-        closesocket(socket);
+    if (!write_all(pipe, wire.data(), wire.size())) {
+        CloseHandle(pipe);
         return false;
     }
-    const DWORD no_timeout = 0;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
     std::array<char, 4> magic{};
-    if (!recv_all(socket, magic.data(), magic.size()) || memcmp(magic.data(), kStreamMagic, 4) != 0) {
-        closesocket(socket);
+    if (!read_all(pipe, magic.data(), magic.size()) || memcmp(magic.data(), kStreamMagic, 4) != 0) {
+        CloseHandle(pipe);
         return false;
     }
     while (true) {
         std::array<char, 5> header{};
-        if (!recv_all(socket, header.data(), header.size())) break;
+        if (!read_all(pipe, header.data(), header.size())) break;
         const unsigned char kind = static_cast<unsigned char>(header[0]);
         const std::uint32_t size = read_u32(header.data() + 1);
         if (size > kMaxFieldBytes) break;
         std::string payload(size, '\0');
-        if (!recv_all(socket, payload.data(), payload.size())) break;
+        if (!read_all(pipe, payload.data(), payload.size())) break;
         if (kind == 0) {
             if (size != 4) break;
             exit_code = static_cast<std::int32_t>(read_u32(payload.data()));
-            closesocket(socket);
+            CloseHandle(pipe);
             return true;
         }
         if (kind == 1) write_stream(STD_OUTPUT_HANDLE, payload);
@@ -368,10 +380,10 @@ bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exi
             std::string response;
             append_u32(response, static_cast<std::uint32_t>(input.size()));
             response.append(input);
-            if (!send_all(socket, response.data(), response.size())) break;
+            if (!write_all(pipe, response.data(), response.size())) break;
         }
     }
-    closesocket(socket);
+    CloseHandle(pipe);
     return false;
 }
 
@@ -481,7 +493,6 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring invocation_cwd = current_directory();
     const std::wstring launcher_cwd = executable_directory();
     if (!launcher_cwd.empty()) SetCurrentDirectoryW(launcher_cwd.c_str());
-    const bool extract = argc >= 2 && wcscmp(argv[1], L"extract") == 0;
     const bool shutdown_request = argc >= 2 && wcscmp(argv[1], L"--persistent-shutdown") == 0;
     const bool watch_start = argc >= 3 && wcscmp(argv[1], L"watch") == 0 && wcscmp(argv[2], L"start") == 0;
     const bool watch_add = argc >= 3 && wcscmp(argv[1], L"watch") == 0 && wcscmp(argv[2], L"add") == 0;
@@ -496,39 +507,15 @@ int wmain(int argc, wchar_t** argv) {
         if (!spawn_watch(watch_arguments, !once, &code, launcher_cwd)) return 1;
         return once ? static_cast<int>(code) : 0;
     }
-    if (watch_add) {
-        std::vector<std::wstring> forwarded;
-        bool start_after_add = false;
-        for (int index = 1; index < argc; ++index) {
-            if (wcscmp(argv[index], L"--start") == 0) {
-                start_after_add = true;
-            } else {
-                forwarded.emplace_back(argv[index]);
-            }
-        }
-        if (start_after_add) {
-            DWORD code = 1;
-            if (!spawn_runtime(forwarded, false, &code, invocation_cwd)) return 1;
-            if (code != 0) return static_cast<int>(code);
-            return spawn_watch({}, true, nullptr, launcher_cwd) ? 0 : 1;
-        }
-    }
-    if (!extract && !shutdown_request) {
-        std::vector<std::wstring> forwarded;
-        for (int index = 1; index < argc; ++index) forwarded.emplace_back(argv[index]);
-        DWORD code = 1;
-        if (!spawn_runtime(forwarded, false, &code, invocation_cwd)) return 1;
-        return static_cast<int>(code);
-    }
-
-    WSADATA winsock{};
-    if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) return 1;
     const bool shutdown = shutdown_request;
     bool pause = false;
+    bool start_after_add = false;
     std::vector<std::wstring> request_arguments;
-    const int first_request_argument = extract ? 1 : 2;
+    const int first_request_argument = shutdown ? 2 : 1;
     for (int index = first_request_argument; index < argc; ++index) {
-        if (wcscmp(argv[index], L"--pause") == 0) {
+        if (watch_add && wcscmp(argv[index], L"--start") == 0) {
+            start_after_add = true;
+        } else if (wcscmp(argv[index], L"--pause") == 0) {
             pause = true;
         } else {
             request_arguments.emplace_back(argv[index]);
@@ -550,6 +537,9 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (!ok && shutdown) code = 0;
+    if (ok && code == 0 && start_after_add && !spawn_watch({}, true, nullptr, launcher_cwd)) {
+        code = 1;
+    }
     std::string language;
     if (pause || (!ok && !shutdown)) {
         language = cli_language_from_config(launcher_cwd, invocation_cwd);
@@ -563,7 +553,6 @@ int wmain(int argc, wchar_t** argv) {
         DWORD read = 0;
         ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), buffer, 1, &read, nullptr);
     }
-    WSACleanup();
     return code;
 }
 

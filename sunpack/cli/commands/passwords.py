@@ -2,7 +2,7 @@ from sunpack.cli.cli_constants import EXIT_USAGE
 from sunpack.cli.cli_parsers import CliHelpFormatter, build_json_parser, build_password_parser, localize_help_action
 from sunpack.cli.cli_runtime import build_password_summary, collect_clipboard_passwords, collect_cli_passwords, password_summary_item
 from sunpack.cli.cli_types import CliCommandResult
-from sunpack.config.loader import load_config
+from sunpack.cli.persistent_runtime import load_request_config
 
 COMMAND = "passwords"
 ORDER = 40
@@ -27,7 +27,7 @@ def handle(args, ctx):
             prompt_text=ctx.t("cli.password_prompt"),
             input_prompt=ctx.t("cli.password_input_prompt"),
         )
-        config = load_config()
+        config = load_request_config(ctx.cwd)
         clipboard_passwords = collect_clipboard_passwords(config)
         password_summary = build_password_summary(
             passwords,

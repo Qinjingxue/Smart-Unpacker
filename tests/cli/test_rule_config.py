@@ -116,6 +116,24 @@ def test_write_manifest_override_enables_extraction_manifest_files():
     assert config["extraction"]["write_progress_manifest"] is True
 
 
+def test_output_dir_override_is_relative_to_the_request_cwd(tmp_path):
+    class Args:
+        worker_profile = None
+        recursive_extract = None
+        archive_cleanup_mode = None
+        output_dir = "output"
+        flatten_single_directory = None
+        write_progress_manifest = False
+        allow_partial = False
+        directory_passwords = None
+
+    config = {}
+
+    apply_runtime_config_overrides(config, Args(), base_dir=str(tmp_path))
+
+    assert config["output"]["root"] == str(tmp_path / "output")
+
+
 def test_effective_config_includes_thresholds_native_worker_and_rule_pipeline():
     config = _payload()
     config["filesystem"] = {

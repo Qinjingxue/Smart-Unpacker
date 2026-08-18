@@ -21,7 +21,7 @@ def first_existing_path(paths: list[Path]) -> Path | None:
     return None
 
 
-def candidate_resource_roots() -> list[Path]:
+def candidate_resource_roots(request_cwd: str | Path | None = None) -> list[Path]:
     roots: list[Path] = []
 
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
@@ -31,17 +31,18 @@ def candidate_resource_roots() -> list[Path]:
             roots.append(Path(meipass).resolve())
 
     module_root = Path(__file__).resolve().parents[2]
+    invocation_root = Path(request_cwd).resolve() if request_cwd is not None else Path.cwd().resolve()
     roots.extend([
         module_root,
-        Path.cwd().resolve(),
-        Path.cwd().resolve() / "sunpack-2",
+        invocation_root,
+        invocation_root / "sunpack-2",
     ])
 
     return dedupe_paths(roots)
 
 
-def candidate_resource_paths(filename: str) -> list[Path]:
-    return [root / filename for root in candidate_resource_roots()]
+def candidate_resource_paths(filename: str, request_cwd: str | Path | None = None) -> list[Path]:
+    return [root / filename for root in candidate_resource_roots(request_cwd)]
 
 
 def tool_dir_candidates() -> tuple[Path, ...]:

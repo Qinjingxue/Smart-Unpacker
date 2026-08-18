@@ -8,7 +8,7 @@ from sunpack.support.runtime_cwd import runtime_working_directory
 from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
 from sunpack.cli.cli_types import CliCommandResult
-from sunpack.config.loader import load_config
+from sunpack.cli.persistent_runtime import load_request_config
 from sunpack.filesystem.watcher.service import (
     add_watch_roots,
     is_watch_lock_active,
@@ -62,17 +62,17 @@ async def handle(args, ctx):
         if action == "start":
             return await _handle_start(args, ctx)
         if action == "add":
-            return _handle_add(args)
+            return _handle_add(args, ctx)
         if action == "remove":
-            return _handle_remove(args)
+            return _handle_remove(args, ctx)
         if action == "list":
             return _handle_list()
         if action == "reload":
-            return _handle_reload()
+            return _handle_reload(ctx)
         if action == "stop":
-            return _handle_stop()
+            return _handle_stop(ctx)
         if action == "status":
-            return _handle_status()
+            return _handle_status(ctx)
         if action == "startup":
             return _handle_startup(args)
     except Exception as exc:
@@ -103,9 +103,9 @@ async def _handle_start(args, ctx):
     return code, CliCommandResult(command=COMMAND, inputs={"action": "start"}, summary={"exit_code": code})
 
 
-def _handle_add(args):
+def _handle_add(args, ctx):
     roots_path, added = add_watch_roots(list(args.paths or []))
-    config = load_config()
+    config = load_request_config(ctx.cwd)
     reload_event = signal_reload(config)
     return 0, CliCommandResult(
         command=COMMAND,
@@ -120,9 +120,9 @@ def _handle_add(args):
     )
 
 
-def _handle_remove(args):
+def _handle_remove(args, ctx):
     roots_path, removed = remove_watch_roots(list(args.paths or []))
-    reload_event = signal_reload(load_config())
+    reload_event = signal_reload(load_request_config(ctx.cwd))
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "remove", "paths": list(args.paths or [])},
@@ -141,18 +141,18 @@ def _handle_list():
     )
 
 
-def _handle_reload():
-    path = signal_reload(load_config())
+def _handle_reload(ctx):
+    path = signal_reload(load_request_config(ctx.cwd))
     return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary={"reload_event": path})
 
 
-def _handle_stop():
-    path = signal_stop(load_config())
+def _handle_stop(ctx):
+    path = signal_stop(load_request_config(ctx.cwd))
     return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary={"stop_event": path})
 
 
-def _handle_status():
-    config = load_config()
+def _handle_status(ctx):
+    config = load_request_config(ctx.cwd)
     _, roots = list_watch_roots()
     running = _watch_running(config)
     return 0, CliCommandResult(

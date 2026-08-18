@@ -104,6 +104,24 @@ def test_extract_is_submitted_to_persistent_server_by_default(monkeypatch):
     assert submitted == [["extract", "sample.zip"]]
 
 
+def test_all_short_commands_are_submitted_to_persistent_server(monkeypatch):
+    from sunpack.cli import cli
+    from sunpack.cli import runtime_state
+
+    submitted = []
+    monkeypatch.setattr(runtime_state, "server_runtime_active", lambda: False)
+    monkeypatch.setattr(persistent_process, "submit_request", lambda argv: submitted.append(argv) or 0)
+
+    assert cli.main(["scan", "sample.zip"]) == 0
+    assert cli.main(["watch", "status"]) == 0
+    assert cli.main(["config", "validate"]) == 0
+    assert submitted == [
+        ["scan", "sample.zip"],
+        ["watch", "status"],
+        ["config", "validate"],
+    ]
+
+
 def test_extract_help_stays_local_and_does_not_start_server(monkeypatch):
     from sunpack.cli import cli
 
@@ -181,6 +199,21 @@ def test_streaming_request_strips_terminal_columns_metadata(monkeypatch):
     assert asyncio.run(scenario()) == 0
 
 
+def test_streaming_request_returns_help_through_the_request_stream():
+    async def scenario():
+        writer = _AsyncWriter()
+        code = await persistent_process._execute_streaming_request_async(
+            {"argv": ["--help"]},
+            asyncio.StreamReader(),
+            writer,
+        )
+        return code, bytes(writer.wire)
+
+    code, wire = asyncio.run(scenario())
+    assert code == 0
+    assert b"extract" in wire
+
+
 def test_streaming_request_round_trips_interactive_input(monkeypatch):
     from sunpack.cli import cli
 
@@ -241,15 +274,114 @@ def test_server_idle_shutdown_requires_completed_request_and_idle_runtime():
 def test_state_cleanup_only_removes_owned_server_state(tmp_path, monkeypatch):
     state = tmp_path / "runtime.state"
     token = b"a" * 32
+    name = r"\\.\pipe\SunPack-test"
     monkeypatch.setattr(persistent_process, "state_path", lambda: str(state))
 
-    persistent_process._write_state(1234, token)
-    assert not persistent_process._remove_state_if_owned(9999, token)
+    persistent_process._write_state(name, token)
+    assert not persistent_process._remove_state_if_owned(r"\\.\pipe\SunPack-other", token)
     assert state.exists()
-    assert not persistent_process._remove_state_if_owned(1234, b"b" * 32)
+    assert not persistent_process._remove_state_if_owned(name, b"b" * 32)
     assert state.exists()
-    assert persistent_process._remove_state_if_owned(1234, token)
+    assert persistent_process._remove_state_if_owned(name, token)
     assert not state.exists()
+
+
+def test_protocol_incrementally_parses_a_fragmented_request(monkeypatch):
+    captured = {}
+    completed = []
+
+    class Transport:
+        def __init__(self):
+            self.wire = bytearray()
+            self.closed = False
+
+        def write(self, data):
+            self.wire.extend(data)
+
+        def get_write_buffer_size(self):
+            return 0
+
+        def close(self):
+            self.closed = True
+
+    async def fake_execute(payload, _connection):
+        captured.update(payload)
+        return 9
+
+    monkeypatch.setattr(persistent_process, "_execute_streaming_request_async", fake_execute)
+    token = b"t" * 32
+
+    async def scenario():
+        protocol = persistent_process._PipeRequestProtocol(
+            token,
+            on_connected=lambda: None,
+            on_closed=lambda: None,
+            on_completed=lambda: completed.append(True),
+            on_shutdown=lambda: None,
+        )
+        transport = Transport()
+        protocol.connection_made(transport)
+        cwd = b"C:\\work"
+        argv = [b"scan", b"archive.zip"]
+        wire = bytearray(persistent_process._REQUEST_MAGIC)
+        wire.extend(token)
+        wire.extend(struct.pack("!III", 6, len(cwd), len(argv)))
+        wire.extend(cwd)
+        for item in argv:
+            wire.extend(struct.pack("!I", len(item)))
+            wire.extend(item)
+        for index in range(0, len(wire), 3):
+            protocol.data_received(bytes(wire[index:index + 3]))
+        assert protocol._request_task is not None
+        await protocol._request_task
+        return bytes(transport.wire), transport.closed
+
+    wire, closed = asyncio.run(scenario())
+    assert captured == {
+        "argv": ["scan", "archive.zip"],
+        "cwd": "C:\\work",
+        "shutdown": False,
+        "stdout_tty": True,
+        "stdin_tty": True,
+    }
+    assert wire == persistent_process._STREAM_MAGIC + struct.pack("!BIi", 0, 4, 9)
+    assert completed == [True]
+    assert closed
+
+
+def test_persistent_config_snapshot_reuses_a_source_without_mtime_checks(tmp_path, monkeypatch):
+    from sunpack.cli import persistent_runtime
+
+    calls = []
+    sources = {
+        "first": (str(tmp_path / "first.json"), None, None),
+        "second": (str(tmp_path / "second.json"), None, None),
+    }
+
+    monkeypatch.setattr(persistent_runtime, "config_source_key", lambda cwd=None: sources[str(cwd)])
+    monkeypatch.setattr(
+        persistent_runtime,
+        "load_effective_config_payload",
+        lambda cwd=None: (tmp_path / f"{cwd}.json", {"cli": {"language": str(cwd)}}),
+    )
+
+    def load_config(cwd=None):
+        calls.append(str(cwd))
+        return {"cli": {"language": str(cwd)}, "output": {"root": str(cwd)}}
+
+    monkeypatch.setattr(persistent_runtime, "load_config", load_config)
+
+    async def scenario():
+        await persistent_runtime.close_persistent_runtime()
+        persistent_runtime.enable_persistent_runtime()
+        first = persistent_runtime.load_request_config("first")
+        first["cli"]["language"] = "mutated"
+        assert persistent_runtime.load_request_config("first")["cli"]["language"] == "first"
+        assert persistent_runtime.load_request_config("second")["cli"]["language"] == "second"
+        await persistent_runtime.close_persistent_runtime()
+
+    asyncio.run(scenario())
+    assert calls == ["first", "second"]
 
 
 def test_server_process_starts_in_neutral_working_directory(tmp_path, monkeypatch):
@@ -287,7 +419,7 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
             events.append(("close", graceful))
 
     monkeypatch.setattr(persistent_runtime, "PipelineEngine", FakeEngine)
-    monkeypatch.setattr(persistent_runtime, "config_cache_token", lambda: ("same",))
+    monkeypatch.setattr(persistent_runtime, "config_source_key", lambda: ("same", None, None))
     persistent_runtime.enable_persistent_runtime()
     first = {
         "output": {"root": "one", "common_root": "a"},

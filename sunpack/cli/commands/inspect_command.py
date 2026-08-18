@@ -9,7 +9,7 @@ from sunpack.cli.cli_runtime import (
 from sunpack.cli.cli_types import CliCommandResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.config.loader import load_config
+from sunpack.cli.persistent_runtime import load_request_config
 from sunpack.analysis import ArchiveAnalyzer
 from sunpack.analysis.request import AnalysisRequest
 from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
@@ -41,7 +41,7 @@ def handle(args, ctx):
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
 
-    config = load_config()
+    config = load_request_config(ctx.cwd)
     effective_config = build_effective_config(config)
     detection_options = DetectionOptions(deep_scan=bool(args.deep_detect))
     results = DetectionDiagnostics(config, detection_options).collect(target_paths)

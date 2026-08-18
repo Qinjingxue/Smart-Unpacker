@@ -36,7 +36,11 @@ def test_collect_clipboard_passwords_skips_when_config_disabled(monkeypatch):
 
 
 def test_passwords_command_includes_config_enabled_clipboard_password(monkeypatch):
-    monkeypatch.setattr(passwords_command, "load_config", lambda: {"passwords": {"clipboard_passwords_enabled": True}})
+    monkeypatch.setattr(
+        passwords_command,
+        "load_request_config",
+        lambda _cwd: {"passwords": {"clipboard_passwords_enabled": True}},
+    )
     monkeypatch.setattr(cli_runtime, "read_clipboard_passwords", lambda: ["clip-secret"])
 
     code, result = passwords_command.handle(_password_args(), CliContext(language="en"))

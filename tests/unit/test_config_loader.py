@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -71,6 +72,30 @@ def test_load_config_merges_simple_config_over_advanced_config(tmp_path, monkeyp
     assert config["filesystem"]["directory_scan_mode"] == "recursive"
     assert config["filesystem"]["scan_filters"][0]["range"] == "r >= 2 MB"
     assert config["performance"]["worker"]["max_task_seconds"] == 1800
+
+
+def test_load_config_uses_explicit_request_cwd(tmp_path, monkeypatch):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    _write_json(first_root / "sunpack_advanced_config.json", _advanced_payload())
+    _write_json(second_root / "sunpack_advanced_config.json", _advanced_payload())
+    _write_json(first_root / "sunpack_config.json", {"cli": {"language": "zh"}})
+    _write_json(second_root / "sunpack_config.json", {"cli": {"language": "en"}})
+
+    monkeypatch.setattr(
+        loader,
+        "candidate_resource_paths",
+        lambda filename, request_cwd=None: [Path(request_cwd) / filename],
+    )
+    loader.clear_config_cache()
+    try:
+        assert loader.load_config(first_root)["cli"]["language"] == "zh"
+        assert loader.load_config(second_root)["cli"]["language"] == "en"
+        assert loader.config_source_key(first_root) != loader.config_source_key(second_root)
+    finally:
+        loader.clear_config_cache()
 
 
 def test_load_config_requires_external_verification_config(tmp_path, monkeypatch):

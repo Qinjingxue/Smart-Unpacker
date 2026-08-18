@@ -130,10 +130,13 @@ def test_watch_runtime_marks_only_its_worker_config_as_background(monkeypatch):
 
 def test_watch_add_reports_start_request_without_creating_watch_process(tmp_path, monkeypatch):
     monkeypatch.setattr(watch_command, "add_watch_roots", lambda paths: (tmp_path / "roots.txt", paths))
-    monkeypatch.setattr(watch_command, "load_config", lambda: {})
+    monkeypatch.setattr(watch_command, "load_request_config", lambda cwd: {})
     monkeypatch.setattr(watch_command, "signal_reload", lambda config: tmp_path / "reload")
 
-    code, result = watch_command._handle_add(SimpleNamespace(paths=["C:/downloads"], start=True))
+    code, result = watch_command._handle_add(
+        SimpleNamespace(paths=["C:/downloads"], start=True),
+        SimpleNamespace(cwd=str(tmp_path)),
+    )
 
     assert code == 0
     assert result.summary["start_requested"] is True

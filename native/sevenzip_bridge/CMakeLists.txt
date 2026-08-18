@@ -129,7 +129,7 @@ if(WIN32)
         # launcher.cpp contains UTF-8 string literals (localized messages).
         target_compile_options(sunpack_launcher PRIVATE /utf-8)
     endif()
-    target_link_libraries(sunpack_launcher PRIVATE Ws2_32 Shell32)
+    target_link_libraries(sunpack_launcher PRIVATE Shell32)
 endif()
 
 enable_testing()

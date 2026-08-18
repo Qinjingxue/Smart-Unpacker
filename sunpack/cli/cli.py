@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextvars
 import inspect
 import os
 import sys
@@ -19,6 +20,17 @@ from sunpack.cli.cli_types import CliCommandResult
 
 CURRENT_CLI_LANG = DEFAULT_CLI_LANG
 _PARSER_CACHE: dict[str, argparse.ArgumentParser] = {}
+_PARSER_STDOUT: contextvars.ContextVar = contextvars.ContextVar("sunpack_parser_stdout", default=None)
+_PARSER_STDERR: contextvars.ContextVar = contextvars.ContextVar("sunpack_parser_stderr", default=None)
+
+
+class _ContextArgumentParser(argparse.ArgumentParser):
+    def _print_message(self, message, file=None):
+        if file is sys.stderr:
+            file = _PARSER_STDERR.get() or file
+        elif file is None or file is sys.stdout:
+            file = _PARSER_STDOUT.get() or file
+        super()._print_message(message, file)
 
 
 def configure_stdio_encoding():
@@ -52,7 +64,7 @@ def build_cli_parser(ctx: CliContext | None = None, command: str | None = None) 
     modules = discover_command_modules(command)
     ctx.commands = command_map(modules)
 
-    parser = argparse.ArgumentParser(
+    parser = _ContextArgumentParser(
         description=ctx.t("cli.description"),
         usage=ctx.t("cli.usage"),
         epilog=(
@@ -64,7 +76,7 @@ def build_cli_parser(ctx: CliContext | None = None, command: str | None = None) 
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
-    subparsers = parser.add_subparsers(dest="command", required=True, parser_class=argparse.ArgumentParser)
+    subparsers = parser.add_subparsers(dest="command", required=True, parser_class=_ContextArgumentParser)
     for module in modules:
         module.register(subparsers, ctx)
     return parser
@@ -129,7 +141,7 @@ async def async_main(
         from sunpack.cli.persistent_process import run_server, submit_request
 
         return await run_server() if argv[0] == "--persistent-server" else submit_request([], shutdown=True)
-    if argv and argv[0] == "extract" and not any(item in {"-h", "--help"} for item in argv[1:]):
+    if argv and _should_submit_to_persistent_server(argv):
         from sunpack.cli.runtime_state import server_runtime_active
 
         if not server_runtime_active():
@@ -138,10 +150,11 @@ async def async_main(
             return submit_request(list(argv))
 
     argv = preprocess_sys_argv(argv)
-    CURRENT_CLI_LANG = load_cli_language_from_config()
+    request_cwd = os.path.abspath(cwd or os.getcwd())
+    CURRENT_CLI_LANG = load_cli_language_from_config(request_cwd)
     ctx = CliContext(
         language=CURRENT_CLI_LANG,
-        cwd=os.path.abspath(cwd or os.getcwd()),
+        cwd=request_cwd,
         stdin=stdin if stdin is not None else sys.stdin,
         stdout=stdout if stdout is not None else sys.stdout,
         stderr=stderr if stderr is not None else sys.stderr,
@@ -154,13 +167,19 @@ async def async_main(
         argv[0] if argv and argv[0] in {"extract", "scan"} else None
     )
     parser = cached_cli_parser(ctx, command=selected_command)
-    if not argv:
-        parser.print_help()
-        return EXIT_OK
+    stdout_token = _PARSER_STDOUT.set(ctx.stdout)
+    stderr_token = _PARSER_STDERR.set(ctx.stderr)
     try:
-        args = parser.parse_args(argv)
-    except SystemExit as exc:
-        return int(exc.code)
+        if not argv:
+            parser.print_help()
+            return EXIT_OK
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+    finally:
+        _PARSER_STDOUT.reset(stdout_token)
+        _PARSER_STDERR.reset(stderr_token)
 
     args.json = bool(getattr(args, "json", False) or "-j" in argv or "--json" in argv)
     args.quiet = bool(getattr(args, "quiet", False) or "-q" in argv or "--quiet" in argv)
@@ -202,6 +221,14 @@ async def async_main(
     reporter.emit_result(result)
     await maybe_pause(args, ctx, exit_code, result)
     return exit_code
+
+
+def _should_submit_to_persistent_server(argv: list[str]) -> bool:
+    if not argv or any(item in {"-h", "--help"} for item in argv):
+        return False
+    # The watch service itself is long-lived and continues to have its own
+    # process lifecycle. Its management subcommands are short requests.
+    return not (len(argv) >= 2 and argv[0] == "watch" and argv[1] == "start")
 
 
 if __name__ == "__main__":

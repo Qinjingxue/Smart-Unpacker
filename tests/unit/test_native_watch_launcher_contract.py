@@ -22,6 +22,18 @@ def test_native_launcher_starts_watch_only_after_watch_add_succeeds():
 
     assert 'wcscmp(argv[2], L"add") == 0' in source
     assert 'wcscmp(argv[index], L"--start") == 0' in source
-    assert "spawn_runtime(forwarded, false, &code, invocation_cwd)" in source
-    assert "if (code != 0) return static_cast<int>(code);" in source
+    assert "request(request_arguments, shutdown, code, invocation_cwd)" in source
+    assert "if (ok && code == 0 && start_after_add && !spawn_watch" in source
     assert "spawn_watch({}, true, nullptr, launcher_cwd)" in source
+    assert "spawn_runtime(forwarded, false, &code, invocation_cwd)" not in source
+
+
+def test_native_launcher_uses_named_pipes_for_all_short_commands():
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "native" / "sevenzip_bridge" / "src" / "launcher.cpp").read_text(encoding="utf-8")
+    cmake = (root / "native" / "sevenzip_bridge" / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    assert "CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE" in source
+    assert "WaitNamedPipeW" in source
+    assert "WSAStartup" not in source
+    assert "Ws2_32" not in cmake

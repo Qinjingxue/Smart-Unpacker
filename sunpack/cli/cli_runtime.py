@@ -190,7 +190,7 @@ def build_password_summary(
     )
 
 
-def apply_runtime_config_overrides(config: dict, args) -> dict:
+def apply_runtime_config_overrides(config: dict, args, *, base_dir: str | None = None) -> dict:
     """Apply CLI flag overrides as one config layer, then report the summary keys."""
     overrides = {}
     payload: dict[str, Any] = {}
@@ -207,7 +207,9 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
             ("post_extract", "archive_cleanup_mode"), args.archive_cleanup_mode,
         )
     output_dir = getattr(args, "output_dir", None)
-    output_root = os.path.abspath(os.path.normpath(output_dir or "."))
+    if output_dir and not os.path.isabs(output_dir) and base_dir is not None:
+        output_dir = os.path.join(base_dir, output_dir)
+    output_root = os.path.abspath(os.path.normpath(output_dir or base_dir or "."))
     overrides["output_dir"] = output_root
     section("output", {})["root"] = output_root
     if getattr(args, "flatten_single_directory", None) is not None:

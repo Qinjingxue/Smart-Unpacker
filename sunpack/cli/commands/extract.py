@@ -21,8 +21,8 @@ from sunpack.cli.cli_runtime import (
     result_for_missing,
 )
 from sunpack.cli.cli_types import CliCommandResult
-from sunpack.config.loader import load_config
-from sunpack.cli.persistent_runtime import pipeline_engine
+from sunpack.cli.persistent_runtime import load_request_config, pipeline_engine, request_config_source_key
+from sunpack.cli.runtime_state import server_runtime_active
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
 from sunpack.support.collections import dedupe_values
@@ -51,8 +51,8 @@ async def handle(args, ctx):
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
 
-    config = load_config()
-    config_overrides = apply_runtime_config_overrides(config, args)
+    config = load_request_config(ctx.cwd)
+    config_overrides = apply_runtime_config_overrides(config, args, base_dir=ctx.cwd)
     try:
         passwords = await collect_cli_passwords_async(
             args,
@@ -89,10 +89,15 @@ async def handle(args, ctx):
         verbose=bool(getattr(reporter, "verbose", False)),
     )
     deep_detect = bool(getattr(args, "deep_detect", False))
+    engine_options = {"source_key": request_config_source_key(ctx.cwd)} if server_runtime_active() else {}
     engine_context = (
-        pipeline_engine(run_config, detection_options=DetectionOptions(deep_scan=True))
+        pipeline_engine(
+            run_config,
+            detection_options=DetectionOptions(deep_scan=True),
+            **engine_options,
+        )
         if deep_detect
-        else pipeline_engine(run_config)
+        else pipeline_engine(run_config, **engine_options)
     )
     async with engine_context as engine:
         while True:

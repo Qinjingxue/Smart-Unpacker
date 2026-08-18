@@ -35,13 +35,20 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _candidate_config_paths(filename: str) -> list[Path]:
+def _candidate_config_paths(filename: str, request_cwd: str | Path | None = None) -> list[Path]:
     project_root = Path(__file__).resolve().parents[2]
-    return dedupe_paths(candidate_resource_paths(filename) + [project_root / filename, Path.cwd() / filename])
+    invocation_root = Path(request_cwd).resolve() if request_cwd is not None else Path.cwd()
+    return dedupe_paths(
+        candidate_resource_paths(filename, request_cwd=request_cwd)
+        + [project_root / filename, invocation_root / filename, invocation_root / "sunpack-2" / filename]
+    )
 
 
-def _first_existing_config(filename: str) -> Path | None:
-    return first_existing_path(_candidate_config_paths(filename))
+def _first_existing_config(filename: str, request_cwd: str | Path | None = None) -> Path | None:
+    # Preserve the one-argument call for existing integrations that customize
+    # the candidate list in tests or embedding environments.
+    paths = _candidate_config_paths(filename) if request_cwd is None else _candidate_config_paths(filename, request_cwd)
+    return first_existing_path(paths)
 
 
 def _known_config_sections() -> frozenset[str]:
@@ -177,17 +184,22 @@ def apply_config_overrides(config: dict[str, Any], overrides: dict[str, Any]) ->
     return config
 
 
-def _load_layered_config() -> tuple[Path, dict[str, Any]]:
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
-    return _load_layered_config_paths(simple_path, advanced_path)
+def _load_layered_config(request_cwd: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
+    return _load_layered_config_paths(simple_path, advanced_path, request_cwd=request_cwd)
 
 
-def _load_layered_config_paths(simple_path: Path | None, advanced_path: Path | None) -> tuple[Path, dict[str, Any]]:
+def _load_layered_config_paths(
+    simple_path: Path | None,
+    advanced_path: Path | None,
+    *,
+    request_cwd: str | Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
     if simple_path is None and advanced_path is None:
         searched = [
-            *[str(path) for path in _candidate_config_paths(SIMPLE_CONFIG_FILENAME)],
-            *[str(path) for path in _candidate_config_paths(ADVANCED_CONFIG_FILENAME)],
+            *[str(path) for path in (_candidate_config_paths(SIMPLE_CONFIG_FILENAME) if request_cwd is None else _candidate_config_paths(SIMPLE_CONFIG_FILENAME, request_cwd))],
+            *[str(path) for path in (_candidate_config_paths(ADVANCED_CONFIG_FILENAME) if request_cwd is None else _candidate_config_paths(ADVANCED_CONFIG_FILENAME, request_cwd))],
         ]
         raise ConfigError(f"Missing required {SIMPLE_CONFIG_FILENAME} or {ADVANCED_CONFIG_FILENAME}. Searched: {', '.join(searched)}")
 
@@ -199,11 +211,11 @@ def _load_layered_config_paths(simple_path: Path | None, advanced_path: Path | N
     return (simple_path or advanced_path), apply_config_overrides(config, overrides)
 
 
-def load_raw_config_payload() -> tuple[Path, dict[str, Any]]:
+def load_raw_config_payload(request_cwd: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
     """Load the merged external payload without schema initialization or validation."""
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
     signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         if (
@@ -212,7 +224,7 @@ def load_raw_config_payload() -> tuple[Path, dict[str, Any]]:
             and _CONFIG_CACHE_PATH is not None
         ):
             return _CONFIG_CACHE_PATH, copy.deepcopy(_CONFIG_CACHE_RAW_VALUE)
-    config_path, config = _load_layered_config_paths(simple_path, advanced_path)
+    config_path, config = _load_layered_config_paths(simple_path, advanced_path, request_cwd=request_cwd)
     with _CONFIG_CACHE_LOCK:
         _CONFIG_CACHE_SIGNATURE = signature
         _CONFIG_CACHE_VALUE = None
@@ -231,11 +243,30 @@ def _config_file_signature(path: Path | None) -> tuple[str, int, int] | None:
     return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
 
 
-def config_cache_token() -> tuple[Any, ...]:
+def config_cache_token(request_cwd: str | Path | None = None) -> tuple[Any, ...]:
     """Return the selected config files and mtimes used for cache invalidation."""
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
     return (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
+
+
+def _config_source_path(path: Path | None) -> str | None:
+    return str(path.resolve()) if path is not None else None
+
+
+def _override_source_identity() -> str | None:
+    raw = os.environ.get(OVERRIDES_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return f"file:{path.resolve()}" if path.is_file() else f"inline:{raw}"
+
+
+def config_source_key(request_cwd: str | Path | None = None) -> tuple[str | None, str | None, str | None]:
+    """Return the config source identity without any mtime-based invalidation."""
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
+    return (_config_source_path(simple_path), _config_source_path(advanced_path), _override_source_identity())
 
 
 def clear_config_cache() -> None:
@@ -303,18 +334,18 @@ def _validate_pipeline(config: dict[str, Any]):
                 raise ConfigError(f"detection.rule_pipeline.{layer}[{index}] must declare a rule name")
 
 
-def load_config() -> dict[str, Any]:
+def load_config(request_cwd: str | Path | None = None) -> dict[str, Any]:
     """Read the external configuration required to run the pipeline."""
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
     signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         if signature == _CONFIG_CACHE_SIGNATURE and _CONFIG_CACHE_VALUE is not None:
             return copy.deepcopy(_CONFIG_CACHE_VALUE)
         cached_raw = copy.deepcopy(_CONFIG_CACHE_RAW_VALUE) if signature == _CONFIG_CACHE_SIGNATURE else None
     if cached_raw is None:
-        config_path, config = _load_layered_config_paths(simple_path, advanced_path)
+        config_path, config = _load_layered_config_paths(simple_path, advanced_path, request_cwd=request_cwd)
     else:
         config_path, config = (_CONFIG_CACHE_PATH or simple_path or advanced_path), cached_raw
     _validate_pipeline(config)
@@ -331,10 +362,10 @@ def load_config() -> dict[str, Any]:
     return normalized
 
 
-def load_effective_config_payload() -> tuple[Path, dict[str, Any]]:
+def load_effective_config_payload(request_cwd: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
     global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
     signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path), _override_signature())
     with _CONFIG_CACHE_LOCK:
         cached_raw = copy.deepcopy(_CONFIG_CACHE_RAW_VALUE) if (
@@ -343,7 +374,7 @@ def load_effective_config_payload() -> tuple[Path, dict[str, Any]]:
             and _CONFIG_CACHE_PATH is not None
         ) else None
     if cached_raw is None:
-        config_path, config = _load_layered_config_paths(simple_path, advanced_path)
+        config_path, config = _load_layered_config_paths(simple_path, advanced_path, request_cwd=request_cwd)
     else:
         config_path, config = (_CONFIG_CACHE_PATH or simple_path or advanced_path), cached_raw
     _validate_pipeline(config)
