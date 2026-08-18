@@ -34,6 +34,13 @@ def test_runtime_id_argument_is_opaque_and_validated(monkeypatch):
     assert runtime_identity.runtime_id_argument() == "--_sunpack-runtime-id=v2-0123456789abcdef"
 
 
+def test_source_bootstrap_uses_reserved_namespace_without_path_calculation():
+    assert runtime_identity.ensure_source_runtime_id(["extract"]) == [
+        "extract",
+        "--_sunpack-runtime-id=v2-0000000000000000",
+    ]
+
+
 def test_server_command_forwards_the_launcher_identity(monkeypatch):
     from sunpack.cli import persistent_process
 

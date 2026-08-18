@@ -11,6 +11,9 @@ import re
 
 RUNTIME_ID_ARGUMENT_PREFIX = "--_sunpack-runtime-id="
 RUNTIME_ID_PATTERN = re.compile(r"v2-[0-9a-f]{16}\Z")
+# Source checkouts have no native install directory.  They use one explicit
+# development namespace instead of deriving an identity from Python paths.
+SOURCE_RUNTIME_ID = "v2-0000000000000000"
 
 _runtime_id: str | None = None
 
@@ -68,3 +71,10 @@ def runtime_id_argument(value: str | None = None) -> str:
     if not is_valid_runtime_id(candidate):
         raise ValueError(f"invalid SunPack runtime identity: {candidate!r}")
     return RUNTIME_ID_ARGUMENT_PREFIX + candidate
+
+
+def ensure_source_runtime_id(argv: list[str]) -> list[str]:
+    """Attach the reserved source namespace to a source bootstrap argv."""
+    if any(item.startswith(RUNTIME_ID_ARGUMENT_PREFIX) for item in argv):
+        return list(argv)
+    return [*argv, runtime_id_argument(SOURCE_RUNTIME_ID)]
