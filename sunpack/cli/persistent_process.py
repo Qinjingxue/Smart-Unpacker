@@ -581,16 +581,25 @@ async def run_server() -> int:
         return 1
     import secrets
 
+    print("[persistent] run_server entered", file=sys.stderr, flush=True)
+    print("[persistent] acquiring lock", file=sys.stderr, flush=True)
     lock_stream = _acquire_server_lock()
+    print(
+        f"[persistent] lock result={lock_stream is not None}",
+        file=sys.stderr,
+        flush=True,
+    )
     if lock_stream is None:
         return 0
     token = secrets.token_bytes(32)
+    print("[persistent] importing persistent_runtime", file=sys.stderr, flush=True)
     from sunpack.cli.persistent_runtime import (
         close_persistent_runtime,
         enable_persistent_runtime,
         persistent_runtime_is_idle,
         persistent_server_idle_seconds,
     )
+    print("[persistent] persistent_runtime imported", file=sys.stderr, flush=True)
 
     enable_persistent_runtime()
     shutdown = asyncio.Event()
@@ -607,8 +616,14 @@ async def run_server() -> int:
         state["last_completed"] = time.monotonic()
 
     loop = asyncio.get_running_loop()
+    print(
+        f"[persistent] loop={type(loop)!r}",
+        file=sys.stderr,
+        flush=True,
+    )
     start_serving_pipe = getattr(loop, "start_serving_pipe", None)
     if start_serving_pipe is None:
+        print("[persistent] start_serving_pipe unavailable", file=sys.stderr, flush=True)
         await close_persistent_runtime()
         lock_stream.close()
         return 1
@@ -624,8 +639,11 @@ async def run_server() -> int:
             on_shutdown=shutdown.set,
         )
 
+    print("[persistent] before start_serving_pipe", file=sys.stderr, flush=True)
     servers = await start_serving_pipe(protocol_factory, name)
+    print("[persistent] pipe created", file=sys.stderr, flush=True)
     _write_state(name, token)
+    print("[persistent] state written", file=sys.stderr, flush=True)
 
     async def monitor_idle() -> None:
         while not shutdown.is_set():

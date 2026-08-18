@@ -37,3 +37,12 @@ def test_native_launcher_uses_named_pipes_for_all_short_commands():
     assert "WaitNamedPipeW" in source
     assert "WSAStartup" not in source
     assert "Ws2_32" not in cmake
+
+
+def test_native_launcher_reports_any_runtime_exit_before_pipe_ready():
+    source = (Path(__file__).resolve().parents[2] / "native" / "sevenzip_bridge" / "src" / "launcher.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "runtime_failed = true;" in source
+    assert "SunPack runtime exited before becoming ready, exit code " in source

@@ -690,17 +690,29 @@ function New-NuitkaEntrypoint {
         [string]$Path,
         [Parameter(Mandatory = $true)]
         [ValidateSet("full", "lite")]
-        [string]$RepairSystem
+        [string]$RepairSystem,
+        [switch]$EnableStartupDiagnostics
     )
 
     $content = @(
         "import os",
-        "os.environ['SUNPACK_REPAIR_SYSTEM'] = '$RepairSystem'",
+        "os.environ['SUNPACK_REPAIR_SYSTEM'] = '$RepairSystem'"
+    )
+    if ($EnableStartupDiagnostics) {
+        $content += @(
+            "import faulthandler",
+            "import sys",
+            "print(f'[bootstrap] pid={os.getpid()} exe={sys.executable!r} argv={sys.argv!r}', file=sys.stderr, flush=True)",
+            "faulthandler.enable(file=sys.stderr)",
+            "faulthandler.dump_traceback_later(5, repeat=True, file=sys.stderr)"
+        )
+    }
+    $content += @(
         "from sunpack.entrypoint import main",
         "raise SystemExit(main())",
         ""
-    ) -join [Environment]::NewLine
-    [System.IO.File]::WriteAllText($Path, $content, [System.Text.UTF8Encoding]::new($false))
+    )
+    [System.IO.File]::WriteAllText($Path, ($content -join [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
 }
 
 function Embed-WindowsApplicationManifest {
@@ -1075,7 +1087,7 @@ Write-Step "Building Windows release with Nuitka"
     }
 
     New-Item -ItemType Directory -Path $nuitkaEntryRoot -Force | Out-Null
-    New-NuitkaEntrypoint -Path $nuitkaRuntimeEntryPath -RepairSystem $repairSystemMode
+    New-NuitkaEntrypoint -Path $nuitkaRuntimeEntryPath -RepairSystem $repairSystemMode -EnableStartupDiagnostics
     New-NuitkaEntrypoint -Path $nuitkaWatchEntryPath -RepairSystem $repairSystemMode
     Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaRuntimeEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $runtimeExeName -ConsoleMode "force" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--help" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-runtime-report.xml")
     Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaWatchEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $watchExeName -ConsoleMode "disable" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--once --no-tray" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-watch-report.xml")

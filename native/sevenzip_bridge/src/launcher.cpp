@@ -608,10 +608,8 @@ int wmain(int argc, wchar_t** argv) {
             for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
                 if (runtime_process != nullptr && WaitForSingleObject(runtime_process, 0) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(runtime_process, &runtime_exit_code);
-                    if (runtime_exit_code != 0) {
-                        runtime_failed = true;
-                        break;
-                    }
+                    runtime_failed = true;
+                    break;
                 }
                 Sleep(25);
                 ok = request(request_arguments, false, code, invocation_cwd);
@@ -623,7 +621,7 @@ int wmain(int argc, wchar_t** argv) {
             write_stream(STD_ERROR_HANDLE, startup_error);
         }
         if (runtime_failed) {
-            write_stream(STD_ERROR_HANDLE, "SunPack runtime exited with code "
+            write_stream(STD_ERROR_HANDLE, "SunPack runtime exited before becoming ready, exit code "
                                                + std::to_string(static_cast<unsigned long>(runtime_exit_code)) + ".\n");
         }
     }
