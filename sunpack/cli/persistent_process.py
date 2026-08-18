@@ -21,6 +21,8 @@ _MAX_REQUEST_BYTES = 64 * 1024 * 1024
 _MAX_ARGC = 4096
 _TERMINAL_COLUMNS_ARG = "--_sunpack-terminal-columns="
 _PIPE_PREFIX = r"\\.\pipe\SunPack-"
+_SERVER_STARTUP_TIMEOUT_SECONDS = 10.0
+_RUNTIME_DIAGNOSTIC_TAIL_BYTES = 16 * 1024
 
 
 def handle_early_argv(argv: list[str]) -> int | None:
@@ -47,6 +49,24 @@ def state_path() -> str:
 
     root = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "SunPack")
     return os.path.join(root, f"runtime-{_runtime_digest():016x}.state")
+
+
+def runtime_log_path() -> str:
+    return state_path() + ".log"
+
+
+def _read_runtime_diagnostics() -> str:
+    try:
+        with open(runtime_log_path(), "rb") as stream:
+            data = stream.read()
+    except (FileNotFoundError, OSError):
+        return ""
+    if len(data) > _RUNTIME_DIAGNOSTIC_TAIL_BYTES:
+        data = data[-_RUNTIME_DIAGNOSTIC_TAIL_BYTES:]
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+    return data.decode("utf-8", "replace").strip()
 
 
 def pipe_name() -> str:
@@ -119,27 +139,50 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         return {"exit_code": 0, "stdout": "", "stderr": ""}
     import subprocess
 
+    request_cwd = str(payload.get("cwd") or os.getcwd())
+    log_path = runtime_log_path()
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    subprocess.Popen(
-        server_command(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-        cwd=runtime_working_directory(),
-    )
-    deadline = time.monotonic() + 10.0
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "wb") as diagnostic:
+            process = subprocess.Popen(
+                server_command(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=diagnostic,
+                close_fds=True,
+                creationflags=creationflags,
+                cwd=runtime_working_directory(),
+            )
+    except OSError as exc:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"SunPack persistent process failed to start: {exc}\n",
+        }
+
+    deadline = time.monotonic() + _SERVER_STARTUP_TIMEOUT_SECONDS
+    runtime_exit_code: int | None = None
     while time.monotonic() < deadline:
         response = _try_send(payload)
         if response is not None:
             return response
+        poll = getattr(process, "poll", None)
+        if poll is not None:
+            runtime_exit_code = poll()
+            if runtime_exit_code not in (None, 0):
+                break
         time.sleep(0.025)
-    request_cwd = str(payload.get("cwd") or os.getcwd())
+    error = I18nContext(load_cli_language_from_config(request_cwd)).t("cli.persistent_start_timeout")
+    if runtime_exit_code not in (None, 0):
+        error += f"\nRuntime exited with code {runtime_exit_code}."
+    diagnostics = _read_runtime_diagnostics()
+    if diagnostics:
+        error += f"\nRuntime startup diagnostics:\n{diagnostics}"
     return {
         "exit_code": 1,
         "stdout": "",
-        "stderr": I18nContext(load_cli_language_from_config(request_cwd)).t("cli.persistent_start_timeout") + "\n",
+        "stderr": error + "\n",
     }
 
 

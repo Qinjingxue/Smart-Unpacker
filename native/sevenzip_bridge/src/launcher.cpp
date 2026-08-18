@@ -18,6 +18,7 @@ namespace {
 constexpr char kRequestMagic[] = "SPK1";
 constexpr char kStreamMagic[] = "SPS1";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
+constexpr std::size_t kRuntimeDiagnosticTailBytes = 16u * 1024u;
 
 std::wstring executable_directory() {
     std::vector<wchar_t> buffer(32768);
@@ -231,6 +232,28 @@ std::wstring state_path() {
     return std::wstring(local.data(), length) + suffix;
 }
 
+std::wstring runtime_log_path() {
+    return state_path() + L".log";
+}
+
+std::string read_runtime_diagnostics() {
+    std::ifstream stream(runtime_log_path(), std::ios::binary);
+    if (!stream) return {};
+    stream.seekg(0, std::ios::end);
+    const std::streamoff end = stream.tellg();
+    if (end <= 0) return {};
+    const std::streamoff start = std::max<std::streamoff>(0, end - static_cast<std::streamoff>(kRuntimeDiagnosticTailBytes));
+    stream.seekg(start, std::ios::beg);
+    std::string data(static_cast<std::size_t>(end - start), '\0');
+    stream.read(data.data(), static_cast<std::streamsize>(data.size()));
+    if (start > 0) {
+        const std::size_t newline = data.find('\n');
+        if (newline != std::string::npos) data.erase(0, newline + 1);
+    }
+    while (!data.empty() && (data.back() == '\r' || data.back() == '\n')) data.pop_back();
+    return data;
+}
+
 bool parse_state(std::wstring& pipe_name, std::array<unsigned char, 32>& token) {
     std::ifstream stream(state_path());
     std::string pipe_text;
@@ -410,21 +433,71 @@ std::wstring quote_argument(const std::wstring& value) {
 }
 
 bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr,
-                   const std::wstring& working_directory = {}) {
+                   const std::wstring& working_directory = {}, DWORD* spawn_error = nullptr,
+                   HANDLE* detached_process = nullptr) {
     const std::wstring runtime = executable_directory() + L"\\sunpack-runtime.exe";
     std::wstring command = quote_argument(runtime);
     for (const auto& argument : arguments) command += L" " + quote_argument(argument);
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
+    HANDLE diagnostic = INVALID_HANDLE_VALUE;
+    HANDLE null_handle = INVALID_HANDLE_VALUE;
+    if (spawn_error) *spawn_error = ERROR_SUCCESS;
+    if (detached_process) *detached_process = nullptr;
+    if (detached) {
+        const std::wstring log_path = runtime_log_path();
+        const std::size_t slash = log_path.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            const std::wstring directory = log_path.substr(0, slash);
+            if (!CreateDirectoryW(directory.c_str(), nullptr)) {
+                const DWORD directory_error = GetLastError();
+                if (directory_error != ERROR_ALREADY_EXISTS) {
+                    if (spawn_error) *spawn_error = directory_error;
+                    return false;
+                }
+            }
+        }
+        SECURITY_ATTRIBUTES security{};
+        security.nLength = sizeof(security);
+        security.bInheritHandle = TRUE;
+        diagnostic = CreateFileW(log_path.c_str(), GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, CREATE_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (diagnostic == INVALID_HANDLE_VALUE) {
+            if (spawn_error) *spawn_error = GetLastError();
+            return false;
+        }
+        null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (null_handle == INVALID_HANDLE_VALUE) {
+            if (spawn_error) *spawn_error = GetLastError();
+            CloseHandle(diagnostic);
+            return false;
+        }
+        startup.dwFlags |= STARTF_USESTDHANDLES;
+        startup.hStdInput = null_handle;
+        startup.hStdOutput = null_handle;
+        startup.hStdError = diagnostic;
+    }
     const DWORD flags = detached ? CREATE_NO_WINDOW : 0;
     const wchar_t* child_cwd = working_directory.empty() ? nullptr : working_directory.c_str();
-    if (!CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
-                        child_cwd,
-                        &startup, &process)) return false;
+    const BOOL created = CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? TRUE : FALSE, flags,
+                                        nullptr, child_cwd, &startup, &process);
+    const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+    if (diagnostic != INVALID_HANDLE_VALUE) CloseHandle(diagnostic);
+    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
+    if (!created) {
+        if (spawn_error) *spawn_error = create_error;
+        return false;
+    }
     CloseHandle(process.hThread);
     if (detached) {
-        CloseHandle(process.hProcess);
+        if (detached_process) {
+            *detached_process = process.hProcess;
+        } else {
+            CloseHandle(process.hProcess);
+        }
         return true;
     }
     WaitForSingleObject(process.hProcess, INFINITE);
@@ -527,13 +600,31 @@ int wmain(int argc, wchar_t** argv) {
     int code = 1;
     bool ok = request(request_arguments, shutdown, code, invocation_cwd);
     if (!ok && !shutdown) {
-        spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd);
-        for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
-            Sleep(25);
-            ok = request(request_arguments, false, code, invocation_cwd);
-            if (!ok && attempt != 0 && attempt % 40 == 0) {
-                spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd);
+        DWORD spawn_error = ERROR_SUCCESS;
+        HANDLE runtime_process = nullptr;
+        DWORD runtime_exit_code = STILL_ACTIVE;
+        bool runtime_failed = false;
+        if (spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd, &spawn_error, &runtime_process)) {
+            for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
+                if (runtime_process != nullptr && WaitForSingleObject(runtime_process, 0) == WAIT_OBJECT_0) {
+                    GetExitCodeProcess(runtime_process, &runtime_exit_code);
+                    if (runtime_exit_code != 0) {
+                        runtime_failed = true;
+                        break;
+                    }
+                }
+                Sleep(25);
+                ok = request(request_arguments, false, code, invocation_cwd);
             }
+            if (runtime_process != nullptr) CloseHandle(runtime_process);
+        } else {
+            std::string startup_error = "SunPack runtime failed to launch (Win32 error "
+                                         + std::to_string(static_cast<unsigned long>(spawn_error)) + ").\n";
+            write_stream(STD_ERROR_HANDLE, startup_error);
+        }
+        if (runtime_failed) {
+            write_stream(STD_ERROR_HANDLE, "SunPack runtime exited with code "
+                                               + std::to_string(static_cast<unsigned long>(runtime_exit_code)) + ".\n");
         }
     }
     if (!ok && shutdown) code = 0;
@@ -546,6 +637,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!ok && !shutdown) {
         write_stream(STD_ERROR_HANDLE, localized(language, kPersistentTimeoutEn, kPersistentTimeoutZh) + "\n");
+        const std::string diagnostics = read_runtime_diagnostics();
+        if (!diagnostics.empty()) {
+            write_stream(STD_ERROR_HANDLE, "Runtime startup diagnostics:\n" + diagnostics + "\n");
+        }
     }
     if (pause && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR) {
         write_stream(STD_OUTPUT_HANDLE, localized(language, kPressEnterEn, kPressEnterZh));
