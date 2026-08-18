@@ -271,6 +271,18 @@ def test_server_idle_shutdown_requires_completed_request_and_idle_runtime():
     )
 
 
+def test_pipe_server_cleanup_only_requires_close():
+    closed = []
+
+    class FakePipeServer:
+        def close(self):
+            closed.append(True)
+
+    persistent_process._close_pipe_servers([FakePipeServer()])
+
+    assert closed == [True]
+
+
 def test_state_cleanup_only_removes_owned_server_state(tmp_path, monkeypatch):
     state = tmp_path / "runtime.state"
     token = b"a" * 32

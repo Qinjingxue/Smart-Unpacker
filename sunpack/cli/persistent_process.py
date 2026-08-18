@@ -604,12 +604,15 @@ async def run_server() -> int:
     finally:
         monitor.cancel()
         await asyncio.gather(monitor, return_exceptions=True)
-        for server in servers:
-            server.close()
-        await asyncio.gather(*(server.wait_closed() for server in servers), return_exceptions=True)
+        _close_pipe_servers(servers)
         _remove_state_if_owned(name, token)
         await close_persistent_runtime()
         lock_stream.close()
+
+
+def _close_pipe_servers(servers: list[Any]) -> None:
+    for server in servers:
+        server.close()
 
 
 def _idle_shutdown_due(
