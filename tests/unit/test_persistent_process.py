@@ -410,36 +410,12 @@ def test_server_process_starts_in_neutral_working_directory(tmp_path, monkeypatc
 
     monkeypatch.setattr(persistent_process, "_try_send", lambda _payload: next(attempts))
     monkeypatch.setattr(persistent_process, "runtime_working_directory", lambda: str(tmp_path))
-    monkeypatch.setattr(persistent_process, "runtime_log_path", lambda: str(tmp_path / "runtime.log"))
     monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: captured.update(kwargs))
 
     response = persistent_process._send_or_start({"argv": ["extract", "sample.zip"]})
 
     assert response["exit_code"] == 0
     assert captured["cwd"] == str(tmp_path)
-
-
-def test_server_start_failure_reports_runtime_diagnostics(tmp_path, monkeypatch):
-    _enable_test_runtime_identity(monkeypatch)
-    monkeypatch.setattr(persistent_process, "_try_send", lambda _payload: None)
-    monkeypatch.setattr(persistent_process, "runtime_log_path", lambda: str(tmp_path / "runtime.log"))
-
-    class FailedProcess:
-        def poll(self):
-            return 17
-
-    def fake_popen(*args, **kwargs):
-        kwargs["stderr"].write(b"Traceback (most recent call last):\nOSError: pipe setup failed\n")
-        kwargs["stderr"].flush()
-        return FailedProcess()
-
-    monkeypatch.setattr("subprocess.Popen", fake_popen)
-
-    response = persistent_process._send_or_start({"argv": ["--help"]})
-
-    assert response["exit_code"] == 1
-    assert "Runtime exited with code 17." in response["stderr"]
-    assert "OSError: pipe setup failed" in response["stderr"]
 
 
 def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):

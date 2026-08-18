@@ -180,14 +180,6 @@ def test_build_uses_nuitka_only():
     assert "pyinstaller" not in project.lower()
 
 
-def test_runtime_bootstrap_emits_startup_diagnostics_without_polluting_watch():
-    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-
-    assert "EnableStartupDiagnostics" in build_script
-    assert "faulthandler.dump_traceback_later(5, repeat=True, file=sys.stderr)" in build_script
-    assert build_script.count("-EnableStartupDiagnostics") == 1
-
-
 def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
     smoke_scripts = (
         ROOT / "scripts" / "build_windows.ps1",

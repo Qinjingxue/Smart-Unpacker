@@ -20,7 +20,6 @@ constexpr char kRequestMagic[] = "SPK1";
 constexpr char kStreamMagic[] = "SPS1";
 constexpr char kRuntimeIdentityArgumentPrefix[] = "--_sunpack-runtime-id=";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
-constexpr std::size_t kRuntimeDiagnosticTailBytes = 16u * 1024u;
 
 std::wstring normalized_final_path(const std::wstring& path) {
     std::wstring fallback = path;
@@ -272,28 +271,6 @@ std::wstring state_path(const InstallContext& context) {
     return std::wstring(local.data(), length) + L"\\SunPack\\runtime-" + wide_utf8(context.runtime_id) + L".state";
 }
 
-std::wstring runtime_log_path(const InstallContext& context) {
-    return state_path(context) + L".log";
-}
-
-std::string read_runtime_diagnostics(const InstallContext& context) {
-    std::ifstream stream(runtime_log_path(context), std::ios::binary);
-    if (!stream) return {};
-    stream.seekg(0, std::ios::end);
-    const std::streamoff end = stream.tellg();
-    if (end <= 0) return {};
-    const std::streamoff start = std::max<std::streamoff>(0, end - static_cast<std::streamoff>(kRuntimeDiagnosticTailBytes));
-    stream.seekg(start, std::ios::beg);
-    std::string data(static_cast<std::size_t>(end - start), '\0');
-    stream.read(data.data(), static_cast<std::streamsize>(data.size()));
-    if (start > 0) {
-        const std::size_t newline = data.find('\n');
-        if (newline != std::string::npos) data.erase(0, newline + 1);
-    }
-    while (!data.empty() && (data.back() == '\r' || data.back() == '\n')) data.pop_back();
-    return data;
-}
-
 bool parse_state(const InstallContext& context, std::wstring& pipe_name, std::array<unsigned char, 32>& token) {
     std::ifstream stream(state_path(context));
     std::string pipe_text;
@@ -482,52 +459,13 @@ bool spawn_runtime(const InstallContext& context, const std::vector<std::wstring
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    HANDLE diagnostic = INVALID_HANDLE_VALUE;
-    HANDLE null_handle = INVALID_HANDLE_VALUE;
     if (spawn_error) *spawn_error = ERROR_SUCCESS;
     if (detached_process) *detached_process = nullptr;
-    if (detached) {
-        const std::wstring log_path = runtime_log_path(context);
-        const std::size_t slash = log_path.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) {
-            const std::wstring directory = log_path.substr(0, slash);
-            if (!CreateDirectoryW(directory.c_str(), nullptr)) {
-                const DWORD directory_error = GetLastError();
-                if (directory_error != ERROR_ALREADY_EXISTS) {
-                    if (spawn_error) *spawn_error = directory_error;
-                    return false;
-                }
-            }
-        }
-        SECURITY_ATTRIBUTES security{};
-        security.nLength = sizeof(security);
-        security.bInheritHandle = TRUE;
-        diagnostic = CreateFileW(log_path.c_str(), GENERIC_WRITE,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, CREATE_ALWAYS,
-                                 FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (diagnostic == INVALID_HANDLE_VALUE) {
-            if (spawn_error) *spawn_error = GetLastError();
-            return false;
-        }
-        null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (null_handle == INVALID_HANDLE_VALUE) {
-            if (spawn_error) *spawn_error = GetLastError();
-            CloseHandle(diagnostic);
-            return false;
-        }
-        startup.dwFlags |= STARTF_USESTDHANDLES;
-        startup.hStdInput = null_handle;
-        startup.hStdOutput = null_handle;
-        startup.hStdError = diagnostic;
-    }
     const DWORD flags = detached ? CREATE_NO_WINDOW : 0;
     const wchar_t* child_cwd = context.directory.empty() ? nullptr : context.directory.c_str();
-    const BOOL created = CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? TRUE : FALSE, flags,
+    const BOOL created = CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, FALSE, flags,
                                         nullptr, child_cwd, &startup, &process);
     const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
-    if (diagnostic != INVALID_HANDLE_VALUE) CloseHandle(diagnostic);
-    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
     if (!created) {
         if (spawn_error) *spawn_error = create_error;
         return false;
@@ -678,10 +616,6 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!ok && !shutdown) {
         write_stream(STD_ERROR_HANDLE, localized(language, kPersistentTimeoutEn, kPersistentTimeoutZh) + "\n");
-        const std::string diagnostics = read_runtime_diagnostics(context);
-        if (!diagnostics.empty()) {
-            write_stream(STD_ERROR_HANDLE, "Runtime startup diagnostics:\n" + diagnostics + "\n");
-        }
     }
     if (pause && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR) {
         write_stream(STD_OUTPUT_HANDLE, localized(language, kPressEnterEn, kPressEnterZh));
