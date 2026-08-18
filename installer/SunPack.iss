@@ -65,6 +65,7 @@ Source: "{#SourceDir}\builtin_passwords.txt"; DestDir: "{app}"; Flags: onlyifdoe
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\*"
+Type: dirifempty; Name: "{app}"
 Type: filesandordirs; Name: "{localappdata}\SunPack"
 
 [Registry]

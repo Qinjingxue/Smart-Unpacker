@@ -91,6 +91,7 @@ def test_uninstaller_removes_generated_watch_and_cache_state():
 
     assert "[UninstallDelete]" in script
     assert 'Type: filesandordirs; Name: "{app}\\*"' in script
+    assert 'Type: dirifempty; Name: "{app}"' in script
     assert 'Type: filesandordirs; Name: "{localappdata}\\SunPack"' in script
 
 
