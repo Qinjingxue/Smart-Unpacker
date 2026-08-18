@@ -157,7 +157,10 @@ def test_output_deletion_primitives_are_confined_to_approved_infrastructure():
         relative = path.relative_to(project_root)
         if relative in allowed:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
+        source = path.read_text(encoding="utf-8")
+        if not any(token in source for token in ("rmtree", "unlink", "remove")):
+            continue
+        tree = ast.parse(source, filename=str(relative))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
