@@ -25,8 +25,8 @@ def _seven_zip_bytes():
     return b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", crc32(start_header) & 0xFFFFFFFF) + start_header + next_header
 
 
-def _rar4_block(header_type):
-    body = bytes([header_type]) + struct.pack("<HH", 0, 7)
+def _rar4_block(header_type, flags=0):
+    body = bytes([header_type]) + struct.pack("<HH", flags, 7)
     return struct.pack("<H", crc32(body) & 0xFFFF) + body
 
 
@@ -65,6 +65,29 @@ def test_rar_detection_walks_blocks_across_raw_volume_boundary(tmp_path):
     assert result["plausible"] is True
     assert result["strong_accept"] is True
     assert result["block_walk_ok"] is True
+
+
+def test_rar4_header_encryption_is_accepted_by_rust_probe(tmp_path):
+    # RAR4 -hp leaves the plaintext main header and marks every following
+    # header as encrypted.  The following bytes are ciphertext and must not
+    # be interpreted as another RAR block.
+    archive = (
+        b"Rar!\x1a\x07\x00"
+        + _rar4_block(0x73, flags=0x0080)
+        + b"\xd6\xd3\x77\xb9\xf7\x5d\xe8"
+    )
+    part = tmp_path / "encrypted.rar.001"
+    part.write_bytes(archive)
+
+    result = process_rar_structure(_context([part], "numeric_suffix", "rar.structure"))
+
+    assert result["magic_matched"] is True
+    assert result["header_crc_ok"] is True
+    assert result["header_encrypted"] is True
+    assert result["password_required"] is True
+    assert result["strong_accept"] is True
+    assert result["block_walk_ok"] is True
+    assert result["error"] == ""
 
 
 def test_zip_detection_finds_directory_and_eocd_in_later_volume(tmp_path):

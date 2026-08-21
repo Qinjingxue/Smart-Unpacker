@@ -10,6 +10,28 @@ from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchResult,
 from sunpack.passwords.session import PasswordSession
 
 
+def rar_structure_requires_password(fact_bag: FactBag | None) -> bool:
+    """Return whether the validated RAR structure requires header decryption.
+
+    The detector deliberately records this on ``rar.structure`` instead of
+    asking the extraction backend to classify an encrypted header with an
+    empty password.  Keep this predicate small and shared so preflight,
+    extraction, and password resolution use the same structural signal.
+    """
+    if fact_bag is None:
+        return False
+    structure = fact_bag.get("rar.structure")
+    if not isinstance(structure, dict):
+        knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+        structure = knowledge.get("format.rar.structure")
+    if not isinstance(structure, dict):
+        return False
+    return bool(
+        structure.get("strong_accept")
+        and (structure.get("password_required") or structure.get("header_encrypted"))
+    )
+
+
 class PasswordResolver:
     """Plan bounded password checks and hand ambiguous candidates to extraction.
 
@@ -280,9 +302,16 @@ class PasswordResolver:
             return {}
         direct = fact_bag.get("resource.health")
         if isinstance(direct, dict):
-            return direct
-        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health")
-        return health if isinstance(health, dict) else {}
+            health = dict(direct)
+        else:
+            health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health")
+            health = dict(health) if isinstance(health, dict) else {}
+        if rar_structure_requires_password(fact_bag):
+            health["is_archive"] = True
+            health["is_encrypted"] = True
+            health.setdefault("is_wrong_password", False)
+            health.setdefault("archive_type", "rar")
+        return health
 
     @staticmethod
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:

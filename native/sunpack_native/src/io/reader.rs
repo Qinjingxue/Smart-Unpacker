@@ -182,6 +182,11 @@ impl ManagedReader {
         Ok(Self::new(Arc::new(source), config))
     }
 
+    pub(crate) fn from_bytes(data: Vec<u8>, config: ReaderConfig) -> Self {
+        let data: Arc<[u8]> = Arc::from(data);
+        Self::new(Arc::new(BytesSource { data }), config)
+    }
+
     pub(crate) fn with_config(&self, config: ReaderConfig) -> Self {
         Self::new(Arc::clone(&self.source), config)
     }
@@ -649,6 +654,25 @@ impl Seek for SourceCursor {
         }
         self.position = target as u64;
         Ok(self.position)
+    }
+}
+
+struct BytesSource {
+    data: Arc<[u8]>,
+}
+
+impl ByteSource for BytesSource {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if offset >= self.len() || len == 0 {
+            return Ok(Vec::new());
+        }
+        let start = offset as usize;
+        let end = start.saturating_add(len).min(self.data.len());
+        Ok(self.data[start..end].to_vec())
     }
 }
 

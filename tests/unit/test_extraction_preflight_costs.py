@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.resource_preflight import ResourcePreflightInspector
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 
@@ -37,6 +38,37 @@ def test_successful_first_attempt_checks_free_space_once(tmp_path):
 
     assert result.success
     assert calls == [5]
+
+
+def test_validated_encrypted_rar_skips_empty_password_resource_analysis(tmp_path, monkeypatch):
+    archive = tmp_path / "encrypted.rar"
+    archive.write_bytes(b"synthetic-rar4-header")
+    task = ArchiveTask(FactBag(), 1, main_path=str(archive), all_parts=[str(archive)], detected_ext=".rar")
+    task.fact_bag.set("rar.structure", {
+        "plausible": True,
+        "strong_accept": True,
+        "header_crc_ok": True,
+        "header_encrypted": True,
+        "password_required": True,
+    })
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("encrypted RAR must not be analyzed with an empty password")
+
+    monkeypatch.setattr(
+        "sunpack.coordinator.resource_preflight.cached_analyze_archive_resources",
+        fail_if_called,
+    )
+
+    ResourcePreflightInspector(precise_resource_min_size_mb=0).inspect(task)
+
+    health = task.fact_bag.get("resource.health")
+    analysis = task.fact_bag.get("resource.analysis")
+    assert health["is_archive"] is True
+    assert health["is_encrypted"] is True
+    assert health["is_broken"] is False
+    assert analysis["is_encrypted"] is True
+    assert analysis["message"] == "encrypted RAR structure requires password resolution"
 
 
 def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damage(tmp_path):

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from sunpack.passwords import PasswordSession
+from sunpack.passwords.resolver import rar_structure_requires_password
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -22,12 +23,22 @@ class ResourcePreflightInspector:
         self.precise_resource_min_size_bytes = max(0, int(precise_resource_min_size_mb or 0)) * 1024 * 1024
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
+        archive_size = self._archive_size(task)
+        if rar_structure_requires_password(task.fact_bag):
+            # A valid encrypted RAR main header is enough to route password
+            # resolution, but not enough to inspect the payload without a
+            # password.  Do not ask the empty-password resource backend to
+            # turn that expected condition into a damage verdict.
+            return self.record_estimated_profile(
+                task,
+                reason="encrypted RAR structure requires password resolution",
+                archive_size=archive_size,
+            )
         existing_analysis = knowledge_view.resource_analysis(task)
         if isinstance(existing_analysis, dict) and existing_analysis:
             analysis = SimpleNamespace(ok=not bool(existing_analysis.get("is_broken")), **existing_analysis)
             self.record_resource_demand(task, analysis)
             return task
-        archive_size = self._archive_size(task)
         precise_analysis = self._precise_resource_analysis(task, archive_size)
         if precise_analysis is not None:
             task.fact_bag.set("resource.analysis", precise_analysis)
@@ -103,6 +114,20 @@ class ResourcePreflightInspector:
         )
 
     def _ensure_resource_health(self, task: ArchiveTask) -> None:
+        if rar_structure_requires_password(task.fact_bag):
+            existing = knowledge_view.resource_health(task)
+            health_payload = {
+                **existing,
+                "is_archive": True,
+                "is_encrypted": True,
+                "is_wrong_password": bool(existing.get("is_wrong_password", False)),
+                "is_broken": False,
+                "archive_type": "rar",
+                "checksum_error": False,
+            }
+            task.fact_bag.set("resource.health", health_payload)
+            self._write_resource_payload(task, health=health_payload)
+            return
         if knowledge_view.resource_health(task):
             return
         if self._needs_offset_detection(task):

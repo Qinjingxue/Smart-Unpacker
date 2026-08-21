@@ -2,6 +2,9 @@ import struct
 from binascii import crc32
 
 from sunpack.analysis import ArchiveAnalyzer, RarProbeOptions
+from sunpack.analysis.view import PatchedBinaryView
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 
 
 def _rar4_block(header_type: int, flags: int = 0) -> bytes:
@@ -108,3 +111,22 @@ def test_public_rar_capability_accepts_header_encrypted_rar4_main_header(tmp_pat
     assert raw["error"] == ""
     assert raw["segment_end"] == 0
     assert raw["blocks_checked"] == 1
+
+
+def test_patched_rar_capability_uses_the_native_probe(tmp_path):
+    archive = b"Rar!\x1a\x07\x00" + _rar4_block(0x73, flags=0x0080) + b"ciphertext"
+    source = tmp_path / "patched-source.bin"
+    source.write_bytes(b"\x00" * len(archive))
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="rar")
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[PatchPlan(operations=[PatchOperation.replace_bytes(offset=0, data=archive)])],
+    )
+
+    raw = PatchedBinaryView(state).probe_rar(start_offset=0)
+
+    assert raw["version"] == 4
+    assert raw["header_crc_ok"] is True
+    assert raw["header_encrypted"] is True
+    assert raw["password_required"] is True
+    assert raw["strong_accept"] is True

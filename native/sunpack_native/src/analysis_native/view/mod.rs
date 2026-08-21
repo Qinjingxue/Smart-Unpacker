@@ -18,6 +18,20 @@ include!("signatures.rs");
 include!("tar.rs");
 include!("compression.rs");
 
+#[pyfunction]
+pub(crate) fn probe_rar_bytes(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    start_offset: u64,
+    max_blocks_to_walk: usize,
+) -> PyResult<Py<PyDict>> {
+    let view = AnalysisBinaryView {
+        path: "<memory>".to_string(),
+        reader: ManagedReader::from_bytes(data.as_bytes().to_vec(), ReaderConfig::default()),
+    };
+    view.probe_rar(py, start_offset, max_blocks_to_walk)
+}
+
 fn reader_error_to_py(error: std::io::Error) -> PyErr {
     if error.to_string() == "archive analysis read budget exceeded" {
         pyo3::exceptions::PyRuntimeError::new_err(error.to_string())

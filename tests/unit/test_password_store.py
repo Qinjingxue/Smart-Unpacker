@@ -201,6 +201,27 @@ def test_password_resolver_trusts_encrypted_resource_health_without_empty_passwo
     assert tester.search_calls == 1
 
 
+def test_password_resolver_uses_validated_rar_structure_password_marker():
+    bag = FactBag()
+    bag.set("rar.structure", {
+        "plausible": True,
+        "strong_accept": True,
+        "header_crc_ok": True,
+        "header_encrypted": True,
+        "password_required": True,
+    })
+    tester = FakePasswordTester()
+    session = PasswordSession()
+    resolver = PasswordResolver(tester, session)
+
+    result = resolver.resolve("sample.rar", fact_bag=bag, archive_key="archive-key")
+
+    assert result.password == "secret"
+    assert result.encrypted is True
+    assert tester.test_without_password_calls == 0
+    assert tester.search_calls == 1
+
+
 def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted_search():
     bag = FactBag()
     bag.set("resource.health", {

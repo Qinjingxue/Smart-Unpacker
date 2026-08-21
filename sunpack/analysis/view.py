@@ -6,6 +6,7 @@ from collections import Counter
 
 from sunpack_native import AnalysisBinaryView as _NativeAnalysisBinaryView
 from sunpack_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
+from sunpack_native import probe_rar_bytes as _probe_rar_bytes
 from sunpack.support.archive_sessions import get_archive_session
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.support.archive_state_view import ArchiveStateByteView
@@ -185,7 +186,7 @@ class MultiVolumeBinaryView:
         return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
 
     def probe_rar(self, *, start_offset: int, max_blocks_to_walk: int = 4096) -> dict | None:
-        return _probe_rar_view(self, int(start_offset), int(max_blocks_to_walk))
+        return dict(self._native.probe_rar(int(start_offset), int(max_blocks_to_walk)))
 
     def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
         return _probe_seven_zip_view(self, int(start_offset), int(max_next_header_check_bytes))
@@ -271,7 +272,12 @@ class PatchedBinaryView:
         return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
 
     def probe_rar(self, *, start_offset: int, max_blocks_to_walk: int = 4096) -> dict | None:
-        return _probe_rar_view(self, int(start_offset), int(max_blocks_to_walk))
+        # Patched views have no filesystem-backed native reader.  Materialize
+        # this exceptional repair-time view once and run the same Rust probe
+        # used by ordinary and multi-volume readers; the normal detection path
+        # never enters this adapter.
+        data = self.read_at(0, self.size)
+        return dict(_probe_rar_bytes(data, int(start_offset), int(max_blocks_to_walk)))
 
     def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
         return _probe_seven_zip_view(self, int(start_offset), int(max_next_header_check_bytes))
@@ -701,119 +707,6 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
                 result["error"] = "next_header_nid_unrecognized"
         else:
             result["error"] = "next_header_crc_mismatch"
-    return result
-
-
-def _probe_rar_view(view, start_offset: int, max_blocks: int) -> dict:
-    result = _probe_base("rar", start_offset)
-    result.update({"archive_offset": start_offset, "segment_end": 0, "version": 0, "blocks_checked": 0, "end_block_found": False})
-    header = view.read_at(start_offset, 8)
-    if header.startswith(b"Rar!\x1a\x07\x01\x00"):
-        result.update({"magic_matched": True, "version": 5})
-        return _probe_rar5_view(view, result, start_offset, max_blocks)
-    if header.startswith(b"Rar!\x1a\x07\x00"):
-        result.update({"magic_matched": True, "version": 4})
-        return _probe_rar4_view(view, result, start_offset, max_blocks)
-    result["error"] = "rar_signature_not_found"
-    return result
-
-
-def _probe_rar4_view(view, result: dict, start_offset: int, max_blocks: int) -> dict:
-    cursor = start_offset + 7
-    evidence = ["rar4:signature"]
-    for index in range(max_blocks):
-        fixed = view.read_at(cursor, 7)
-        if len(fixed) < 7:
-            result.update({"blocks_checked": index, "error": "rar4_block_header_out_of_range"})
-            return result
-        header_crc = _u16(fixed, 0)
-        header_type = fixed[2]
-        flags = _u16(fixed, 3)
-        header_size = _u16(fixed, 5)
-        full = view.read_at(cursor, header_size)
-        if header_size < 7 or len(full) < header_size:
-            result.update({"blocks_checked": index, "error": "rar4_block_size_out_of_range"})
-            return result
-        if crc32(full[2:]) & 0xFFFF != header_crc:
-            result.update({"blocks_checked": index, "error": "rar4_block_crc_mismatch"})
-            return result
-        block_size = header_size + (_u32(full, 7) if flags & 0x8000 and header_size >= 11 else 0)
-        if index == 0 and header_type != 0x73:
-            result.update({"blocks_checked": 1, "error": "rar4_main_header_missing"})
-            return result
-        if index == 0:
-            evidence.append("rar4:main_header")
-        cursor += block_size
-        if header_type == 0x7B:
-            result.update({"plausible": True, "strong_accept": True, "blocks_checked": index + 1, "end_block_found": True, "segment_end": cursor, "evidence": evidence + ["rar4:end_block"], "error": ""})
-            return result
-    result.update({"plausible": True, "blocks_checked": max_blocks, "segment_end": cursor, "evidence": evidence, "error": "rar4_block_walk_limit_reached"})
-    return result
-
-
-def _probe_rar5_view(view, result: dict, start_offset: int, max_blocks: int) -> dict:
-    cursor = start_offset + 8
-    evidence = ["rar5:signature"]
-    for index in range(max_blocks):
-        head = view.read_at(cursor, 64)
-        if len(head) < 6:
-            result.update({"blocks_checked": index, "error": "rar5_block_header_out_of_range"})
-            return result
-        parsed = _read_vint(head, 4)
-        if parsed is None:
-            result.update({"blocks_checked": index, "error": "rar5_header_size_vint_missing"})
-            return result
-        header_size, after_size = parsed
-        total = 4 + (after_size - 4) + header_size
-        full = view.read_at(cursor, total)
-        if header_size <= 0 or len(full) < total:
-            result.update({"blocks_checked": index, "error": "rar5_header_size_out_of_range"})
-            return result
-        parsed_type = _read_vint(full, after_size)
-        parsed_flags = _read_vint(full, parsed_type[1]) if parsed_type else None
-        if not parsed_type or not parsed_flags:
-            result.update({"blocks_checked": index, "error": "rar5_header_fields_vint_missing"})
-            return result
-        header_type, _ = parsed_type
-        flags, field_cursor = parsed_flags
-        if crc32(full[4:]) & 0xFFFFFFFF != _u32(full, 0):
-            result.update({"blocks_checked": index, "error": "rar5_block_crc_mismatch"})
-            return result
-        if flags & 0x0001:
-            parsed_extra = _read_vint(full, field_cursor)
-            if not parsed_extra:
-                result.update({"blocks_checked": index, "error": "rar5_extra_area_size_vint_missing"})
-                return result
-            _, field_cursor = parsed_extra
-        data_size = 0
-        if flags & 0x0002:
-            parsed_data = _read_vint(full, field_cursor)
-            if not parsed_data:
-                result.update({"blocks_checked": index, "error": "rar5_data_size_vint_missing"})
-                return result
-            data_size, _ = parsed_data
-        if index == 0 and header_type != 1:
-            if header_type == 4:
-                result.update({
-                    "plausible": True,
-                    "strong_accept": True,
-                    "password_required": True,
-                    "header_encrypted": True,
-                    "blocks_checked": 1,
-                    "segment_end": 0,
-                    "evidence": evidence + ["rar5:encryption_header"],
-                    "error": "",
-                })
-                return result
-            result.update({"blocks_checked": 1, "error": "rar5_main_header_missing"})
-            return result
-        if index == 0:
-            evidence.append("rar5:main_header")
-        cursor += total + data_size
-        if header_type == 5:
-            result.update({"plausible": True, "strong_accept": True, "blocks_checked": index + 1, "end_block_found": True, "segment_end": cursor, "evidence": evidence + ["rar5:end_block"], "error": ""})
-            return result
-    result.update({"plausible": True, "blocks_checked": max_blocks, "segment_end": cursor, "evidence": evidence, "error": "rar5_block_walk_limit_reached"})
     return result
 
 

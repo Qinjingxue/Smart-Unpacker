@@ -59,6 +59,24 @@ impl AnalysisMultiVolumeView {
         Ok(PyBytes::new(py, &data))
     }
 
+    #[pyo3(signature = (start_offset, max_blocks_to_walk=4096))]
+    fn probe_rar(
+        &self,
+        py: Python<'_>,
+        start_offset: u64,
+        max_blocks_to_walk: usize,
+    ) -> PyResult<Py<PyDict>> {
+        // Reuse the canonical Rust RAR4/RAR5 probe.  The reader is already a
+        // logical concatenation of the supplied volumes, so cloning the
+        // ManagedReader shares its cache and read budget without reopening
+        // the files or maintaining a second parser for multi-volume input.
+        AnalysisBinaryView {
+            path: self.path.clone(),
+            reader: self.reader.clone(),
+        }
+        .probe_rar(py, start_offset, max_blocks_to_walk)
+    }
+
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let stats = self.reader.stats()?;
         let dict = PyDict::new(py);
