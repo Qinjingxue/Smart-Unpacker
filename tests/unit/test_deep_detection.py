@@ -17,6 +17,7 @@ def test_deep_detection_bypasses_rules_and_preserves_all_stream_segments(tmp_pat
     bag = FactBag()
     bag.set("file.path", str(path))
     bag.set("candidate.entry_path", str(path))
+    bag.set("candidate.embedded_scan_allowed", True)
     scheduler = DetectionScheduler({}, options=DetectionOptions(deep_scan=True))
     monkeypatch.setattr(
         scheduler.rule_manager,
@@ -49,6 +50,7 @@ def test_deep_detection_reports_no_candidate_without_running_rules(tmp_path, mon
     path.write_bytes(b"not an archive")
     bag = FactBag()
     bag.set("file.path", str(path))
+    bag.set("candidate.embedded_scan_allowed", True)
     scheduler = DetectionScheduler({}, options=DetectionOptions(deep_scan=True))
     monkeypatch.setattr(
         scheduler.rule_manager,
@@ -62,3 +64,21 @@ def test_deep_detection_reports_no_candidate_without_running_rules(tmp_path, mon
     assert decision.decision == "not_archive"
     assert decision.decision_stage == "deep_detection"
     assert bag.get("analysis.signature_prepass")["full_scan_complete"] is True
+
+
+def test_deep_detection_skips_unauthorized_embedded_scan(tmp_path, monkeypatch):
+    path = tmp_path / "unauthorized.bin"
+    path.write_bytes(b"not an archive")
+    bag = FactBag()
+    bag.set("file.path", str(path))
+    scheduler = DetectionScheduler({}, options=DetectionOptions(deep_scan=True))
+    monkeypatch.setattr(
+        "sunpack.detection.deep_scan.file_identity",
+        lambda _path: (_ for _ in ()).throw(AssertionError("unauthorized scan must stop before file inspection")),
+    )
+
+    decision = scheduler.evaluate_bag(bag)
+
+    assert decision.should_extract is False
+    assert decision.decision_stage == "deep_detection"
+    assert "not authorized" in decision.stop_reason

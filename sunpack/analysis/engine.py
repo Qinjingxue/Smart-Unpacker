@@ -28,12 +28,14 @@ class AnalysisEngine:
         report_path: str | None = None,
         initial_prepass: dict | None = None,
         capabilities: frozenset[AnalysisCapability] | None = None,
+        embedded_scan_allowed: bool = True,
     ) -> ArchiveAnalysisReport:
         return self.analyze_view(
             self._build_single_view(path),
             report_path=report_path or path,
             initial_prepass=initial_prepass,
             capabilities=capabilities,
+            embedded_scan_allowed=embedded_scan_allowed,
         )
 
     def analyze_paths(
@@ -43,6 +45,7 @@ class AnalysisEngine:
         report_path: str | None = None,
         initial_prepass: dict | None = None,
         capabilities: frozenset[AnalysisCapability] | None = None,
+        embedded_scan_allowed: bool = True,
     ) -> ArchiveAnalysisReport:
         volumes = list(paths or [])
         if len(volumes) == 1 and not isinstance(volumes[0], dict):
@@ -51,6 +54,7 @@ class AnalysisEngine:
                 report_path=report_path,
                 initial_prepass=initial_prepass,
                 capabilities=capabilities,
+                embedded_scan_allowed=embedded_scan_allowed,
             )
         view = self._build_multi_volume_view(volumes)
         return self.analyze_view(
@@ -58,6 +62,7 @@ class AnalysisEngine:
             report_path=report_path or str(view.path),
             initial_prepass=initial_prepass,
             capabilities=capabilities,
+            embedded_scan_allowed=embedded_scan_allowed,
         )
 
     def analyze_view(
@@ -67,6 +72,7 @@ class AnalysisEngine:
         report_path: str | None = None,
         initial_prepass: dict | None = None,
         capabilities: frozenset[AnalysisCapability] | None = None,
+        embedded_scan_allowed: bool = True,
     ) -> ArchiveAnalysisReport:
         requested = DEFAULT_ANALYSIS_CAPABILITIES if capabilities is None else capabilities
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}
@@ -98,6 +104,7 @@ class AnalysisEngine:
             not selected
             and AnalysisCapability.EMBEDDED_SCAN in requested
             and self._embedded_scan_enabled()
+            and embedded_scan_allowed
             and isinstance(view, SharedBinaryView)
         ):
             embedded = scan_embedded_archives(

@@ -184,12 +184,9 @@ class RuleManager:
 
     def _ordered_precheck_rules(self, bag: FactBag, rules: List[PreparedRule]) -> List[PreparedRule]:
         formats, extensions = self._routing_values(bag)
-        guards = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "guard"]
-        identity = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "identity"]
-        tails = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "tail"]
         promoted: list[PreparedRule] = []
         remaining: list[PreparedRule] = []
-        for rule in identity:
+        for rule in rules:
             rule_formats = set(getattr(rule.instance, "routing_formats", set()) or set())
             rule_extensions = set(getattr(rule.instance, "routing_extensions", set()) or set())
             matches = bool(rule_formats & formats or rule_extensions & extensions)
@@ -197,7 +194,7 @@ class RuleManager:
                 promoted.append(rule)
             else:
                 remaining.append(rule)
-        return guards + promoted + remaining + tails
+        return promoted + remaining
 
     def _run_precheck(self, fact_bags: List[FactBag]) -> tuple[Dict[FactBag, RuleDecision], List[FactBag]]:
         decisions: Dict[FactBag, RuleDecision] = {}

@@ -4,6 +4,7 @@ from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
 from sunpack.analysis import EmbeddedScanResult, scan_embedded_archives
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 
 
 def _empty_result(*, complete: bool = False) -> dict[str, Any]:
@@ -25,7 +26,7 @@ def process_embedded_archive_analysis(context: FactProcessorContext) -> dict[str
     embedded_config = context.config.get("embedded_scan")
     if isinstance(embedded_config, dict) and not bool(embedded_config.get("enabled", True)):
         return _empty_result()
-    if not bool(context.fact_bag.get("candidate.embedded_payload_precheck_enabled")):
+    if not bool(context.fact_bag.get(EMBEDDED_SCAN_ALLOWED_FACT)):
         return _empty_result()
     carrier = context.fact_bag.get("executable.carrier") or {}
     if carrier.get("kind") == "runtime_bundle":

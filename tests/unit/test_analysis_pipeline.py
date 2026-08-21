@@ -161,6 +161,21 @@ def test_analysis_respects_shared_embedded_scan_switch(tmp_path):
     assert report.prepass.get("source") != "embedded_scan"
 
 
+def test_analysis_requires_candidate_embedded_scan_authorization(tmp_path, monkeypatch):
+    prefix = b"v" * (2 * 1024 * 1024)
+    path = tmp_path / "unauthorized-middle-payload.mp4"
+    path.write_bytes(prefix + _zip_bytes(tmp_path) + prefix)
+
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("unauthorized candidates must not enter the embedded scanner")
+
+    monkeypatch.setattr("sunpack.analysis.engine.scan_embedded_archives", unexpected_scan)
+    report = AnalysisEngine().analyze_path(str(path), embedded_scan_allowed=False)
+
+    assert report.selected == []
+    assert report.prepass.get("source") != "embedded_scan"
+
+
 def test_analysis_reuses_complete_detection_prepass_without_shared_rescan(tmp_path, monkeypatch):
     path = tmp_path / "payload.bin"
     payload = b"p" * (2 * 1024 * 1024) + _zip_bytes(tmp_path) + b"s" * (2 * 1024 * 1024)

@@ -9,6 +9,8 @@ from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
 from sunpack.detection.options import DetectionOptions
 from sunpack.coordinator.scan_session import DetectionScanSession
+from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task
 from sunpack.relations.knowledge import write_relation_task
@@ -25,6 +27,7 @@ class ArchiveTaskProvider:
         self.config = config
         self.detection_options = detection_options or DetectionOptions()
         self.detector = DetectionScheduler(config, options=self.detection_options)
+        self.nested_extraction_policy = NestedExtractionPolicy(config)
         self._relations = RelationsScheduler()
         self.failed_candidates: list[str] = []
         self.failed_candidate_failures: list[FailureInfo] = []
@@ -41,7 +44,12 @@ class ArchiveTaskProvider:
         self.failed_candidates = []
         self.failed_candidate_failures = []
         if self._detection_pipeline_disabled():
-            return self._scan_standard_archive_targets(scan_roots, processed_keys, scan_session=scan_session)
+            return self._scan_standard_archive_targets(
+                scan_roots,
+                processed_keys,
+                scan_session=scan_session,
+                is_recursive_scan=is_recursive_scan,
+            )
 
         tasks: list[ArchiveTask] = []
         for detection in self.detect_targets(scan_roots, scan_session=scan_session, is_recursive_scan=is_recursive_scan):
@@ -62,6 +70,8 @@ class ArchiveTaskProvider:
         """Re-enter detection for one Relations hypothesis."""
         if not bag.get("candidate.entry_path"):
             return None
+        if not bag.has(EMBEDDED_SCAN_ALLOWED_FACT):
+            bag.set(EMBEDDED_SCAN_ALLOWED_FACT, False)
         if self._detection_pipeline_disabled():
             task = ArchiveTask.from_fact_bag(bag, score=0)
         else:
@@ -89,11 +99,17 @@ class ArchiveTaskProvider:
         processed_keys: set[str],
         *,
         scan_session: DetectionScanSession | None = None,
+        is_recursive_scan: bool = False,
     ) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
         scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
-        for bag in self._filter_incomplete_split_groups(candidate_bags):
+        fact_bags = self._filter_incomplete_split_groups(candidate_bags)
+        self.nested_extraction_policy.plan_embedded_scan(
+            fact_bags,
+            is_recursive_scan=is_recursive_scan,
+        ).apply(fact_bags)
+        for bag in fact_bags:
             main_path = bag.get("candidate.entry_path")
             if not main_path or not self._is_standard_archive_candidate(main_path, bag):
                 continue
@@ -114,49 +130,11 @@ class ArchiveTaskProvider:
         scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
-        if self.detection_options.deep_scan:
-            return self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
-
-        # Establish strict precheck outcomes first.  Candidates that survive
-        # are eligible for the existing embedded-scan policy before fuzzy
-        # scoring gets a chance to accept one incidental archive signature.
-        _precheck_decisions, surviving = self.detector.evaluate_precheck_pool(
+        self.nested_extraction_policy.plan_embedded_scan(
             fact_bags,
-            scan_session=scan_session,
-        )
-        ratio = self._embedded_deep_scan_single_candidate_ratio()
-        if ratio > 0.0:
-            selected = (
-                _select_single_candidate_ratio(surviving, ratio)
-                if is_recursive_scan
-                else surviving
-            )
-            for bag in selected:
-                bag.set("candidate.embedded_payload_precheck_enabled", True)
-                bag.unset("embedded_archive.analysis")
-
-        # Re-running precheck is cheap because its facts are already cached.
-        # Selected survivors now enter embedded_payload_identity first; a
-        # failed embedded scan passes through to the unchanged scoring layer.
+            is_recursive_scan=is_recursive_scan,
+        ).apply(fact_bags)
         return self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
-
-    def _embedded_deep_scan_single_candidate_ratio(self) -> float:
-        embedded_config = self.config.get("embedded_scan")
-        if isinstance(embedded_config, dict) and not bool(embedded_config.get("enabled", True)):
-            return 0.0
-        pipeline = rule_pipeline_config(self.config)
-        precheck = pipeline.get("precheck") if isinstance(pipeline.get("precheck"), list) else []
-        for item in precheck:
-            if not isinstance(item, dict) or item.get("name") != "embedded_payload_identity":
-                continue
-            if item.get("enabled", False) is False:
-                return 0.0
-            value = item.get("deep_scan_single_candidate_ratio", 0.3)
-            try:
-                return min(1.0, max(0.0, float(value)))
-            except (TypeError, ValueError):
-                return 0.0
-        return 0.0
 
     def _detection_pipeline_disabled(self) -> bool:
         if self.detection_options.deep_scan:
@@ -199,40 +177,3 @@ def _write_initial_task_knowledge(task: ArchiveTask) -> None:
     write_filesystem_task(task)
     write_relation_task(task)
     write_detection_task(task)
-
-
-def _select_single_candidate_ratio(fact_bags: list[FactBag], ratio: float) -> list[FactBag]:
-    """Select every logical candidate whose size reaches the configured share."""
-    sized = [
-        (size, str(bag.get("file.path") or ""), bag)
-        for bag in fact_bags
-        if (size := _logical_candidate_size(bag)) > 0
-    ]
-    if not sized or ratio <= 0.0:
-        return []
-    sized.sort(key=lambda item: (-item[0], os.path.normcase(os.path.normpath(item[1]))))
-    total_size = sum(size for size, _path, _bag in sized)
-    threshold = total_size * min(1.0, ratio)
-    return [bag for size, _path, bag in sized if size >= threshold]
-
-
-def _logical_candidate_size(bag: FactBag) -> int:
-    paths = bag.get("candidate.member_paths")
-    if isinstance(paths, list) and len(paths) > 1:
-        total = 0
-        seen: set[str] = set()
-        for raw_path in paths:
-            if not isinstance(raw_path, str) or not raw_path:
-                continue
-            normalized = os.path.normcase(os.path.normpath(raw_path))
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            try:
-                total += os.path.getsize(raw_path)
-            except OSError:
-                continue
-        if total > 0:
-            return total
-    size = bag.get("file.size")
-    return int(size) if isinstance(size, int) and size > 0 else 0

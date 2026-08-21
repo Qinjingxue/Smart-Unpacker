@@ -8,6 +8,7 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.detection.options import DetectionOptions
 from sunpack.relations.internal.group_builder import RelationsGroupBuilder
@@ -131,6 +132,7 @@ def direct_file_task(path: str, all_parts: list[str] | None = None) -> ArchiveTa
     bag.set("candidate.kind", "split_archive" if is_split else "direct_file")
     bag.set("candidate.logical_name", logical_name or name)
     bag.set("candidate.member_paths", parts)
+    bag.set(EMBEDDED_SCAN_ALLOWED_FACT, True)
     bag.set("archive.format_hint", format_hint)
     if is_split:
         bag.set("relation.is_split_related", True)

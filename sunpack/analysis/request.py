@@ -57,6 +57,9 @@ class AnalysisRequest:
     capabilities: frozenset[AnalysisCapability] = field(default_factory=lambda: DEFAULT_ANALYSIS_CAPABILITIES)
     budget: AnalysisBudget = field(default_factory=AnalysisBudget)
     initial_prepass: dict | None = None
+    # Standalone analysis is an initial, non-recursive scan by default. The
+    # coordinator passes the recursive policy's candidate-level decision here.
+    embedded_scan_allowed: bool = True
 
     def __post_init__(self) -> None:
         normalized = frozenset(AnalysisCapability(item) for item in self.capabilities)

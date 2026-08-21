@@ -17,7 +17,6 @@ class RuleBase:
     routing_formats: set[str] = set()
     routing_extensions: set[str] = set()
     can_be_promoted: bool = False
-    precheck_phase: str = "identity"  # guard | identity | tail
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
         raise NotImplementedError()

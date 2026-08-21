@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleDecision
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.support.global_cache_manager import file_identity
 
 
@@ -10,6 +11,9 @@ DEEP_SCAN_RULE = "deep_full_stream_scan"
 
 def evaluate_deep_bag(fact_bag: FactBag) -> RuleDecision:
     from sunpack.analysis import scan_embedded_archives
+
+    if not bool(fact_bag.get(EMBEDDED_SCAN_ALLOWED_FACT)):
+        return _decision(False, "Embedded scan is not authorized by the recursive scan policy")
 
     path = str(fact_bag.get("file.path") or fact_bag.get("candidate.entry_path") or "")
     if not path:

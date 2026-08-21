@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalyzer
 from sunpack.analysis.request import AnalysisRequest
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.analysis.source import PatchedAnalysisSource, analysis_source_for_descriptor
 from sunpack.support.archive_input_projection import (
     write_source_extractable_segments,
@@ -79,7 +80,12 @@ class ArchiveInputPlanningStage:
             self._report_cache.clear()
 
     def _report_cache_key(self, task: ArchiveTask) -> tuple:
-        return ("source", json.dumps(knowledge_view.source_fingerprint(task), ensure_ascii=False, sort_keys=True, default=str))
+        return (
+            "source",
+            json.dumps(knowledge_view.source_fingerprint(task), ensure_ascii=False, sort_keys=True, default=str),
+            "embedded_scan_allowed",
+            bool(task.fact_bag.get(EMBEDDED_SCAN_ALLOWED_FACT)),
+        )
 
     @staticmethod
     def _path_cache_fingerprint(path: str) -> tuple:
@@ -181,7 +187,10 @@ class ArchiveInputPlanningStage:
         )
         return self.analyzer.analyze(
             source,
-            AnalysisRequest(initial_prepass=initial_prepass),
+            AnalysisRequest(
+                initial_prepass=initial_prepass,
+                embedded_scan_allowed=bool(task.fact_bag.get(EMBEDDED_SCAN_ALLOWED_FACT)),
+            ),
         )
 
     def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "input_planning") -> list[ArchiveTask]:

@@ -45,6 +45,7 @@ def test_archive_analyzer_dispatches_file_source_and_request():
         "report_path": "logical.zip",
         "initial_prepass": {"hits": []},
         "capabilities": frozenset({AnalysisCapability.SIGNATURE_PREPASS}),
+        "embedded_scan_allowed": True,
     })]
 
 

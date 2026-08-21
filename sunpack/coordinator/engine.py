@@ -17,6 +17,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.reporting import RunReporter
 from sunpack.coordinator.space_guard import ExtractionSpaceGuard
@@ -480,6 +481,10 @@ class _RequestRuntime:
         bag.set(
             "relation.volume_retry_basis",
             ["confirmed_structure", "anchor_constrained_filename"],
+        )
+        bag.set(
+            EMBEDDED_SCAN_ALLOWED_FACT,
+            bool(task.fact_bag.get(EMBEDDED_SCAN_ALLOWED_FACT)),
         )
         replacement = self.task_scanner.provider.task_from_candidate_bag(bag)
         if replacement is None:

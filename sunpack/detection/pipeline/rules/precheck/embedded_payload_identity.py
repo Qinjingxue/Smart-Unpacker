@@ -7,6 +7,7 @@ from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement
 from sunpack.detection.pipeline.rules.registry import register_rule
 from sunpack.analysis import embedded_result_from_dict
+from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 
 
 DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO = 0.3
@@ -18,20 +19,13 @@ class _EmbeddedModuleEnabled:
 
     def matches(self, facts: FactBag, config: dict[str, Any]) -> bool:
         del config
-        path = str(facts.get("file.path") or facts.get("candidate.entry_path") or "")
-        return bool(
-            facts.get("candidate.embedded_payload_precheck_enabled")
-            or path.lower().endswith(".exe")
-        )
+        return bool(facts.get(EMBEDDED_SCAN_ALLOWED_FACT))
 
 
 @register_rule(name="embedded_payload_identity", layer="precheck")
 class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
-    # Executable runtime rejection must precede archive identity accepts;
-    # otherwise an application's internal resource ZIP can claim the carrier.
-    # For non-executables this guard is inactive until deep embedded scanning is
-    # explicitly enabled on the candidate.
-    precheck_phase = "guard"
+    # The recursive scan policy authorizes this module for the whole candidate;
+    # executable carriers are not a separate extension-based exception.
     fact_requirements = [
         FactRequirement("executable.carrier", _EmbeddedModuleEnabled()),
     ]

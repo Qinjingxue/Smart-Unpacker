@@ -6,7 +6,8 @@ from pathlib import Path
 
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.detection_diagnostics import DetectionDiagnostics
-from sunpack.coordinator.task_provider import ArchiveTaskProvider, _select_single_candidate_ratio
+from sunpack.coordinator.nested_extraction_policy import select_single_candidate_ratio
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -106,7 +107,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(result.decision.should_extract)
             self.assertEqual(result.decision.decision_stage, "precheck")
             self.assertEqual(result.decision.deciding_rule, "embedded_payload_identity")
-            self.assertTrue(result.fact_bag.get("candidate.embedded_payload_precheck_enabled"))
+            self.assertTrue(result.fact_bag.get("candidate.embedded_scan_allowed"))
             self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
     def test_relations_volume_anchor_is_opaque_to_detection(self):
@@ -114,7 +115,7 @@ class DetectionBehaviorTests(unittest.TestCase):
         bag.set("file.path", "payload.part5.zip.hidden-5")
         bag.set("file.size", 8192)
         bag.set("candidate.entry_path", "payload.part5.zip.hidden-5")
-        bag.set("candidate.embedded_payload_precheck_enabled", True)
+        bag.set("candidate.embedded_scan_allowed", True)
         bag.set("relation.volume_anchor", {
             "format": "zip",
             "confidence": "strong",
@@ -180,7 +181,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             results = ArchiveTaskProvider(config).detect_targets([str(carrier)])
 
             self.assertFalse(results[0].decision.should_extract)
-            self.assertFalse(results[0].fact_bag.has("candidate.embedded_payload_precheck_enabled"))
+            self.assertFalse(results[0].fact_bag.get("candidate.embedded_scan_allowed"))
 
     def test_single_candidate_ratio_selects_every_candidate_at_or_above_threshold(self):
         bags = []
@@ -190,11 +191,11 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.size", size)
             bags.append(bag)
         self.assertEqual(
-            [bag.get("file.path") for bag in _select_single_candidate_ratio(bags, 0.3)],
+            [bag.get("file.path") for bag in select_single_candidate_ratio(bags, 0.3)],
             ["large", "medium", "small"],
         )
         self.assertEqual(
-            [bag.get("file.path") for bag in _select_single_candidate_ratio(bags, 0.31)],
+            [bag.get("file.path") for bag in select_single_candidate_ratio(bags, 0.31)],
             ["large"],
         )
 
@@ -216,21 +217,21 @@ class DetectionBehaviorTests(unittest.TestCase):
             ordinary.set("file.path", str(other))
             ordinary.set("file.size", 30)
 
-            selected = _select_single_candidate_ratio([split, ordinary], 0.7)
+            selected = select_single_candidate_ratio([split, ordinary], 0.7)
             self.assertEqual(selected, [split])
 
     def test_single_candidate_ratio_skips_empty_or_disabled_selection(self):
         empty = FactBag()
         empty.set("file.path", "empty")
         empty.set("file.size", 0)
-        self.assertEqual(_select_single_candidate_ratio([empty], 0.3), [])
-        self.assertEqual(_select_single_candidate_ratio([empty], 0.0), [])
+        self.assertEqual(select_single_candidate_ratio([empty], 0.3), [])
+        self.assertEqual(select_single_candidate_ratio([empty], 0.0), [])
 
     def test_recursive_candidate_selection_gates_the_entire_embedded_module(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             selected_path = root / "large.bin"
-            skipped_path = root / "small.bin"
+            skipped_path = root / "small.exe"
             selected_path.write_bytes(b"x" * 70)
             skipped_path.write_bytes(b"y" * 30)
 
@@ -244,13 +245,13 @@ class DetectionBehaviorTests(unittest.TestCase):
             }
 
             self.assertTrue(
-                by_name["large.bin"].get("candidate.embedded_payload_precheck_enabled")
+                by_name["large.bin"].get("candidate.embedded_scan_allowed")
             )
             self.assertTrue(by_name["large.bin"].has("executable.carrier"))
             self.assertFalse(
-                by_name["small.bin"].has("candidate.embedded_payload_precheck_enabled")
+                by_name["small.exe"].get("candidate.embedded_scan_allowed")
             )
-            self.assertFalse(by_name["small.bin"].has("executable.carrier"))
+            self.assertFalse(by_name["small.exe"].has("executable.carrier"))
 
     def test_structurally_invalid_magic_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +263,7 @@ class DetectionBehaviorTests(unittest.TestCase):
     def test_pe_overlay_remains_an_ordinary_detection_result(self):
         bag = FactBag()
         bag.set("file.path", "installer.exe")
-        bag.set("candidate.embedded_payload_precheck_enabled", True)
+        bag.set("candidate.embedded_scan_allowed", True)
         bag.set("embedded_archive.analysis", {"found": False})
         bag.set("pe.overlay_structure", {
             "is_pe": True,
@@ -281,6 +282,7 @@ class DetectionBehaviorTests(unittest.TestCase):
         bag = FactBag()
         bag.set("file.path", "application.exe")
         bag.set("candidate.entry_path", "application.exe")
+        bag.set("candidate.embedded_scan_allowed", True)
         bag.set("executable.carrier", {
             "kind": "runtime_bundle",
             "runtime_profile": "par_packer",
