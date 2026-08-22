@@ -198,6 +198,7 @@ class RunReporter:
         failed_tasks: List[str],
         recovered_outputs: List[dict] | None = None,
         failures: List[FailureInfo] | None = None,
+        persist_failure_log: bool = True,
     ):
         recovered = list(recovered_outputs or [])
         partial_count = len(recovered)
@@ -240,25 +241,27 @@ class RunReporter:
                             self._print(self.i18n.t("report.lite_repair_unavailable"))
                         else:
                             self._print(self.i18n.t("report.repair_terminal", status=status, reason=reason))
-            log_path = os.path.join(root_dir, "failed_log.txt")
-            try:
-                with open(log_path, "w", encoding="utf-8") as handle:
-                    for failed_task in failed_tasks:
-                        handle.write(f"{failed_task}\n")
-                    for failure in structured_failures:
-                        handle.write(f"failure={failure.to_dict()}\n")
-                if not self.quiet:
-                    self._print(self.i18n.t("report.failure_details", path=log_path))
-            except Exception:
-                if not self.quiet:
-                    self._print(self.i18n.t("report.failure_log_save_error"))
+            if persist_failure_log:
+                log_path = os.path.join(root_dir, "failed_log.txt")
+                try:
+                    with open(log_path, "w", encoding="utf-8") as handle:
+                        for failed_task in failed_tasks:
+                            handle.write(f"{failed_task}\n")
+                        for failure in structured_failures:
+                            handle.write(f"failure={failure.to_dict()}\n")
+                    if not self.quiet:
+                        self._print(self.i18n.t("report.failure_details", path=log_path))
+                except Exception:
+                    if not self.quiet:
+                        self._print(self.i18n.t("report.failure_log_save_error"))
         else:
-            log_path = os.path.join(root_dir, "failed_log.txt")
-            try:
-                if os.path.exists(log_path):
-                    os.remove(log_path)
-            except OSError:
-                pass
+            if persist_failure_log:
+                log_path = os.path.join(root_dir, "failed_log.txt")
+                try:
+                    if os.path.exists(log_path):
+                        os.remove(log_path)
+                except OSError:
+                    pass
             if not self.quiet:
                 self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
 

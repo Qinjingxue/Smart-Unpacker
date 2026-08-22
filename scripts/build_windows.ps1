@@ -562,6 +562,35 @@ function Build-SevenZipWrapper {
     Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sunpack_sevenzip_worker.exe") -Force
 }
 
+function Build-ToastHost {
+    param(
+        [Parameter(Mandatory = $true)][string]$CMakeCommand,
+        [Parameter(Mandatory = $true)][string]$CTestCommand,
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$BuildDir,
+        [Parameter(Mandatory = $true)][string]$ToolsRoot,
+        [Parameter(Mandatory = $true)][string]$BuildArch
+    )
+
+    Write-Step "Building ordinary-user Windows Toast Host"
+    Assert-PathExists -LiteralPath (Join-Path $SourceRoot "CMakeLists.txt") -Description "Toast Host CMake project"
+    $cmakePlatform = Get-CMakePlatform -BuildArch $BuildArch
+    Reset-StaleCMakeBuildDir -SourceDir $SourceRoot -BuildDir $BuildDir -CMakePlatform $cmakePlatform
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $SourceRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
+    if ((Get-ProcessBuildArch) -eq $BuildArch) {
+        Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
+    } else {
+        Write-Host "Skipping Toast Host self-test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
+    }
+
+    $hostExe = Join-Path $BuildDir "Release\sunpack_toast_host.exe"
+    Assert-PathExists -LiteralPath $hostExe -Description "Built Toast Host executable"
+    Assert-PeMachine -LiteralPath $hostExe -BuildArch $BuildArch -Description "Built Toast Host executable"
+    Assert-PeSubsystem -LiteralPath $hostExe -Expected 2 -Description "Built Toast Host executable"
+    Copy-Item -LiteralPath $hostExe -Destination (Join-Path $ToolsRoot "sunpack_toast_host.exe") -Force
+}
+
 function Assert-PackagedNativeExtension {
     param(
         [string]$PackageRoot,
@@ -821,7 +850,8 @@ function Get-PackagedRuntimeToolNames {
     return @(
         "7z.dll",
         "sunpack_sevenzip.dll",
-        "sunpack_sevenzip_worker.exe"
+        "sunpack_sevenzip_worker.exe",
+        "sunpack_toast_host.exe"
     )
 }
 
@@ -894,11 +924,14 @@ $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
+$toastHostRoot = Join-Path $repoRoot "native\toast_host"
+$toastHostBuildDir = Join-Path $toastHostRoot ("build-" + $buildArch)
 $toolsRoot = if ($buildArch -eq "x64") { Join-Path $repoRoot "tools" } else { Join-Path $repoRoot ("tools-" + $buildArch) }
 $sevenZipPath = Join-Path $toolsRoot "7z.exe"
 $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipWrapperDllPath = Join-Path $toolsRoot "sunpack_sevenzip.dll"
 $sevenZipWorkerPath = Join-Path $toolsRoot "sunpack_sevenzip_worker.exe"
+$toastHostPath = Join-Path $toolsRoot "sunpack_toast_host.exe"
 $launcherBuildPath = Join-Path $sevenZipWrapperBuildDir "Release\sunpack_launcher.exe"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 $distRoot = Join-Path $repoRoot "dist"
@@ -950,6 +983,7 @@ Assert-PathExists -LiteralPath $applicationManifestPath -Description "Windows ap
 Assert-PathExists -LiteralPath $manifestEmbeddingScriptPath -Description "Manifest resource embedding script"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
+Assert-PathExists -LiteralPath (Join-Path $toastHostRoot "CMakeLists.txt") -Description "Toast Host CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
 Assert-PathExists -LiteralPath $sevenZipDllPath -Description "Bundled 7-Zip runtime DLL"
 Assert-PathExists -LiteralPath $sevenZipLicensePath -Description "7-Zip license file"
@@ -1015,10 +1049,16 @@ Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $venvPyt
 Test-NativeImport -PythonPath $venvPython
 
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
+Build-ToastHost -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -SourceRoot $toastHostRoot -BuildDir $toastHostBuildDir -ToolsRoot $toolsRoot -BuildArch $buildArch
 Assert-PathExists -LiteralPath $sevenZipWrapperDllPath -Description "Bundled 7z wrapper DLL"
 Assert-PathExists -LiteralPath $sevenZipWorkerPath -Description "Bundled 7z worker executable"
+Assert-PathExists -LiteralPath $toastHostPath -Description "Bundled Toast Host executable"
 Test-SevenZipWrapper -PythonPath $venvPython
 Test-SevenZipWorker -PythonPath $venvPython
+Invoke-Native -FilePath $venvPython -Arguments @(
+    "-c",
+    "from sunpack.support.resources import get_toast_host_path; import os; assert os.path.exists(get_toast_host_path())"
+)
 
 if ($runAcceptanceTests) {
     Write-Step "Running acceptance tests"

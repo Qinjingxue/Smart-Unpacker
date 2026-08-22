@@ -5,6 +5,7 @@ import copy
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from sunpack.filesystem.watcher.service import WatchService
+from sunpack.platform.windows.toast_host import ToastHostManager
 
 
 async def run_watch_service(*, tray_enabled: bool = True, once: bool = False) -> int:
@@ -26,9 +27,17 @@ async def run_watch_service(*, tray_enabled: bool = True, once: bool = False) ->
         worker["windows_process_mode"] = "background"
         return PipelineEngine(engine_config)
 
+    def toast_manager_factory(config: dict, _state_dir: str, logger) -> ToastHostManager:
+        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        return ToastHostManager(
+            update_interval_ms=int(watch_config.get("toast_update_interval_ms", 50)),
+            logger=logger,
+        )
+
     service = WatchService(
         engine_factory=background_engine_factory,
         tray_factory=tray_factory,
         group_coordinator_factory=WatchGroupCoordinator,
+        toast_manager_factory=None if once else toast_manager_factory,
     )
     return await service.run(once=once)

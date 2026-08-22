@@ -307,6 +307,13 @@ class SingleArchiveExtractor:
                 if correct_pwd is None:
                     err = test_err
                 else:
+                    self.sevenzip_runner.emit_semantic_event(
+                        task,
+                        "extract_ready",
+                        archive_path=run_archive,
+                        completed_bytes=0,
+                        total_bytes=0,
+                    )
                     with _phase(phase_timer, f"{phase_prefix}_sevenzip_attempt"):
                         run_result = yield {
                             "archive_path": run_archive,

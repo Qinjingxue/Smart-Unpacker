@@ -77,6 +77,74 @@ def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_pa
     assert service.config["extraction"]["content_requirement"] == "allow_partial"
 
 
+def test_watch_service_attaches_and_releases_toast_host_with_watch_lifecycle(tmp_path, monkeypatch):
+    config = {
+        "extraction": {"content_requirement": "complete"},
+        "watch": {
+            "state_dir": str(tmp_path / "state"),
+            "roots": [str(tmp_path)],
+            "tray_enabled": False,
+            "clipboard_monitor_enabled": False,
+            "toast_enabled": True,
+        },
+    }
+    monkeypatch.setattr(service_module, "load_config", lambda: config)
+    monkeypatch.setattr(service_module, "read_watch_roots", lambda: [str(tmp_path)])
+    captured = {}
+
+    class Engine:
+        async def __aenter__(self):
+            return self
+
+        async def aclose(self, graceful=True):
+            pass
+
+    class Scheduler:
+        def __init__(self, *_args, **kwargs):
+            captured["sink"] = kwargs.get("notification_sink")
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    class Host:
+        def __init__(self):
+            self.started = False
+            self.stopped = False
+            self.cleared = 0
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def publish(self, _snapshot):
+            pass
+
+        def clear(self):
+            self.cleared += 1
+
+    host = Host()
+    monkeypatch.setattr(service_module, "WatchScheduler", Scheduler)
+    service = WatchService(
+        engine_factory=lambda _config: Engine(),
+        toast_manager_factory=lambda _config, _state_dir, _log: host,
+    )
+
+    _await(service._start_scheduler())
+    assert host.started is True
+    assert captured["sink"] is service.toast_coordinator
+
+    _await(service._stop_scheduler())
+    assert host.cleared == 1
+    assert host.stopped is False
+    service._stop_toast_host()
+    assert host.stopped is True
+
+
 def test_watch_runtime_does_not_change_process_cwd(tmp_path, monkeypatch):
     caller = tmp_path / "caller"
     caller.mkdir()

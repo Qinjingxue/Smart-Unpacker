@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Protocol, TextIO
+from typing import Any, Callable, Iterable, Mapping, Protocol, TextIO
 
 from sunpack.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.repair_inspection import RepairInspectionService
@@ -47,6 +47,8 @@ class _Submission:
     config: dict
     stdout: TextIO | None = None
     stderr: TextIO | None = None
+    progress_callback: Callable[[Any, dict[str, Any]], None] | None = None
+    persist_failure_log: bool = True
 
 
 class AsyncOutputCommitter(Protocol):
@@ -157,6 +159,8 @@ class PipelineEngine:
         request_config: dict | None = None,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
+        progress_callback: Callable[[Any, dict[str, Any]], None] | None = None,
+        persist_failure_log: bool = True,
     ) -> PipelineResponse:
         if not self._started or self._closed:
             raise RuntimeError("PipelineEngine must be entered before run")
@@ -179,6 +183,8 @@ class PipelineEngine:
             config=request_config,
             stdout=stdout,
             stderr=stderr,
+            progress_callback=progress_callback,
+            persist_failure_log=bool(persist_failure_log),
         )
         cancellation = CancellationToken()
         task = asyncio.current_task()
@@ -452,7 +458,7 @@ class _RequestRuntime:
             output_stream=submission.stdout,
         )
         self.extractor.ensure_space = self.space_guard.ensure_space
-        self.extractor.set_progress_callback(self.reporter.task_progress)
+        self.extractor.set_progress_callback(self._report_progress)
         self.batch_runner = ExtractionBatchRunner(
             self.context,
             self.extractor,
@@ -463,6 +469,17 @@ class _RequestRuntime:
             progress_reporter=self.reporter,
             request_id=submission.request_id,
         )
+
+    def _report_progress(self, task: Any, event: dict[str, Any]) -> None:
+        self.reporter.task_progress(task, event)
+        callback = self.submission.progress_callback
+        if callback is not None:
+            try:
+                callback(task, dict(event))
+            except Exception:
+                # Progress observers are deliberately best-effort.  A broken
+                # UI/notification sink must never fail an extraction request.
+                pass
 
     def _resolve_missing_volume_once(self, task, _outcome):
         current_paths = list(task.all_parts or [task.main_path])
@@ -642,6 +659,7 @@ class _RequestRuntime:
                 response.summary.failed_tasks,
                 recovered_outputs=response.summary.recovered_outputs,
                 failures=response.summary.failures,
+                persist_failure_log=self.submission.persist_failure_log,
                 request_id=request_id,
                 cancellation=cancellation,
             )

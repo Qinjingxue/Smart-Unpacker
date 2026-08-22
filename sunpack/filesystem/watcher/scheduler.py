@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -45,6 +46,7 @@ from sunpack.filesystem.watcher.scanner import (
 )
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateEntry, WatchStateStore
+from sunpack.filesystem.watcher.toast import NullWatchNotificationSink
 from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
@@ -97,6 +99,7 @@ class _ActiveCandidateState:
 
 @dataclass
 class _ActivePipelineRequest:
+    notification_id: str
     candidate: WatchCandidate
     group: WatchGroupSnapshot | None
     task: asyncio.Task
@@ -133,6 +136,7 @@ class WatchScheduler:
         observer_stop_timeout_seconds: float | None = None,
         pipeline_engine=None,
         group_coordinator=None,
+        notification_sink=None,
         wake_callback: Callable[[], None] | None = None,
     ):
         self.config = config
@@ -187,6 +191,8 @@ class WatchScheduler:
         self._started = False
         self._run_wakeup = threading.Event()
         self._wake_callback = wake_callback
+        self.notification_sink = notification_sink or NullWatchNotificationSink()
+        self._notification_error_actions: set[str] = set()
         self.runtime_cache_cleanup_enabled = bool(
             watch_config.get("runtime_cache_cleanup_enabled", True)
         )
@@ -432,6 +438,7 @@ class WatchScheduler:
         try:
             single = await self._complete_candidate(request)
         except Exception as exc:
+            self._notify("aborted", request.notification_id)
             single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
             self.log.write(
                 "error",
@@ -1024,6 +1031,8 @@ class WatchScheduler:
         *,
         group: WatchGroupSnapshot | None = None,
     ) -> _ActivePipelineRequest:
+        notification_id = uuid.uuid4().hex
+        self._notify("submitted", notification_id, candidate.path)
         self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
         with self._password_source_lock:
             run_config = dict(self.config)
@@ -1050,10 +1059,18 @@ class WatchScheduler:
         task = asyncio.create_task(self.pipeline_engine.run(
             [PipelineTarget(candidate.path, output=run_config["output"])],
             output_committer=IdentityOutputCommitter(),
+            progress_callback=lambda archive_task, event: self._notify(
+                "progress",
+                notification_id,
+                archive_task,
+                event,
+            ),
+            persist_failure_log=False,
         ))
         self._reset_idle_cache_cleanup()
         task.add_done_callback(lambda _task: self._wake_service())
         return _ActivePipelineRequest(
+            notification_id=notification_id,
             candidate=candidate,
             group=group,
             task=task,
@@ -1122,6 +1139,7 @@ class WatchScheduler:
                 failures=failure_payloads,
                 partial_recovery=True,
             )
+            self._notify("suppressed", request.notification_id)
             return WatchRunResult(processed=1, failed=1, errors=[error])
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
@@ -1143,6 +1161,7 @@ class WatchScheduler:
                 path=candidate.path,
                 error=error,
             )
+            self._notify("failed", request.notification_id, [error], [])
             return WatchRunResult(processed=1, failed=1, errors=[error])
 
         failed = list(summary.failed_tasks)
@@ -1186,6 +1205,10 @@ class WatchScheduler:
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             self._cleanup_probe_workspace(request.probe_workspace)
+            if blockers:
+                self._notify("suppressed", request.notification_id)
+            else:
+                self._notify("failed", request.notification_id, failed, failure_payloads)
             return WatchRunResult(processed=1, failed=1, errors=failed)
         if _summary_processed_no_tasks(summary):
             if group is not None:
@@ -1200,6 +1223,7 @@ class WatchScheduler:
             )
             self.log.write("no_tasks_found", path=candidate.path)
             self._cleanup_probe_workspace(request.probe_workspace)
+            self._notify("suppressed", request.notification_id)
             return WatchRunResult(processed=1)
         if outcome_kind != OutcomeKind.COMPLETE_SUCCESS:
             self._cleanup_probe_workspace(request.probe_workspace)
@@ -1207,6 +1231,7 @@ class WatchScheduler:
             if group is not None:
                 self.state.record_group_terminal(group, status="failed_terminal")
             self.log.write("failed_terminal", path=candidate.path, error=error, failures=[])
+            self._notify("failed", request.notification_id, [error], [])
             return WatchRunResult(processed=1, failed=1, errors=[error])
 
         generated_output_dirs, output_path_map = await self._promote_probe_outputs(
@@ -1233,7 +1258,21 @@ class WatchScheduler:
             status="done",
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
+        self._notify("succeeded", request.notification_id, generated_output_dirs)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
+
+    def _notify(self, action: str, *args) -> None:
+        try:
+            getattr(self.notification_sink, action)(*args)
+        except Exception as exc:
+            if action not in self._notification_error_actions:
+                self._notification_error_actions.add(action)
+                self.log.write(
+                    "notification_sink_error",
+                    action=action,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
 
     def _current_group_snapshot(
         self,

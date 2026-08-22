@@ -1344,6 +1344,11 @@ class SevenZipRunner:
         except Exception:
             pass
 
+    def emit_semantic_event(self, task: ArchiveTask, event: str, **payload: Any) -> None:
+        """Publish a pipeline-owned event through the ordered progress sink."""
+
+        self._emit_progress(task, {"type": "semantic", "event": str(event), **payload})
+
     def _emit_native_event(self, task: ArchiveTask | None, event: dict[str, Any]) -> None:
         callback = self.native_event_callback
         if callback is None:

@@ -17,6 +17,7 @@ from sunpack.contracts.content_recovery import require_complete_content
 from sunpack.filesystem.watcher.config_observer import ConfigFileObserver
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
+from sunpack.filesystem.watcher.toast import WatchToastCoordinator
 from sunpack.support.resources import get_resource_path
 
 
@@ -198,12 +199,20 @@ def is_watch_lock_active(config: dict) -> bool:
 
 
 class WatchService:
-    def __init__(self, *, engine_factory=None, tray_factory=None, group_coordinator_factory=None):
+    def __init__(
+        self,
+        *,
+        engine_factory=None,
+        tray_factory=None,
+        group_coordinator_factory=None,
+        toast_manager_factory=None,
+    ):
         if engine_factory is None:
             raise ValueError("WatchService requires an engine_factory.")
         self.engine_factory = engine_factory
         self.group_coordinator_factory = group_coordinator_factory
         self.tray_factory = tray_factory
+        self.toast_manager_factory = toast_manager_factory
         self.config = load_config()
         self.service_config = service_config_from(self.config)
         self.state_dir = service_state_dir(self.config)
@@ -213,6 +222,8 @@ class WatchService:
         self.pipeline_engine = None
         self.config_observer: ConfigFileObserver | None = None
         self.tray = None
+        self.toast_host = None
+        self.toast_coordinator: WatchToastCoordinator | None = None
         self._stop_requested = False
         self._lock_handle = None
         self._last_idle_tick_signature = None
@@ -307,6 +318,7 @@ class WatchService:
             self._stop_config_observer()
             self._stop_tray()
             await self._stop_scheduler()
+            self._stop_toast_host()
             self._stop_control_bridge()
             self.control_events.close()
             self._release_lock()
@@ -363,6 +375,7 @@ class WatchService:
         await self._stop_scheduler()
         roots = self.roots
         if not roots:
+            self._stop_toast_host()
             self.log.write("scheduler_not_started", reason="no_existing_roots", configured_roots=list(self.service_config.get("roots") or []))
             return
         configured_out_dir = str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or ".")
@@ -373,9 +386,16 @@ class WatchService:
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
         watch_config["clipboard_monitor_enabled"] = bool(self.service_config.get("clipboard_monitor_enabled", True))
         run_config["watch"] = watch_config
-        pipeline_engine = self.engine_factory(run_config)
+        self._restart_toast_host(run_config)
+        toast_coordinator = (
+            WatchToastCoordinator(self.toast_host, run_config, self.state_dir)
+            if self.toast_host is not None
+            else None
+        )
+        pipeline_engine = None
         scheduler = None
         try:
+            pipeline_engine = self.engine_factory(run_config)
             await pipeline_engine.__aenter__()
             scheduler = WatchScheduler(
                 run_config,
@@ -392,32 +412,61 @@ class WatchService:
                 observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
                 pipeline_engine=pipeline_engine,
                 group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
+                notification_sink=toast_coordinator,
                 wake_callback=self._wake_scheduler,
             )
             await scheduler.start()
         except Exception:
+            if toast_coordinator is not None:
+                toast_coordinator.stop()
             if scheduler is not None:
                 try:
                     await scheduler.stop()
                 except Exception:
                     pass
-            try:
-                await pipeline_engine.aclose(graceful=True)
-            except Exception:
-                pass
+            if pipeline_engine is not None:
+                try:
+                    await pipeline_engine.aclose(graceful=True)
+                except Exception:
+                    pass
             raise
         self.pipeline_engine = pipeline_engine
         self.scheduler = scheduler
+        self.toast_coordinator = toast_coordinator
         self.log.write("scheduler_attached", roots=roots, out_dir=out_dir, state_path=state_path)
 
     async def _stop_scheduler(self) -> None:
         if self.scheduler is not None:
             await self.scheduler.stop()
         self.scheduler = None
+        if self.toast_coordinator is not None:
+            self.toast_coordinator.stop()
+        self.toast_coordinator = None
         if self.pipeline_engine is not None:
             await self.pipeline_engine.aclose(graceful=True)
         self.pipeline_engine = None
         self._last_idle_tick_signature = None
+
+    def _restart_toast_host(self, config: dict) -> None:
+        self._stop_toast_host()
+        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        if not bool(watch_config.get("toast_enabled", True)) or self.toast_manager_factory is None:
+            return
+        try:
+            host = self.toast_manager_factory(config, self.state_dir, self.log)
+            host.start()
+            self.toast_host = host
+        except Exception as exc:
+            self.toast_host = None
+            self.log.write("toast_host_manager_error", error=str(exc), error_type=type(exc).__name__)
+
+    def _stop_toast_host(self) -> None:
+        host, self.toast_host = self.toast_host, None
+        if host is not None:
+            try:
+                host.stop()
+            except Exception as exc:
+                self.log.write("toast_host_stop_error", error=str(exc), error_type=type(exc).__name__)
 
     def _start_tray(self) -> None:
         if not self.service_config.get("tray_enabled", True) or self.tray_factory is None:

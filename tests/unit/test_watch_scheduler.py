@@ -187,6 +187,29 @@ class WatchState:
         return quiet_seconds
 
 
+class CapturingNotificationSink:
+    def __init__(self):
+        self.events = []
+
+    def submitted(self, request_id, source_path):
+        self.events.append(("submitted", request_id, source_path))
+
+    def progress(self, request_id, task, event):
+        self.events.append(("progress", request_id, task, event))
+
+    def succeeded(self, request_id, output_dirs):
+        self.events.append(("succeeded", request_id, output_dirs))
+
+    def failed(self, request_id, errors, failure_payloads):
+        self.events.append(("failed", request_id, errors, failure_payloads))
+
+    def suppressed(self, request_id):
+        self.events.append(("suppressed", request_id))
+
+    def aborted(self, request_id):
+        self.events.append(("aborted", request_id))
+
+
 def _summary_pipeline_engine():
     return FakePipelineEngine(
         lambda _config: SimpleNamespace(
@@ -240,7 +263,15 @@ class _DeferredPipelineEngine:
     def recent_passwords(self):
         return []
 
-    async def run(self, targets, *, direct=False, output_committer=None):
+    async def run(
+        self,
+        targets,
+        *,
+        direct=False,
+        output_committer=None,
+        progress_callback=None,
+        persist_failure_log=True,
+    ):
         handle = _DeferredHandle(targets[0].path)
         self.handles.append(handle)
         return await handle.future
@@ -1733,6 +1764,7 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
     archive_path = watch_root / "sample.zip"
     archive_path.write_bytes(b"PK\x03\x04payload")
 
+    notifications = CapturingNotificationSink()
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(watch_root)],
@@ -1741,6 +1773,7 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
         quiet_seconds=0,
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(FailingRunner),
+        notification_sink=notifications,
     )
     watcher.enqueue(str(archive_path))
 
@@ -1752,6 +1785,7 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
     assert unchanged.processed == 0
     assert watcher.pending_count == 0
     assert not watcher.state.entries
+    assert [event[0] for event in notifications.events] == ["submitted", "failed"]
 
 
 def test_watch_scheduler_does_not_retry_password_inconclusive_after_password_source_change(tmp_path, monkeypatch):
@@ -1822,6 +1856,7 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
     archive_path = watch_root / "sample.zip"
     archive_path.write_bytes(b"PK\x03\x04payload")
 
+    notifications = CapturingNotificationSink()
     watcher = WatchScheduler(
         {
             "watch": {
@@ -1835,6 +1870,7 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
         quiet_seconds=0,
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
+        notification_sink=notifications,
     )
     watcher.enqueue(str(archive_path))
     first = _await(watcher.run_once())
@@ -1847,6 +1883,12 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
     assert second.succeeded == 1
     assert attempts["count"] == 2
     assert not watcher.state.entries
+    assert [event[0] for event in notifications.events] == [
+        "submitted",
+        "suppressed",
+        "submitted",
+        "succeeded",
+    ]
 
 
 def test_password_retry_wakeup_uses_debounce_deadline_without_pending_candidate(tmp_path, monkeypatch):

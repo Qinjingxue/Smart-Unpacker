@@ -36,6 +36,15 @@ def test_installer_optionally_registers_watch_autostart():
     assert "uninsdeletevalue" in script
 
 
+def test_installer_registers_and_unregisters_ordinary_user_toast_host():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert 'Filename: "{app}\\tools\\sunpack_toast_host.exe"' in script
+    assert 'Parameters: "--register-toast"' in script
+    assert 'Parameters: "--unregister-toast"' in script
+    assert "[UninstallRun]" in script
+
+
 def test_uninstaller_unconditionally_removes_watch_autostart():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
@@ -226,6 +235,7 @@ def test_release_packages_copy_only_runtime_tool_files():
         assert '"7z.dll"' in script
         assert '"sunpack_sevenzip.dll"' in script
         assert '"sunpack_sevenzip_worker.exe"' in script
+        assert '"sunpack_toast_host.exe"' in script
         assert "Assert-PackagedRuntimeTools" in script
     assert "Copy-PackagedRuntimeTools -Source $toolsRoot -Destination $distToolsRoot" in build_script
     assert 'Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "zstandard")' in build_script

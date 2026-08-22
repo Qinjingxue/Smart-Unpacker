@@ -75,6 +75,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"
 Name: "{group}\Uninstall SunPack"; Filename: "{uninstallexe}"
 
+[Run]
+Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--register-toast"; StatusMsg: "Registering watch notifications..."; Flags: runhidden waituntilterminated
+
+[UninstallRun]
+Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--unregister-toast"; Flags: runhidden waituntilterminated skipifdoesntexist
+
 [Code]
 const
   SunPackRegistryKey = 'Software\SunPack';

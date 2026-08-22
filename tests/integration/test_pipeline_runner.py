@@ -49,6 +49,46 @@ def test_pipeline_runner_passes_native_worker_overrides():
     assert captured["extractor"]["watchdog_no_progress_timeout_seconds"] == 180
 
 
+def test_pipeline_progress_observer_receives_extract_ready_before_native_progress(tmp_path):
+    archive = tmp_path / "ready.zip"
+    archive.write_bytes(make_zip({"payload.bin": b"payload" * 4096}))
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "1",
+        "output": {"root": str(tmp_path / "out")},
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+    }))
+    events = []
+
+    async def run():
+        async with PipelineEngine(config) as engine:
+            return await engine.run(
+                [str(archive)],
+                direct=True,
+                progress_callback=lambda task, event: events.append((task, event)),
+            )
+
+    response = asyncio.run(run())
+
+    assert response.summary.success_count == 1
+    ready_indices = [
+        index
+        for index, (_task, event) in enumerate(events)
+        if event.get("type") == "semantic" and event.get("event") == "extract_ready"
+    ]
+    assert ready_indices
+    native_indices = [
+        index
+        for index, (_task, event) in enumerate(events)
+        if event.get("type") == "progress"
+    ]
+    assert not native_indices or ready_indices[0] < native_indices[0]
+
+
 def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path, monkeypatch):
     archive = tmp_path / "payload.zip"
     archive.write_bytes(make_zip({"inside.txt": "hello"}))

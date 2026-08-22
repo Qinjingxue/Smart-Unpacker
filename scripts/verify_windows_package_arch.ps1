@@ -34,7 +34,8 @@ function Get-PackagedRuntimeToolNames {
     return @(
         "7z.dll",
         "sunpack_sevenzip.dll",
-        "sunpack_sevenzip_worker.exe"
+        "sunpack_sevenzip_worker.exe",
+        "sunpack_toast_host.exe"
     )
 }
 
@@ -173,6 +174,8 @@ Assert-PackagedRuntimeTools -PackageRoot $root
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip.dll") -BuildArch $Arch -Description "tools\sunpack_sevenzip.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip_worker.exe") -BuildArch $Arch -Description "tools\sunpack_sevenzip_worker.exe"
+Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_toast_host.exe") -BuildArch $Arch -Description "tools\sunpack_toast_host.exe"
+Assert-PeSubsystem -LiteralPath (Join-Path $root "tools\sunpack_toast_host.exe") -Expected 2 -Description "tools\sunpack_toast_host.exe"
 
 Write-Host ""
 Write-Host "Package architecture validation passed: $Arch" -ForegroundColor Green

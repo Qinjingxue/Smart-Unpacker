@@ -39,7 +39,18 @@ class FakePipelineEngine:
     async def clear_runtime_caches(self):
         return {"fake": True}
 
-    async def run(self, targets, *, direct=False, request_config=None, stdout=None, stderr=None, output_committer=None):
+    async def run(
+        self,
+        targets,
+        *,
+        direct=False,
+        request_config=None,
+        stdout=None,
+        stderr=None,
+        output_committer=None,
+        progress_callback=None,
+        persist_failure_log=True,
+    ):
         paths = [target.path if hasattr(target, "path") else str(target) for target in targets]
         output = dict(targets[0].output) if targets and hasattr(targets[0], "output") else {}
         config = dict(request_config or {})
