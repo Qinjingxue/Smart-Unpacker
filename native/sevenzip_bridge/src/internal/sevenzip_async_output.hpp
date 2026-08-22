@@ -64,6 +64,13 @@ public:
         std::size_t peak_active_data_writes = 0;
     };
 
+    struct Metrics {
+        std::uint64_t accepted_bytes = 0;
+        std::uint64_t written_bytes = 0;
+        std::uint64_t completed_files = 0;
+        std::uint64_t completed_jobs = 0;
+    };
+
     struct WorkItem {
         enum class Kind { Data, Close };
 
@@ -386,6 +393,7 @@ public:
                         ++file->outstanding_data;
                     }
                     file->accepted_bytes.fetch_add(chunk, std::memory_order_relaxed);
+                    total_accepted_bytes_.fetch_add(chunk, std::memory_order_relaxed);
                     consumed += chunk;
                     if (buffer->size == kBufferSize) {
                         queued_staging = enqueue_staging_locked(file, false);
@@ -485,6 +493,9 @@ public:
         });
         const HRESULT result = terminal_result_locked(job);
         unregister_job_locked(job);
+        if (result == S_OK) {
+            total_completed_jobs_.fetch_add(1, std::memory_order_relaxed);
+        }
         return result;
     }
 
@@ -536,6 +547,15 @@ public:
 
     UInt64 accepted_bytes(const FileStatePtr& file) const noexcept {
         return file ? file->accepted_bytes.load(std::memory_order_relaxed) : 0;
+    }
+
+    Metrics snapshot_metrics() const noexcept {
+        return Metrics{
+            total_accepted_bytes_.load(std::memory_order_relaxed),
+            total_written_bytes_.load(std::memory_order_relaxed),
+            total_completed_files_.load(std::memory_order_relaxed),
+            total_completed_jobs_.load(std::memory_order_relaxed),
+        };
     }
 
     void record_operation_result(const FileStatePtr& file, Int32 operation_result) noexcept {
@@ -896,6 +916,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         if (file) {
             file->written_bytes += written;
+            total_written_bytes_.fetch_add(written, std::memory_order_relaxed);
         }
     }
 
@@ -1007,12 +1028,17 @@ private:
                 record_failure(file, HRESULT_FROM_WIN32(error), static_cast<int>(error));
             }
         }
+        bool completed_successfully = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             file->closed = true;
+            completed_successfully = !file->failed;
             if (job && job->pending_jobs != 0) {
                 --job->pending_jobs;
             }
+        }
+        if (completed_successfully) {
+            total_completed_files_.fetch_add(1, std::memory_order_relaxed);
         }
         producer_cv_.notify_all();
     }
@@ -1085,6 +1111,10 @@ private:
     std::condition_variable producer_cv_;
     std::condition_variable work_cv_;
     const std::size_t writer_count_;
+    std::atomic<std::uint64_t> total_accepted_bytes_{0};
+    std::atomic<std::uint64_t> total_written_bytes_{0};
+    std::atomic<std::uint64_t> total_completed_files_{0};
+    std::atomic<std::uint64_t> total_completed_jobs_{0};
     std::size_t queued_jobs_ = 0;
     bool stopping_ = false;
 };

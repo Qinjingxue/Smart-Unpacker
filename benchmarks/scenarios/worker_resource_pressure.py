@@ -118,7 +118,7 @@ def _counters(process: psutil.Process | None) -> dict[str, float | int | None]:
         return {"cpu_ms": None, "read_bytes": None, "write_bytes": None}
 
 
-def _job_payload(*, job_id: str, archive: Path, output: Path, dll: Path, payload_bytes: int,
+def _job_payload(*, job_id: str, archive: Path, output: Path, dll: Path,
                  memory_reserve_bytes: int, dictionary_bytes: int, include_dictionary_hint: bool) -> str:
     item: dict[str, Any] = {
         "job_id": job_id,
@@ -129,10 +129,7 @@ def _job_payload(*, job_id: str, archive: Path, output: Path, dll: Path, payload
         "output_dir": str(output),
         "password": "",
         "format_hint": "7z",
-        "native_cpu_weight": 1,
         "native_memory_reserve_bytes": memory_reserve_bytes,
-        "native_expected_output_bytes": payload_bytes,
-        "native_profile_key": "benchmark-resource-pressure",
     }
     if include_dictionary_hint and dictionary_bytes:
         item["native_dictionary_reserve_bytes"] = dictionary_bytes
@@ -200,7 +197,7 @@ def _run_case(*, workspace: BenchmarkWorkspace, worker_path: Path, dll: Path, ar
             worker.submit_async(
                 _job_payload(
                     job_id=job_id, archive=archives[index], output=workspace.outputs / label / job_id,
-                    dll=dll, payload_bytes=int(case["payload_bytes"]),
+                    dll=dll,
                     memory_reserve_bytes=memory_reserve_bytes, dictionary_bytes=int(case["dictionary_bytes"]),
                     include_dictionary_hint=include_dictionary_hint,
                 ),
@@ -245,8 +242,14 @@ def _run_case(*, workspace: BenchmarkWorkspace, worker_path: Path, dll: Path, ar
         "worker_rss_peak_mib": round(max((sample.children_rss_mib for sample in sampler.samples), default=0.0), 3),
         "observed_peak_active_jobs": max(active_values, default=0),
         "observed_peak_active_memory_bytes": max(memory_values, default=0),
-        "controller_adjustment_count": len(controller_events),
-        "controller_peak_memory_limit": max((int(item.get("memory_limit", 0) or 0) for item in controller_events), default=None),
+        "controller_sample_count": len(controller_events),
+        "controller_adjustment_count": sum(
+            "decision" not in item or str(item.get("decision") or "none") != "none"
+            for item in controller_events
+        ),
+        "controller_memory_pause_count": sum(
+            str(item.get("decision") or "") == "memory_paused" for item in controller_events
+        ),
         "successful_jobs": successful, "failed_jobs": jobs - successful, "failures": failures,
         "result_statuses": [result.get("status") for result in results.values()],
         "dictionary_hint": include_dictionary_hint,

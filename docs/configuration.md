@@ -186,7 +186,6 @@ CLI 可用 `--recur` 临时覆盖。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `performance.worker.idle_decay_seconds` | `int` / `float` | worker 空闲多久后衰减短期反馈；进程退出后反馈数据不保留。 |
 | `performance.worker.max_task_seconds` | `int` / `float` | 单个解压任务总时长上限，`0` 表示不限。 |
 | `performance.worker.watchdog_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
 | `performance.worker.watchdog_interval_ms` | `int` / `float` | Python 仅用于发现 worker 丢失的检查间隔。 |
@@ -194,22 +193,31 @@ CLI 可用 `--recur` 临时覆盖。
 | `performance.worker.stage_thread_capacity` | `int` | 同步扫描、分析、校验、修复和后处理的固定 worker 线程容量；`0` 自动按机器能力选择。 |
 | `performance.worker.max_inflight_files` | `int` | 同时存在的文件级异步状态机上限；`0` 自动取 worker 总容量的 4 倍，范围 64–512。 |
 | `performance.worker.max_pending_stage_jobs` | `int` | Python blocking lane 的待执行作业硬上限，满载时异步生产者等待而不创建新线程。 |
-| `performance.worker.adaptive_enabled` | `bool` | 是否启用 native CPU/IO/内存采样和动态准入。 |
+| `performance.worker.adaptive_enabled` | `bool` | 是否启用基于实际输出吞吐的 native 动态并发控制。 |
 | `performance.worker.initial_active_jobs` | `int` | native 初始活动任务数，`0` 自动选择。 |
-| `performance.worker.sample_interval_ms` | `int` | native 资源采样间隔，最小 100 ms。 |
+| `performance.worker.exploration_strategy` | `str` | `calibrated`（默认，从 CPU 校准值小步探索）、`rapid`（大步起探）或 `full`（从线程容量向下探索）。 |
+| `performance.worker.resource_diagnostics_enabled` | `bool` | 是否附带采样 CPU 和进程 IO，仅供校准诊断，生产默认关闭。 |
+| `performance.worker.sample_interval_ms` | `int` | native 吞吐采样间隔，最小 100 ms。 |
+| `performance.worker.minimum_window_seconds` / `maximum_window_seconds` | `float` | 单个稳定吞吐窗口的最短和最长时间。 |
+| `performance.worker.large_window_bytes` | `int` | 达到该实际写入量后使用字节/秒比较并发探测。 |
+| `performance.worker.small_window_jobs` / `small_window_files` | `int` | 小任务窗口达到该完成量后使用任务/秒或文件/秒比较。 |
+| `performance.worker.improvement_ratio` / `regression_ratio` | `float` | 接受探测和触发回退的滞回阈值。 |
+| `performance.worker.cooldown_windows` / `hold_windows` | `int` | 回退冷却和稳定点保持的窗口数。 |
+| `performance.worker.warm_start_decay_seconds` | `float` | 活动会话完全空闲后保留最近确认并发作为温启动提示的线性衰减时间；`0`（默认）禁用温启动，且任何值都不会保留旧吞吐窗口。 |
+| `performance.worker.warm_start_confirmations` | `int` | 最近并发至少被相邻吞吐窗口确认多少次后才允许用于温启动。 |
 | `performance.worker.max_queue_jobs` | `int` | native 任务队列上限；达到上限时返回可重试的背压结果。 |
 | `performance.worker.priority_aging_quantum` | `int` | native 优先级老化步长，避免低优先级请求长期饥饿。 |
 | `performance.worker.writer_threads` | `int` | native worker 统一写出线程数。 |
 | `performance.worker.memory_budget_bytes` | `int` | native worker 的估算内存准入预算；`0` 使用可用物理内存的默认比例。 |
 | `performance.worker.job_buffer_budget_bytes` | `int` | 单个 native 解压任务的输出 inflight 缓冲上限。 |
-| `performance.worker.profile_calibration_*` | 多种 | native worker 进程内的在线反馈调节；worker 退出后反馈数据丢弃，不落盘。 |
+| `performance.worker.memory_pause_available_mb` / `memory_resume_available_mb` | `int` | 系统可用内存进入紧急区时暂停新任务准入，以及恢复准入的阈值。 |
 | `resource_guard` | `dict` | 可选资源护栏，用 analysis 估算的文件数、解包大小、压缩比等限制任务。 |
 
-native worker 启动时只采集一次逻辑处理器数、总物理内存和可用物理内存，并由同一份资源快照计算线程容量、内存预算、初始并发和 backlog 下限。自动内存预算取可用物理内存的 70%，每个启动槽按 512 MiB 估算；线程容量为逻辑处理器数、内存槽位数和 32 的最小值。前台初始并发为 `ceil(逻辑处理器数 / 2)`，后台为 `ceil(逻辑处理器数 / 4)`，再由内存槽位和线程容量约束。`thread_capacity`、`initial_active_jobs` 和 `memory_budget_bytes` 的正数值会分别覆盖自动结果，`0` 表示自动计算。
+native worker 启动时采集逻辑处理器数和可用物理内存。线程容量为逻辑处理器数和 32 的最小值，不再由内存槽位裁剪；前台初始并发为 `ceil(逻辑处理器数 / 2)`，后台为 `ceil(逻辑处理器数 / 4)`。自动内存预算取启动时可用物理内存的 70%，但只作为累计任务 reservation 的硬准入预算。`thread_capacity`、`initial_active_jobs` 和 `memory_budget_bytes` 的正数值分别覆盖自动结果，`0` 表示自动计算。
 
-native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `performance.worker.idle_decay_seconds` 后逐步恢复动态初始限制。任务类型的在线反馈仅在当前 worker 进程内有效，worker 退出时丢弃。Python 不根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 native worker holder。
+所有解压任务共用的异步写入器提供累计实际接收字节、实际写入字节、完成文件和完成任务计数。控制器把一次从空闲到再次完全空闲的过程视为活动会话，但只在队列持续积压、活动任务接近当前上限时开启饱和测量段。大数据窗口比较实际写入字节/秒，小任务窗口比较完成任务/秒或文件/秒；吞吐上升时保留并继续小步探索，下降时退回之前的稳定并发并进入冷却。backlog 中断会立即放弃未完成探测、回到最近稳定并发并清空窗口；完全空闲会保存计数基线并让控制器无限期休眠。若显式启用温启动，下一活动会话可以使用随空闲时间衰减的最近确认并发作为启动提示，但仍必须重新采 baseline；实测默认禁用。CPU 和进程 IO 不参与生产决策，只有开启 `resource_diagnostics_enabled` 后才采样和输出。控制器不读取 `profile_key`，也不根据格式或 solid 状态选择并发。
 
-所有归档任务的静态初始成本统一为 1 个 CPU token，不再按压缩格式、算法、solid 状态或文件数量设置静态 CPU 权重；同机格式矩阵表明旧权重会明显压低大体积 7z 的吞吐。运行期仍允许 worker 根据该 profile 的实测吞吐回退动态提高 CPU 成本，这依赖实际反馈而不是文件类型猜测。solid 归档不使用全局单任务互斥，但仍提高内存权重，字典大小、预计输出量和 IO 规模也继续参与内存与 IO 准入，因此不同 solid 归档可以并行，但不会绕过资源预算。
+归档格式、算法、solid 状态和文件数量不再产生 CPU 权重；solid 归档也没有全局单任务互斥。Python 只向 native 提供字典大小和内存 reservation，调度器据此执行硬内存准入；其余并发差异全部由整体实际吞吐反馈学习。
 
 `resource_guard` 当前常用字段：
 

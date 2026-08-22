@@ -29,11 +29,10 @@ SCENARIO = "extraction.worker-small-file-scheduling"
 
 ADMISSION_CASES: dict[str, dict[str, Any]] = {
     "adaptive-baseline": {
-        "description": "Current adaptive controller with ordinary small-job weights.",
+        "description": "Throughput controller with hard memory admission.",
         "blocker": "adaptive-controller",
         "adaptive_enabled": None,
         "initial_active_jobs": 0,
-        "cpu_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "expected_max_active": None,
@@ -43,27 +42,15 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "blocker": "none-fixed-capacity",
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
-        "cpu_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
         "expected_max_active": None,
-    },
-    "cpu-bound": {
-        "description": "Each job consumes the full CPU admission budget.",
-        "blocker": "cpu-limit",
-        "adaptive_enabled": False,
-        "initial_active_jobs": -1,
-        "cpu_weight": -1,
-        "memory_reserve_bytes": 8 << 20,
-        "memory_budget_bytes": 0,
-        "expected_max_active": 1,
     },
     "memory-bound": {
         "description": "A two-job memory budget blocks the third admission.",
         "blocker": "memory-budget",
         "adaptive_enabled": False,
         "initial_active_jobs": -1,
-        "cpu_weight": 1,
         "memory_reserve_bytes": 16 << 20,
         "memory_budget_bytes": 32 << 20,
         "expected_max_active": 2,
@@ -145,11 +132,8 @@ def _job_payload(
     archive: Path,
     output_dir: Path,
     dll_path: Path,
-    expected_output_bytes: int,
-    cpu_weight: int,
     memory_reserve_bytes: int,
     format_hint: str = "zip",
-    profile_key: str = "benchmark-small-zip",
 ) -> str:
     return json.dumps(
         {
@@ -161,10 +145,7 @@ def _job_payload(
             "output_dir": str(output_dir),
             "password": "",
             "format_hint": format_hint,
-            "native_cpu_weight": cpu_weight,
             "native_memory_reserve_bytes": memory_reserve_bytes,
-            "native_expected_output_bytes": expected_output_bytes,
-            "native_profile_key": profile_key,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -183,10 +164,18 @@ def _run_batch(
     sample_interval_ms: int,
     admission_case: dict[str, Any],
     label: str,
+    submission_offsets_seconds: list[float] | None = None,
+    idle_before_indices: dict[int, float] | None = None,
+    worker_config_overrides: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     jobs = int(corpus["jobs"])
     jobs_per_client = jobs // client_count
     archive_paths: list[Path] = list(corpus["archives"])
+    format_hints = list(corpus.get("format_hints") or [])
+    if submission_offsets_seconds is not None and len(submission_offsets_seconds) != jobs:
+        raise ValueError("submission_offsets_seconds must contain one offset per job")
+    if format_hints and len(format_hints) != jobs:
+        raise ValueError("corpus format_hints must contain one hint per job")
     submitted_at: dict[str, float] = {}
     events: list[dict[str, Any]] = []
     results: dict[str, dict[str, Any]] = {}
@@ -195,18 +184,19 @@ def _run_batch(
     lock = threading.Lock()
     done = threading.Condition(lock)
     started_at = time.perf_counter()
-    configured_cpu_weight = capacity if admission_case["cpu_weight"] == -1 else int(admission_case["cpu_weight"])
     initial_active_jobs = capacity if admission_case["initial_active_jobs"] == -1 else int(admission_case["initial_active_jobs"])
+    worker_config = {
+        "thread_capacity": capacity,
+        "adaptive_enabled": admission_case["adaptive_enabled"],
+        "initial_active_jobs": initial_active_jobs,
+        "sample_interval_ms": sample_interval_ms,
+        "memory_budget_bytes": admission_case["memory_budget_bytes"],
+    }
+    worker_config.update(worker_config_overrides or {})
     worker = _NativeWorkerProcess(
         str(worker_path),
         None,
-        {
-            "thread_capacity": capacity,
-            "adaptive_enabled": admission_case["adaptive_enabled"],
-            "initial_active_jobs": initial_active_jobs,
-            "sample_interval_ms": sample_interval_ms,
-            "memory_budget_bytes": admission_case["memory_budget_bytes"],
-        },
+        worker_config,
     )
     worker_process = psutil.Process(worker.process.pid) if worker.process is not None else None
     sampler = ProcessSampler(interval_seconds=0.01)
@@ -272,6 +262,23 @@ def _run_batch(
             request_id = f"request-{client_index:02d}"
             for sequence in range(jobs_per_client):
                 index = client_index * jobs_per_client + sequence
+                idle_seconds = float((idle_before_indices or {}).get(index, 0.0))
+                if idle_seconds > 0.0:
+                    idle_deadline = started_at + timeout_seconds
+                    with done:
+                        while len(completed) < index:
+                            remaining = idle_deadline - time.perf_counter()
+                            if remaining <= 0:
+                                raise TimeoutError(
+                                    f"{label} timed out waiting for the first {index} jobs to become idle"
+                                )
+                            done.wait(timeout=min(0.2, remaining))
+                    time.sleep(idle_seconds)
+                if submission_offsets_seconds is not None:
+                    submit_at = started_at + float(submission_offsets_seconds[index])
+                    remaining = submit_at - time.perf_counter()
+                    if remaining > 0.0:
+                        time.sleep(remaining)
                 job_id = f"{label}-{request_id}-{sequence:04d}"
                 submitted_at[job_id] = time.perf_counter()
                 payload = _job_payload(
@@ -280,11 +287,12 @@ def _run_batch(
                     archive=archive_paths[index],
                     output_dir=workspace.outputs / label / job_id,
                     dll_path=dll_path,
-                    expected_output_bytes=int(corpus["payload_bytes_per_job"]),
-                    cpu_weight=configured_cpu_weight,
                     memory_reserve_bytes=int(admission_case["memory_reserve_bytes"]),
-                    format_hint=str(corpus.get("format_hint") or "zip"),
-                    profile_key=str(corpus.get("profile_key") or "benchmark-small-zip"),
+                    format_hint=(
+                        str(format_hints[index])
+                        if format_hints
+                        else str(corpus.get("format_hint") or "zip")
+                    ),
                 )
                 worker.submit_async(payload, job_id, on_line=make_callback(job_id), on_timeout=on_timeout(job_id))
         submission_finished_at = time.perf_counter()
@@ -346,6 +354,9 @@ def _run_batch(
         "results": results,
         "failures": failures,
         "controller_events": controller_events,
+        "submission_offsets_seconds": submission_offsets_seconds,
+        "idle_before_indices": idle_before_indices,
+        "worker_config_overrides": worker_config_overrides,
     }
     return summary, trace
 
@@ -374,7 +385,7 @@ def _summarize_batch(
     queued_jobs = 0
     previous_at = started_at
     active = 0
-    peak_cpu = peak_memory = 0
+    peak_memory = 0
     for event in ordered_events:
         received_at = float(event["received_at"])
         active_area += max(0.0, received_at - previous_at) * active
@@ -391,7 +402,6 @@ def _summarize_batch(
             queued_jobs = max(0, queued_jobs - 1) if event_name == "job_admitted" else queued_jobs
         active = int(event.get("active_jobs", active) or 0)
         peak_active = max(peak_active, active)
-        peak_cpu = max(peak_cpu, int(event.get("active_cpu_weight", 0) or 0))
         peak_memory = max(peak_memory, int(event.get("active_memory_bytes", 0) or 0))
         job_id = str(event.get("job_id") or "")
         by_job.setdefault(job_id, {})[event_name] = received_at
@@ -421,10 +431,38 @@ def _summarize_batch(
         (float(event["received_at"]) for event in ordered_events if event.get("event") == "job_queued"),
         default=None,
     )
+    lifecycle_decisions = {
+        "activity_started",
+        "activity_ended",
+        "segment_started",
+        "segment_interrupted",
+    }
+    non_empty_controller_events = [
+        event for event in controller_events
+        if str(event.get("decision") or "none") != "none"
+    ]
+    adjustment_events = [
+        event for event in non_empty_controller_events
+        if str(event.get("decision") or "none") not in lifecycle_decisions
+    ]
+    lifecycle_events = [
+        event for event in non_empty_controller_events
+        if str(event.get("decision") or "none") in lifecycle_decisions
+    ]
     controller_offsets_ms = [
         max(0.0, (float(event["received_at"]) - first_enqueue_at) * 1000.0)
-        for event in controller_events
+        for event in adjustment_events
         if first_enqueue_at is not None and "received_at" in event
+    ]
+    controller_limits = [
+        int(event["active_limit"])
+        for event in controller_events
+        if event.get("active_limit") is not None
+    ]
+    controller_decisions = [
+        str(event.get("decision") or "none")
+        for event in adjustment_events
+        if event.get("decision")
     ]
     return {
         "admission_case": admission_case["name"],
@@ -446,17 +484,37 @@ def _summarize_batch(
         "thread_capacity_utilization": round(active_area / (elapsed * capacity), 6),
         "queued_underutilized_thread_ms": round(queued_underutilized_area * 1000.0, 3),
         "queued_underutilization_ratio": round(queued_underutilized_area / (elapsed * capacity), 6),
-        "peak_active_cpu_weight": peak_cpu,
         "peak_active_memory_bytes": peak_memory,
         "queue_latency_p50_ms": _percentile(queue_ms, 50),
         "queue_latency_p95_ms": _percentile(queue_ms, 95),
         "service_p50_ms": _percentile(service_ms, 50),
         "service_p95_ms": _percentile(service_ms, 95),
         "admitted_jobs": len(admissions),
-        "controller_adjustment_count": len(controller_events),
+        "controller_sample_count": len(controller_events),
+        "controller_adjustment_count": len(adjustment_events),
+        "controller_lifecycle_event_count": len(lifecycle_events),
+        "controller_activity_session_count": max(
+            (int(event.get("activity_session", 0) or 0) for event in controller_events),
+            default=0,
+        ),
+        "controller_saturated_segment_count": max(
+            (int(event.get("saturated_segment", 0) or 0) for event in controller_events),
+            default=0,
+        ),
+        "controller_warm_start_count": sum(
+            bool(event.get("warm_start_used"))
+            for event in controller_events
+            if str(event.get("decision") or "") == "activity_started"
+        ),
         "controller_first_adjustment_after_enqueue_ms": min(controller_offsets_ms) if controller_offsets_ms else None,
         "controller_last_adjustment_after_enqueue_ms": max(controller_offsets_ms) if controller_offsets_ms else None,
-        "controller_peak_active_limit": max((int(event.get("active_limit", 0) or 0) for event in controller_events), default=None),
+        "controller_min_active_limit": min(controller_limits, default=None),
+        "controller_peak_active_limit": max(controller_limits, default=None),
+        "controller_final_active_limit": controller_limits[-1] if controller_limits else None,
+        "controller_decisions": controller_decisions,
+        "controller_throughput_modes": [
+            str(event.get("throughput_mode") or "none") for event in controller_events
+        ],
         **resource_metrics,
     }
 

@@ -43,8 +43,11 @@ bool write_same_file_concurrently(const std::filesystem::path& directory) {
     }
 
     const auto snapshot = writer.snapshot_file(file);
+    const auto metrics = writer.snapshot_metrics();
     if (snapshot.failed || !snapshot.closed || snapshot.accepted_bytes != expected.size() ||
-        snapshot.written_bytes != expected.size() || snapshot.peak_active_data_writes < 2) {
+        snapshot.written_bytes != expected.size() || snapshot.peak_active_data_writes < 2 ||
+        metrics.accepted_bytes != expected.size() || metrics.written_bytes != expected.size() ||
+        metrics.completed_files != 1 || metrics.completed_jobs != 1) {
         std::cerr << "parallel output state: accepted=" << snapshot.accepted_bytes
                   << " written=" << snapshot.written_bytes
                   << " peak=" << snapshot.peak_active_data_writes << "\n";

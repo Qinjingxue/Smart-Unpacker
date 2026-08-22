@@ -86,13 +86,11 @@ def _automatic_capacity() -> tuple[int, dict[str, int]]:
     logical_processors = max(1, os.cpu_count() or 1)
     available_memory_bytes = int(psutil.virtual_memory().available)
     memory_budget_bytes = available_memory_bytes * 7 // 10
-    memory_slots = max(1, min(32, memory_budget_bytes // (512 << 20)))
-    capacity = max(1, min(logical_processors, memory_slots, 32))
+    capacity = logical_processors
     return capacity, {
         "logical_processors": logical_processors,
         "available_memory_bytes": available_memory_bytes,
         "memory_budget_bytes": memory_budget_bytes,
-        "memory_slots": memory_slots,
     }
 
 

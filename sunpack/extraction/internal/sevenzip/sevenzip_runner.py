@@ -86,43 +86,39 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
             enabled = bool(native_adaptive)
         environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] = "1" if enabled else "0"
 
-    set_int("scale_up_streak_required", "SUNPACK_NATIVE_SCALE_UP_STREAK_REQUIRED")
-    set_int("scale_down_streak_required", "SUNPACK_NATIVE_SCALE_DOWN_STREAK_REQUIRED")
-    set_int("throughput_window_size", "SUNPACK_NATIVE_THROUGHPUT_WINDOW_SIZE", minimum=4)
-    set_float("throughput_regression_ratio", "SUNPACK_NATIVE_THROUGHPUT_REGRESSION_RATIO")
-    set_int("profile_calibration_min_parallel", "SUNPACK_NATIVE_PROFILE_MIN_PARALLEL")
-    set_float("idle_decay_seconds", "SUNPACK_NATIVE_WORKER_IDLE_DECAY_SECONDS")
-    set_float("idle_limit_recovery_seconds", "SUNPACK_NATIVE_IDLE_LIMIT_RECOVERY_SECONDS")
-    set_float("monitor_idle_stop_seconds", "SUNPACK_NATIVE_MONITOR_IDLE_STOP_SECONDS")
-    set_float("resume_warmup_seconds", "SUNPACK_NATIVE_RESUME_WARMUP_SECONDS")
-    set_int("medium_backlog_threshold", "SUNPACK_NATIVE_MEDIUM_BACKLOG_THRESHOLD")
-    set_int("high_backlog_threshold", "SUNPACK_NATIVE_HIGH_BACKLOG_THRESHOLD")
-    set_int("medium_floor_workers", "SUNPACK_NATIVE_MEDIUM_FLOOR_JOBS")
-    set_int("high_floor_workers", "SUNPACK_NATIVE_HIGH_FLOOR_JOBS")
-    set_float("cpu_scale_up_threshold_percent", "SUNPACK_NATIVE_CPU_SCALE_UP_PERCENT")
-    set_float("cpu_scale_down_threshold_percent", "SUNPACK_NATIVE_CPU_SCALE_DOWN_PERCENT")
+    strategy = str(process_config.get("exploration_strategy") or "").strip().lower()
+    if strategy in {"calibrated", "rapid", "full"}:
+        environment["SUNPACK_NATIVE_EXPLORATION_STRATEGY"] = strategy
+    diagnostics = process_config.get("resource_diagnostics_enabled")
+    if diagnostics is not None:
+        enabled = str(diagnostics).strip().lower() not in {"0", "false", "no", "off"}
+        environment["SUNPACK_NATIVE_RESOURCE_DIAGNOSTICS"] = "1" if enabled else "0"
+    set_float("minimum_window_seconds", "SUNPACK_NATIVE_MINIMUM_WINDOW_SECONDS")
+    set_float("maximum_window_seconds", "SUNPACK_NATIVE_MAXIMUM_WINDOW_SECONDS")
+    set_float("settle_seconds", "SUNPACK_NATIVE_SETTLE_SECONDS")
+    set_int("large_window_bytes", "SUNPACK_NATIVE_LARGE_WINDOW_BYTES")
+    set_int("small_window_jobs", "SUNPACK_NATIVE_SMALL_WINDOW_JOBS")
+    set_int("small_window_files", "SUNPACK_NATIVE_SMALL_WINDOW_FILES")
+    set_float("improvement_ratio", "SUNPACK_NATIVE_IMPROVEMENT_RATIO")
+    set_float("regression_ratio", "SUNPACK_NATIVE_REGRESSION_RATIO")
+    set_int("aggressive_step", "SUNPACK_NATIVE_AGGRESSIVE_STEP")
+    set_int("cooldown_windows", "SUNPACK_NATIVE_COOLDOWN_WINDOWS")
+    set_int("hold_windows", "SUNPACK_NATIVE_HOLD_WINDOWS")
+    set_float("warm_start_decay_seconds", "SUNPACK_NATIVE_WARM_START_DECAY_SECONDS")
+    set_int("warm_start_confirmations", "SUNPACK_NATIVE_WARM_START_CONFIRMATIONS")
     set_bytes_from_mb(
-        "memory_scale_down_available_mb",
-        "SUNPACK_NATIVE_MEMORY_SCALE_DOWN_AVAILABLE_BYTES",
+        "memory_pause_available_mb",
+        "SUNPACK_NATIVE_MEMORY_PAUSE_AVAILABLE_BYTES",
     )
     set_bytes_from_mb(
-        "memory_scale_up_available_mb",
-        "SUNPACK_NATIVE_MEMORY_SCALE_UP_AVAILABLE_BYTES",
+        "memory_resume_available_mb",
+        "SUNPACK_NATIVE_MEMORY_RESUME_AVAILABLE_BYTES",
     )
-    set_int("profile_calibration_window_size", "SUNPACK_NATIVE_PROFILE_WINDOW_SIZE", minimum=4)
-    set_int("profile_calibration_max_delta", "SUNPACK_NATIVE_PROFILE_MAX_DELTA", minimum=0)
     set_int("max_queue_jobs", "SUNPACK_NATIVE_MAX_QUEUE_JOBS")
-    set_float("profile_regression_ratio", "SUNPACK_NATIVE_PROFILE_REGRESSION_RATIO")
-    set_float("profile_improvement_ratio", "SUNPACK_NATIVE_PROFILE_IMPROVEMENT_RATIO")
-    environment.pop("SUNPACK_NATIVE_WORKER_PROFILE", None)
     process_mode = str(process_config.get("windows_process_mode") or "").strip().lower()
     environment.pop("SUNPACK_NATIVE_PROCESS_MODE", None)
     if process_mode == "background":
         environment["SUNPACK_NATIVE_PROCESS_MODE"] = process_mode
-    # Profile feedback is process-local. Drop removed cache variables from the
-    # inherited environment as well.
-    environment.pop("SUNPACK_NATIVE_PROFILE_CACHE_PATH", None)
-    environment.pop("SUNPACK_NATIVE_PROFILE_CACHE_ENABLED", None)
     return environment
 
 
@@ -1280,17 +1276,13 @@ class SevenZipRunner:
             job["job_buffer_budget_bytes"] = budget
 
     def _apply_native_admission_hints(self, job: dict, task: ArchiveTask) -> None:
-        """Translate Python inspection facts into native admission hints.
+        """Translate Python inspection facts into a native memory reservation.
 
-        These are estimates only. Native owns the actual reservations and may
-        keep a job queued when its resource class does not fit.
+        Throughput owns concurrency. This estimate is used only by the hard
+        memory admission budget.
         """
         tokens = knowledge_view.resource_tokens(task)
         analysis = knowledge_view.resource_analysis(task)
-        try:
-            cpu_weight = max(1, min(8, int(tokens.get("cpu", 1) or 1)))
-        except (TypeError, ValueError):
-            cpu_weight = 1
         try:
             memory_weight = max(1, min(8, int(tokens.get("memory", 1) or 1)))
         except (TypeError, ValueError):
@@ -1300,27 +1292,8 @@ class SevenZipRunner:
         except (TypeError, ValueError):
             dictionary_bytes = 0
         native_memory = max(64 << 20, memory_weight * (32 << 20), dictionary_bytes + (32 << 20))
-        job["native_cpu_weight"] = cpu_weight
         job["native_memory_reserve_bytes"] = native_memory
         job["native_dictionary_reserve_bytes"] = dictionary_bytes
-        profile_key = self._task_profile_key(task)
-        if profile_key:
-            job["native_profile_key"] = profile_key
-        try:
-            job["native_expected_output_bytes"] = max(
-                0, int(analysis.get("total_unpacked_size", 0) or 0)
-            )
-            job["native_expected_file_count"] = max(0, int(analysis.get("file_count", 0) or 0))
-        except (TypeError, ValueError):
-            pass
-
-    def _task_profile_key(self, task: ArchiveTask | None) -> str:
-        if task is None:
-            return "unknown"
-        profile_key = knowledge_view.resource_profile_key(task)
-        if profile_key:
-            return profile_key
-        return "unknown"
 
     def _emit_progress(self, task: ArchiveTask, event: dict[str, Any]) -> None:
         callback = self.progress_callback

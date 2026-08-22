@@ -21,10 +21,10 @@ struct NativeSizingOverrides {
 };
 
 struct NativeSizingTuning {
-    std::size_t maximum_thread_capacity = 32;
+    // Zero means no default cap beyond the machine's logical processors.
+    std::size_t maximum_thread_capacity = 0;
     std::size_t foreground_cpu_divisor = 2;
     std::size_t background_cpu_divisor = 4;
-    std::uint64_t memory_per_slot_bytes = 512ULL << 20;
     std::uint64_t memory_budget_numerator = 7;
     std::uint64_t memory_budget_denominator = 10;
 };
@@ -32,8 +32,6 @@ struct NativeSizingTuning {
 struct NativeSizingPlan {
     std::size_t thread_capacity = 1;
     std::size_t initial_active_jobs = 1;
-    std::size_t medium_floor_jobs = 1;
-    std::size_t high_floor_jobs = 1;
     std::size_t memory_budget_bytes = 0;
     bool thread_capacity_overridden = false;
     bool initial_active_jobs_overridden = false;
@@ -77,8 +75,9 @@ inline NativeSizingPlan derive_native_sizing_plan(
     NativeSizingTuning tuning = {}
 ) noexcept {
     resources.logical_processors = (std::max)(std::size_t{1}, resources.logical_processors);
-    tuning.maximum_thread_capacity = (std::max)(std::size_t{1}, tuning.maximum_thread_capacity);
-    tuning.memory_per_slot_bytes = (std::max)(std::uint64_t{1}, tuning.memory_per_slot_bytes);
+    const std::size_t maximum_thread_capacity = tuning.maximum_thread_capacity == 0
+        ? resources.logical_processors
+        : (std::max)(std::size_t{1}, tuning.maximum_thread_capacity);
 
     NativeSizingPlan plan;
     plan.thread_capacity_overridden = overrides.thread_capacity != 0;
@@ -86,20 +85,13 @@ inline NativeSizingPlan derive_native_sizing_plan(
     plan.memory_budget_overridden = overrides.memory_budget_bytes != 0;
     plan.memory_budget_bytes = native_sizing_memory_budget(resources, overrides, tuning);
 
-    const std::size_t memory_slots = plan.memory_budget_bytes == 0
-        ? tuning.maximum_thread_capacity
-        : (std::max)(std::size_t{1}, (std::min)(
-            tuning.maximum_thread_capacity,
-            plan.memory_budget_bytes / static_cast<std::size_t>(tuning.memory_per_slot_bytes)));
-
     if (plan.thread_capacity_overridden) {
         plan.thread_capacity = (std::max)(std::size_t{1}, (std::min)(
-            overrides.thread_capacity, tuning.maximum_thread_capacity));
+            overrides.thread_capacity, maximum_thread_capacity));
     } else {
         plan.thread_capacity = (std::max)(std::size_t{1}, (std::min)({
             resources.logical_processors,
-            memory_slots,
-            tuning.maximum_thread_capacity,
+            maximum_thread_capacity,
         }));
     }
 
@@ -115,19 +107,9 @@ inline NativeSizingPlan derive_native_sizing_plan(
             divisor);
         plan.initial_active_jobs = (std::max)(std::size_t{1}, (std::min)({
             cpu_seed,
-            memory_slots,
             plan.thread_capacity,
         }));
     }
-
-    plan.medium_floor_jobs = (std::min)(
-        plan.thread_capacity,
-        native_sizing_ceil_div(plan.initial_active_jobs, 2));
-    plan.high_floor_jobs = (std::min)(
-        plan.thread_capacity,
-        (std::max)(
-            plan.medium_floor_jobs,
-            native_sizing_ceil_div(plan.initial_active_jobs * 3, 4)));
     return plan;
 }
 

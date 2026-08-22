@@ -443,41 +443,41 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
 
 
-def test_native_environment_drops_removed_worker_profile_and_profile_cache_settings():
-    environment = {
-        "SUNPACK_NATIVE_WORKER_PROFILE": "aggressive",
-        "SUNPACK_NATIVE_PROFILE_CACHE_PATH": "legacy.tsv",
-        "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED": "1",
-    }
-
+def test_native_environment_configures_throughput_controller():
+    environment = {}
     _apply_native_environment(
         environment,
         {
-            "profile_calibration_cache_path": "ignored.tsv",
-            "profile_calibration_cache_enabled": True,
+            "exploration_strategy": "rapid",
+            "resource_diagnostics_enabled": False,
+            "minimum_window_seconds": 0.25,
+            "large_window_bytes": 32 << 20,
+            "small_window_jobs": 4,
+            "improvement_ratio": 1.03,
         },
     )
 
-    assert "SUNPACK_NATIVE_WORKER_PROFILE" not in environment
-    assert "SUNPACK_NATIVE_PROFILE_CACHE_PATH" not in environment
-    assert "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED" not in environment
+    assert environment["SUNPACK_NATIVE_EXPLORATION_STRATEGY"] == "rapid"
+    assert environment["SUNPACK_NATIVE_RESOURCE_DIAGNOSTICS"] == "0"
+    assert environment["SUNPACK_NATIVE_MINIMUM_WINDOW_SECONDS"] == "0.25"
+    assert environment["SUNPACK_NATIVE_LARGE_WINDOW_BYTES"] == str(32 << 20)
+    assert environment["SUNPACK_NATIVE_SMALL_WINDOW_JOBS"] == "4"
+    assert environment["SUNPACK_NATIVE_IMPROVEMENT_RATIO"] == "1.03"
 
 
-def test_native_environment_configures_idle_monitor_windows():
+def test_native_environment_configures_activity_warm_start():
     environment = {}
 
     _apply_native_environment(
         environment,
         {
-            "idle_limit_recovery_seconds": 5,
-            "monitor_idle_stop_seconds": 10,
-            "resume_warmup_seconds": 1,
+            "warm_start_decay_seconds": 30,
+            "warm_start_confirmations": 2,
         },
     )
 
-    assert environment["SUNPACK_NATIVE_IDLE_LIMIT_RECOVERY_SECONDS"] == "5.0"
-    assert environment["SUNPACK_NATIVE_MONITOR_IDLE_STOP_SECONDS"] == "10.0"
-    assert environment["SUNPACK_NATIVE_RESUME_WARMUP_SECONDS"] == "1.0"
+    assert environment["SUNPACK_NATIVE_WARM_START_DECAY_SECONDS"] == "30.0"
+    assert environment["SUNPACK_NATIVE_WARM_START_CONFIRMATIONS"] == "2"
 
 
 def test_native_environment_marks_background_worker_mode_explicitly():
@@ -519,17 +519,16 @@ def test_native_worker_reports_locally_calibrated_sizing_plan():
     logical_processors = max(1, int(handshake["logical_processors"]))
     available_memory = int(handshake["available_memory_bytes"])
     expected_budget = available_memory * 7 // 10 if available_memory else 0
-    memory_slots = 32 if expected_budget == 0 else max(1, min(32, expected_budget // (512 << 20)))
-    expected_capacity = max(1, min(logical_processors, memory_slots, 32))
-    expected_initial = max(1, min((logical_processors + 1) // 2, memory_slots, expected_capacity))
+    expected_capacity = logical_processors
+    expected_initial = max(1, min((logical_processors + 1) // 2, expected_capacity))
 
     assert handshake["type"] == "worker_ready"
     assert handshake["sizing_mode"] == "dynamic"
     assert int(handshake["memory_budget_bytes"]) == expected_budget
     assert int(handshake["thread_capacity"]) == expected_capacity
     assert int(handshake["initial_active_limit"]) == expected_initial
-    assert int(handshake["medium_floor_jobs"]) == (expected_initial + 1) // 2
-    assert int(handshake["high_floor_jobs"]) == (expected_initial * 3 + 3) // 4
+    assert handshake["exploration_strategy"] == "calibrated"
+    assert handshake["resource_diagnostics_enabled"] is False
 
 
 def test_compact_worker_manifest_is_parsed_into_native_storage():

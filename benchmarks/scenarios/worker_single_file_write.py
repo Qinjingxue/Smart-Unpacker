@@ -101,7 +101,6 @@ def _job_payload(
     archive: Path,
     output_dir: Path,
     dll_path: Path,
-    payload_bytes: int,
     dry_run: bool,
 ) -> str:
     return json.dumps(
@@ -113,8 +112,6 @@ def _job_payload(
             "output_dir": str(output_dir),
             "password": "",
             "format_hint": "zip",
-            "native_expected_output_bytes": payload_bytes,
-            "native_profile_key": "benchmark-single-stored-zip",
             "dry_run": dry_run,
         },
         ensure_ascii=False,
@@ -164,7 +161,6 @@ def _run_worker(
         archive=archive,
         output_dir=output_dir,
         dll_path=dll_path,
-        payload_bytes=int(corpus["payload_bytes"]),
         dry_run=dry_run,
     )
 
