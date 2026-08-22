@@ -1076,6 +1076,9 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
 
 
 def test_main_flow_outer_partial_and_inner_tar_gz_partial_keep_coverage_separate(tmp_path):
+    if is_lite_edition():
+        pytest.skip("truncated archive recovery requires Full edition detection scoring")
+
     _require_worker_or_skip()
     _require_7z_dll_or_skip()
     input_root = tmp_path / "input"
@@ -1158,6 +1161,9 @@ def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverab
 
 
 def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
+    if is_lite_edition():
+        pytest.skip("truncated archive recovery requires Full edition detection scoring")
+
     _require_worker_or_skip()
     _require_7z_dll_or_skip()
     input_root = tmp_path / "input"

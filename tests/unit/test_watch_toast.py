@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,12 +19,33 @@ class _Host:
     def __init__(self):
         self.snapshots = []
         self.clear_count = 0
+        self._condition = threading.Condition()
 
     def publish(self, snapshot):
-        self.snapshots.append(snapshot)
+        with self._condition:
+            self.snapshots.append(snapshot)
+            self._condition.notify_all()
 
     def clear(self):
-        self.clear_count += 1
+        with self._condition:
+            self.clear_count += 1
+            self._condition.notify_all()
+
+    def wait_for_terminal_snapshots(self, timeout=1.0):
+        with self._condition:
+            ready = self._condition.wait_for(
+                lambda: any(
+                    snapshot.kind != ToastSnapshotKind.PROGRESS
+                    for snapshot in self.snapshots
+                ),
+                timeout=timeout,
+            )
+            assert ready, "timed out waiting for a terminal toast snapshot"
+            return [
+                snapshot
+                for snapshot in self.snapshots
+                if snapshot.kind != ToastSnapshotKind.PROGRESS
+            ]
 
 
 def _config(*, language="en", debounce_ms=20):
@@ -210,9 +232,7 @@ def test_visible_nested_failure_emits_reason_toast_and_report(tmp_path, reason, 
             "details": {"scope": "nested_archive", "reason": reason},
         }],
     )
-    time.sleep(0.04)
-
-    terminal = _terminal_snapshots(host)
+    terminal = host.wait_for_terminal_snapshots()
     assert len(terminal) == 1
     assert expected in terminal[0].body
     report_path = terminal[0].actions[-1].target
