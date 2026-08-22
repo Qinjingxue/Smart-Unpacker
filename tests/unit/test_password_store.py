@@ -402,12 +402,43 @@ def test_password_resolver_scopes_structure_facts_to_active_embedded_format():
 
     result = resolver.resolve("carrier.bin", fact_bag=bag, archive_key="carrier#tar")
 
-    # The carrier's encrypted ZIP fact belongs to a different logical range;
-    # the active TAR segment remains unknown and must enter the normal
-    # scheduler with the generic empty-password candidate.
-    assert result.candidate_passwords == ("", "secret", "fallback")
-    assert result.candidate_evidence == ""
-    assert scheduler.planned == ["", "secret", "fallback"]
+    # The carrier's encrypted ZIP fact belongs to a different logical range.
+    # The authoritative TAR descriptor proves that the active segment has no
+    # archive-level password mechanism and must not enter any password probe.
+    assert result.password == ""
+    assert result.status == PasswordResolutionStatus.UNENCRYPTED
+    assert result.requires_extraction_confirmation is False
+    assert scheduler.planned == []
+
+
+def test_password_resolver_skips_candidates_for_intrinsically_unencrypted_formats():
+    for index, format_hint in enumerate(("tar", "gzip", "bzip2", "xz", "zstd")):
+        tester = FakePasswordTester()
+        scheduler = QueuePasswordScheduler()
+        resolver = PasswordResolver(tester, PasswordSession(), scheduler)
+        bag = FactBag()
+        bag.set("archive.knowledge", {
+            "source": {
+                "password_probe_input": {
+                    "kind": "archive_input",
+                    "entry_path": "carrier.bin",
+                    "open_mode": "file_range",
+                    "format_hint": format_hint,
+                    "parts": [{"path": "carrier.bin", "start": index * 100, "end": (index + 1) * 100}],
+                },
+            },
+        })
+
+        result = resolver.resolve(
+            "carrier.bin",
+            fact_bag=bag,
+            archive_key=f"carrier#{format_hint}",
+        )
+
+        assert result.password == ""
+        assert result.status == PasswordResolutionStatus.UNENCRYPTED
+        assert result.requires_extraction_confirmation is False
+        assert scheduler.planned == []
 
 
 def test_password_resolver_preserves_candidate_evidence_across_batch_confirmation():

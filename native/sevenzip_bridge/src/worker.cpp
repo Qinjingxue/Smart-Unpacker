@@ -999,13 +999,31 @@ int run_request(
     } else if (password_candidates.size() == 1) {
         // A fast verifier has already reduced the search space to one
         // candidate. Running the bounded password probe again would duplicate
-        // work immediately before the real extraction transaction.
+        // work immediately before the real extraction transaction. On failure,
+        // run it once as a diagnostic so weak ZipCrypto header matches preserve
+        // the retryable all-candidates-rejected contract.
         result = extract_with_password(password_candidates.front());
+        const bool direct_ok = result.status == PasswordTestStatus::Ok && result.command_ok;
+        if (!direct_ok) {
+            const auto probe = run_password_candidate_probe(dll_path, archive_input, password_candidates);
+            result.password_attempts = probe.attempts;
+            if (probe.status == PasswordTestStatus::WrongPassword) {
+                result.status = PasswordTestStatus::WrongPassword;
+                result.encrypted = true;
+                result.wrong_password = true;
+                result.password_rejected = true;
+                result.password_candidates_all_rejected = true;
+                result.failure_stage = "password_probe";
+                result.failure_kind = "wrong_password";
+                result.operation_result = kOpWrongPassword;
+                result.message = probe.message;
+            }
+        }
         result.password_candidate_direct = true;
         result.password_candidate_count = 1;
-        result.password_attempts = 0;
-        result.matched_index = result.status == PasswordTestStatus::Ok && result.command_ok ? 0 : -1;
-        result.password_candidates_all_rejected = result.wrong_password || result.password_rejected;
+        result.matched_index = direct_ok ? 0 : -1;
+        result.password_candidates_all_rejected =
+            result.password_candidates_all_rejected || result.wrong_password || result.password_rejected;
     } else {
         const auto probe = run_password_candidate_probe(dll_path, archive_input, password_candidates);
         if (probe.status != PasswordTestStatus::Ok ||

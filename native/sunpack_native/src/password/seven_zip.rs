@@ -11,6 +11,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, OnceLock};
 
 const SEVEN_Z_SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
+const SEVEN_Z_AES256_SHA256_METHOD: &[u8] = &[0x06, 0xf1, 0x07, 0x01];
 const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
 const MAX_PASSWORD_WORKERS: usize = 64;
 
@@ -94,13 +95,26 @@ fn seven_zip_fast_verify_passwords_impl(
     }
 
     match py.detach(|| read_archive_header_from_reader(reader.cursor(), "")) {
-        HeaderRead::Ok => {
+        HeaderRead::Ok {
+            payload_encrypted: false,
+        } => {
             return status(
                 py,
                 "not_required",
                 -1,
                 0,
                 "7z header is readable without password",
+            );
+        }
+        HeaderRead::Ok {
+            payload_encrypted: true,
+        } => {
+            return status(
+                py,
+                "unknown_need_fallback",
+                -1,
+                0,
+                "7z header is readable but payload uses AES encryption",
             );
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
@@ -181,13 +195,26 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
     }
 
     match read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), "") {
-        HeaderRead::Ok => {
+        HeaderRead::Ok {
+            payload_encrypted: false,
+        } => {
             return status(
                 py,
                 "not_required",
                 -1,
                 0,
                 "7z header is readable without password",
+            );
+        }
+        HeaderRead::Ok {
+            payload_encrypted: true,
+        } => {
+            return status(
+                py,
+                "unknown_need_fallback",
+                -1,
+                0,
+                "7z header is readable but payload uses AES encryption",
             );
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
@@ -220,7 +247,7 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
 }
 
 enum HeaderRead {
-    Ok,
+    Ok { payload_encrypted: bool },
     WrongPasswordOrPasswordRequired,
     Unsupported(String),
     Damaged(String),
@@ -350,7 +377,7 @@ fn read_predecoded_header_with_original_parser(decoded_header: &[u8]) -> HeaderR
 
 fn conclusive_status(py: Python<'_>, index: usize, outcome: HeaderRead) -> PyResult<Py<PyAny>> {
     match outcome {
-        HeaderRead::Ok => status(
+        HeaderRead::Ok { .. } => status(
             py,
             "match",
             index as i32,
@@ -367,7 +394,14 @@ fn conclusive_status(py: Python<'_>, index: usize, outcome: HeaderRead) -> PyRes
 
 fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str) -> HeaderRead {
     match Archive::read(&mut reader, &Password::from(password)) {
-        Ok(_) => HeaderRead::Ok,
+        Ok(archive) => HeaderRead::Ok {
+            payload_encrypted: archive.blocks.iter().any(|block| {
+                block
+                    .coders
+                    .iter()
+                    .any(|coder| coder.encoder_method_id() == SEVEN_Z_AES256_SHA256_METHOD)
+            }),
+        },
         Err(SevenZipError::PasswordRequired) | Err(SevenZipError::MaybeBadPassword(_)) => {
             HeaderRead::WrongPasswordOrPasswordRequired
         }
@@ -412,11 +446,11 @@ mod tests {
     fn original_parser_confirms_predecoded_header() {
         assert!(matches!(
             read_predecoded_header_with_original_parser(&[0x01, 0x00]),
-            HeaderRead::Ok
+            HeaderRead::Ok { .. }
         ));
         assert!(!matches!(
             read_predecoded_header_with_original_parser(&[0x01, 0xff]),
-            HeaderRead::Ok
+            HeaderRead::Ok { .. }
         ));
     }
 

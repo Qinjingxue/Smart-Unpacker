@@ -156,6 +156,13 @@ def _validated_format_password_state(fmt: str, structure: dict) -> str:
 
 def archive_structure_password_state(fact_bag: FactBag | None) -> str:
     """Return the bounded structural password fact without running extraction."""
+    active_format = _selected_structure_format(fact_bag)
+    if active_format in {"tar", "compression"}:
+        # The active archive-input descriptor is content-derived and scopes this
+        # decision to one logical input.  These formats have no archive-level
+        # password mechanism, so user candidates must never reach ZIP/RAR/7z
+        # verifiers merely because the segment has no copied structure facts.
+        return "not_required"
     states = [_validated_format_password_state(fmt, value) for fmt, value in _structure_facts(fact_bag)]
     if "required" in states:
         return "required"
