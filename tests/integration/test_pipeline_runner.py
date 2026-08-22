@@ -161,7 +161,6 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
     assert summary.failed_tasks == []
     assert not archive.exists()
     assert (tmp_path / "payload" / "inside.txt").exists()
-    assert (tmp_path / "failed_log.txt").exists() is False
     assert call_order[:2] == ["close", "postprocess"]
 
 

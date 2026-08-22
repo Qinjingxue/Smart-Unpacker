@@ -49,7 +49,6 @@ class FakePipelineEngine:
         stderr=None,
         output_committer=None,
         progress_callback=None,
-        persist_failure_log=True,
     ):
         paths = [target.path if hasattr(target, "path") else str(target) for target in targets]
         output = dict(targets[0].output) if targets and hasattr(targets[0], "output") else {}

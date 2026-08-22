@@ -1065,7 +1065,6 @@ class WatchScheduler:
                 archive_task,
                 event,
             ),
-            persist_failure_log=False,
         ))
         self._reset_idle_cache_cleanup()
         task.add_done_callback(lambda _task: self._wake_service())

@@ -548,8 +548,6 @@ def clean_outputs(case: ArchiveCase):
     for path in case.archive_dir.iterdir():
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
-        elif path.name == "failed_log.txt":
-            path.unlink(missing_ok=True)
 
 
 def _run_engine(targets: list[str], config: dict) -> dict[str, Any]:

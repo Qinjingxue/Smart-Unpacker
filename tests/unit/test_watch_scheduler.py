@@ -270,7 +270,6 @@ class _DeferredPipelineEngine:
         direct=False,
         output_committer=None,
         progress_callback=None,
-        persist_failure_log=True,
     ):
         handle = _DeferredHandle(targets[0].path)
         self.handles.append(handle)

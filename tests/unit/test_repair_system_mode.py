@@ -35,7 +35,7 @@ def test_lite_repair_system_does_not_create_scheduler(monkeypatch):
     assert stage.max_attempts_per_task == 0
 
 
-def test_lite_repair_system_reports_precise_disabled_status(tmp_path, monkeypatch, capsys):
+def test_lite_repair_system_reports_precise_disabled_status(monkeypatch, capsys):
     monkeypatch.setenv("SUNPACK_REPAIR_SYSTEM", "lite")
     failure = FailureInfo(
         kind=FailureKind.DAMAGED,
@@ -46,7 +46,6 @@ def test_lite_repair_system_reports_precise_disabled_status(tmp_path, monkeypatc
     )
 
     RunReporter("zh").log_final_summary(
-        str(tmp_path),
         time.time(),
         success_count=0,
         failed_tasks=["bad.zip"],
@@ -58,7 +57,7 @@ def test_lite_repair_system_reports_precise_disabled_status(tmp_path, monkeypatc
     assert "原始错误状态保持不变" in output
 
 
-def test_lite_does_not_mask_nonrepairable_failure(tmp_path, monkeypatch, capsys):
+def test_lite_does_not_mask_nonrepairable_failure(monkeypatch, capsys):
     monkeypatch.setenv("SUNPACK_REPAIR_SYSTEM", "lite")
     failure = FailureInfo(
         kind=FailureKind.FILESYSTEM_ERROR,
@@ -68,7 +67,6 @@ def test_lite_does_not_mask_nonrepairable_failure(tmp_path, monkeypatch, capsys)
     )
 
     RunReporter("zh").log_final_summary(
-        str(tmp_path),
         time.time(),
         success_count=0,
         failed_tasks=["bad.zip [access denied]"],
@@ -106,7 +104,6 @@ def test_full_repair_terminal_status_preserves_loop_stop_reason(tmp_path, monkey
     assert status["selected_module"] == "zip_rule"
 
     RunReporter("zh").log_final_summary(
-        str(tmp_path),
         time.time(),
         success_count=0,
         failed_tasks=["bad.zip [repair failed]"],

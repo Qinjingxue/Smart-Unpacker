@@ -34,7 +34,7 @@ def test_progress_displays_nested_archive_parent_chain_and_final_page(tmp_path, 
     reporter.begin_round(2, [inner])
     reporter.task_started(inner, 2)
     reporter.task_finished(inner, _outcome(inner_output), 2)
-    reporter.log_final_summary(str(tmp_path), 0, 2, [])
+    reporter.log_final_summary(0, 2, [])
 
     output = capsys.readouterr().out
     assert "[扫描中] 正在查找压缩包…" in output
@@ -63,19 +63,6 @@ def test_progress_displays_full_lineage_for_deep_recursion(tmp_path, capsys):
     assert "data.7z（来自 outer.zip > inner.rar）" in output
 
 
-def test_quiet_progress_writes_failure_log_without_terminal_output(tmp_path, capsys):
-    reporter = RunReporter("zh", quiet=True)
-    bad = _task(tmp_path / "bad.zip")
-
-    reporter.begin_round(1, [bad])
-    reporter.task_started(bad, 1)
-    reporter.task_finished(bad, _outcome(tmp_path / "bad", success=False, error="broken"), 1)
-    reporter.log_final_summary(str(tmp_path), 0, 0, ["bad.zip [broken]"])
-
-    assert capsys.readouterr().out == ""
-    assert (tmp_path / "failed_log.txt").read_text(encoding="utf-8") == "bad.zip [broken]\n"
-
-
 def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsys):
     warning = FailureInfo(
         FailureKind.MISSING_VOLUME,
@@ -85,7 +72,6 @@ def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsy
     )
 
     RunReporter("zh").log_final_summary(
-        str(tmp_path),
         0,
         0,
         [],

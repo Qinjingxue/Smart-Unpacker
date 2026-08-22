@@ -48,7 +48,6 @@ class _Submission:
     stdout: TextIO | None = None
     stderr: TextIO | None = None
     progress_callback: Callable[[Any, dict[str, Any]], None] | None = None
-    persist_failure_log: bool = True
 
 
 class AsyncOutputCommitter(Protocol):
@@ -160,7 +159,6 @@ class PipelineEngine:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         progress_callback: Callable[[Any, dict[str, Any]], None] | None = None,
-        persist_failure_log: bool = True,
     ) -> PipelineResponse:
         if not self._started or self._closed:
             raise RuntimeError("PipelineEngine must be entered before run")
@@ -184,7 +182,6 @@ class PipelineEngine:
             stdout=stdout,
             stderr=stderr,
             progress_callback=progress_callback,
-            persist_failure_log=bool(persist_failure_log),
         )
         cancellation = CancellationToken()
         task = asyncio.current_task()
@@ -648,18 +645,15 @@ class _RequestRuntime:
                 self.context,
                 recent_passwords=self.extractor.recent_passwords,
             )[request_id]
-            request_log_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
             await broker.run(
                 "report",
                 request_id,
                 self.reporter.log_final_summary,
-                request_log_root,
                 start_time,
                 response.summary.success_count,
                 response.summary.failed_tasks,
                 recovered_outputs=response.summary.recovered_outputs,
                 failures=response.summary.failures,
-                persist_failure_log=self.submission.persist_failure_log,
                 request_id=request_id,
                 cancellation=cancellation,
             )
