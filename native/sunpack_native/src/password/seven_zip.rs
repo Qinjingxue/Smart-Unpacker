@@ -97,7 +97,7 @@ fn seven_zip_fast_verify_passwords_impl(
         HeaderRead::Ok => {
             return status(
                 py,
-                "unsupported_method",
+                "not_required",
                 -1,
                 0,
                 "7z header is readable without password",
@@ -184,7 +184,7 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         HeaderRead::Ok => {
             return status(
                 py,
-                "unsupported_method",
+                "not_required",
                 -1,
                 0,
                 "7z header is readable without password",

@@ -78,19 +78,20 @@ class RarFastVerifier:
         matched_index = int(outcome.get("matched_index", -1))
         attempts = int(outcome.get("attempts", 0))
         message = str(outcome.get("message") or "")
+        final_confirmation_required = bool(
+            outcome.get(
+                "final_confirmation_required",
+                "rar5 password check matched" not in message.lower(),
+            )
+        )
         return PasswordBatchVerification(
-            ok=status == "match" and matched_index >= 0,
+            ok=(status == "match" and matched_index >= 0) or status == "not_required",
             status=status,
             matched_index=matched_index,
             attempts=attempts,
             test_result=outcome,
             error_text=message.lower(),
             terminal=status in {"damaged", "needs_volume_or_tail_damaged"},
-            final_confirmation_required=bool(
-                outcome.get(
-                    "final_confirmation_required",
-                    "rar5 password check matched" not in message.lower(),
-                )
-            ),
+            final_confirmation_required=False if status == "not_required" else final_confirmation_required,
             match_evidence=str(outcome.get("match_evidence") or ""),
         )

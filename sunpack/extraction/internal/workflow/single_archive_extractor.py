@@ -332,10 +332,8 @@ class SingleArchiveExtractor:
                             diagnostics = self._diagnostics_from(run_result)
                             if resolution.requires_extraction_confirmation:
                                 worker_result = worker_result_payload(run_result)
-                                diagnostics["password_verification"] = (
-                                    "sevenzip_worker_candidate_batch"
-                                    if resolution.candidate_passwords
-                                    else "extraction_transaction"
+                                diagnostics["password_verification"] = self._password_verification_label(
+                                    resolution, worker_result
                                 )
                                 diagnostics["password_candidates_rejected"] = int(
                                     worker_result.get("password_attempts") or 0
@@ -460,10 +458,8 @@ class SingleArchiveExtractor:
                 diagnostics = self._diagnostics_from(run_result or test_result)
                 if resolution.requires_extraction_confirmation:
                     worker_result = worker_result_payload(run_result or test_result)
-                    diagnostics["password_verification"] = (
-                        "sevenzip_worker_candidate_batch"
-                        if resolution.candidate_passwords
-                        else "extraction_transaction"
+                    diagnostics["password_verification"] = self._password_verification_label(
+                        resolution, worker_result
                     )
                     diagnostics["password_candidates_rejected"] = int(
                         worker_result.get("password_attempts") or 0
@@ -697,6 +693,14 @@ class SingleArchiveExtractor:
         if 0 <= index < len(candidates):
             return candidates[index]
         return resolution.password
+
+    @staticmethod
+    def _password_verification_label(resolution: PasswordResolution, worker_result: dict) -> str:
+        if worker_result.get("password_candidate_direct"):
+            return "sevenzip_worker_candidate_direct"
+        if worker_result.get("password_candidate_batch") or resolution.candidate_passwords:
+            return "sevenzip_worker_candidate_batch"
+        return "extraction_transaction"
 
     def _password_resolution_failure(self, resolution: PasswordResolution) -> FailureInfo | None:
         if resolution.password is not None:

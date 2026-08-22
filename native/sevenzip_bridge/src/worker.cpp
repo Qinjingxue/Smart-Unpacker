@@ -867,6 +867,7 @@ std::string diagnostics_json(const sunpack::sevenzip::ExtractArchiveResult& resu
         ",\"missing_volume_evidence\":\"" + json_escape(result.missing_volume_evidence) +
         "\",\"missing_volume_name\":\"" + json_escape(wide_to_utf8(result.missing_volume_name)) +
         "\",\"password_candidate_batch\":" + std::string(result.password_candidate_batch ? "true" : "false") +
+        ",\"password_candidate_direct\":" + std::string(result.password_candidate_direct ? "true" : "false") +
         ",\"password_candidates_all_rejected\":" + std::string(result.password_candidates_all_rejected ? "true" : "false") +
         ",\"password_candidate_count\":" + std::to_string(result.password_candidate_count) +
         ",\"password_attempts\":" + std::to_string(result.password_attempts) +
@@ -995,6 +996,16 @@ int run_request(
         result.failure_stage = "password_probe";
         result.failure_kind = "patched_input_candidates_unsupported";
         result.message = "password candidate batches are not supported for patched input";
+    } else if (password_candidates.size() == 1) {
+        // A fast verifier has already reduced the search space to one
+        // candidate. Running the bounded password probe again would duplicate
+        // work immediately before the real extraction transaction.
+        result = extract_with_password(password_candidates.front());
+        result.password_candidate_direct = true;
+        result.password_candidate_count = 1;
+        result.password_attempts = 0;
+        result.matched_index = result.status == PasswordTestStatus::Ok && result.command_ok ? 0 : -1;
+        result.password_candidates_all_rejected = result.wrong_password || result.password_rejected;
     } else {
         const auto probe = run_password_candidate_probe(dll_path, archive_input, password_candidates);
         if (probe.status != PasswordTestStatus::Ok ||
@@ -1042,6 +1053,7 @@ int run_request(
         ",\"password_crc_proven\":" + std::string(result.password_crc_proven ? "true" : "false") +
         ",\"password_crc_proven_items\":" + std::to_string(result.password_crc_proven_items) +
         ",\"password_candidate_batch\":" + std::string(result.password_candidate_batch ? "true" : "false") +
+        ",\"password_candidate_direct\":" + std::string(result.password_candidate_direct ? "true" : "false") +
         ",\"password_candidates_all_rejected\":" + std::string(result.password_candidates_all_rejected ? "true" : "false") +
         ",\"password_candidate_count\":" + std::to_string(result.password_candidate_count) +
         ",\"password_attempts\":" + std::to_string(result.password_attempts) +

@@ -600,7 +600,7 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
         if !probe.encrypted {
             return status(
                 py,
-                "unknown_need_fallback",
+                "not_required",
                 -1,
                 0,
                 "rar3/rar4 file data is not encrypted",
@@ -643,7 +643,7 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
     if parse_rar4_plain_header(payload).is_some() {
         return status(
             py,
-            "unknown_need_fallback",
+            "not_required",
             -1,
             0,
             "rar3/rar4 headers are not encrypted; fast verifier only supports -hp encrypted headers",

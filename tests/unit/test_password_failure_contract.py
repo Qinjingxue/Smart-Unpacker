@@ -30,6 +30,7 @@ from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, CONTENT_IN
     ("raw", "expected"),
     [
         ("no_match", "no_match"),
+        ("unencrypted", "not_required"),
         ("unknown_need_fallback", "unknown_needs_final_verifier"),
         ("unknown_needs_fallback", "unknown_needs_final_verifier"),
         ("unsupported", "unsupported_method"),

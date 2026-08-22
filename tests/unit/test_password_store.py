@@ -3,9 +3,10 @@ from types import SimpleNamespace
 from sunpack.contracts.detection import FactBag
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.result import PasswordProbeResult, PasswordResolutionStatus
-from sunpack.passwords.scheduler import PasswordSearchResult, PasswordSearchStatus
+from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords import PasswordResolver, PasswordSession, PasswordStore
 from sunpack.passwords.internal.store import MAX_RECENT_PASSWORDS
+from sunpack.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
 
 
 def test_password_store_orders_user_recent_builtin_and_dedupes():
@@ -149,6 +150,20 @@ class QueuePasswordScheduler:
 
     def remember_extraction_rejection(self, fingerprint_key, password):
         pass
+
+
+class RecordingNotRequiredFastVerifier:
+    def __init__(self):
+        self.batches = []
+
+    def verify_batch(self, archive_path, passwords, *, part_paths=None, archive_input=None):
+        self.batches.append(list(passwords))
+        return PasswordBatchVerification(
+            ok=True,
+            status="not_required",
+            matched_index=-1,
+            final_confirmation_required=False,
+        )
 
 
 def test_password_resolver_records_archive_password_in_session():
@@ -319,9 +334,9 @@ def test_password_resolver_submits_all_inconclusive_candidates_as_one_batch():
 
     first = resolver.resolve("large.rar", archive_key="archive-key")
 
-    assert scheduler.planned == ["user-password", "builtin-password"]
-    assert first.password == "user-password"
-    assert first.candidate_passwords == ("user-password", "builtin-password")
+    assert scheduler.planned == ["", "user-password", "builtin-password"]
+    assert first.password == ""
+    assert first.candidate_passwords == ("", "user-password", "builtin-password")
     assert first.requires_extraction_confirmation is True
     assert tester.test_without_password_calls == 0
     assert session.has_resolved("archive-key") is False
@@ -332,13 +347,14 @@ def test_password_resolver_submits_all_inconclusive_candidates_as_one_batch():
     assert tester.password_store.recent_passwords == ["builtin-password"]
 
 
-def test_password_resolver_probes_empty_first_for_unknown_embedded_range():
+def test_password_resolver_routes_unknown_embedded_range_through_normal_scheduler():
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(
         cli_passwords=["wrong-password"],
         builtin_passwords=[],
     )
-    scheduler = QueuePasswordScheduler()
+    fast = RecordingNotRequiredFastVerifier()
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast], None))
     resolver = PasswordResolver(tester, PasswordSession(), scheduler)
     bag = FactBag()
     bag.set("archive.knowledge", {
@@ -353,8 +369,10 @@ def test_password_resolver_probes_empty_first_for_unknown_embedded_range():
 
     result = resolver.resolve("carrier.bin", fact_bag=bag, archive_key="carrier#segment-1")
 
-    assert scheduler.planned == []
-    assert result.candidate_passwords == ("", "wrong-password")
+    assert fast.batches == [["", "wrong-password"]]
+    assert result.password == ""
+    assert result.status == PasswordResolutionStatus.UNENCRYPTED
+    assert result.requires_extraction_confirmation is False
 
 
 def test_password_resolver_scopes_structure_facts_to_active_embedded_format():
@@ -385,11 +403,11 @@ def test_password_resolver_scopes_structure_facts_to_active_embedded_format():
     result = resolver.resolve("carrier.bin", fact_bag=bag, archive_key="carrier#tar")
 
     # The carrier's encrypted ZIP fact belongs to a different logical range;
-    # the active TAR segment remains unknown and must use empty-password-first
-    # extraction confirmation.
+    # the active TAR segment remains unknown and must enter the normal
+    # scheduler with the generic empty-password candidate.
     assert result.candidate_passwords == ("", "secret", "fallback")
-    assert result.candidate_evidence == "embedded_unknown_encryption"
-    assert scheduler.planned == []
+    assert result.candidate_evidence == ""
+    assert scheduler.planned == ["", "secret", "fallback"]
 
 
 def test_password_resolver_preserves_candidate_evidence_across_batch_confirmation():
@@ -406,7 +424,7 @@ def test_password_resolver_preserves_candidate_evidence_across_batch_confirmatio
 
     first = resolver.resolve("payload.zip", archive_key="archive-key")
     assert first.candidate_evidence == "zipcrypto_header_byte"
-    assert first.candidate_passwords == ("first", "second")
+    assert first.candidate_passwords == ("", "first", "second")
 
 
 def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
@@ -425,8 +443,8 @@ def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
         directory_passwords=["directory-password", "user-password"],
     )
 
-    assert scheduler.planned == ["directory-password", "user-password", "clipboard-password", "builtin-password"]
-    assert first.password == "directory-password"
+    assert scheduler.planned == ["", "directory-password", "user-password", "clipboard-password", "builtin-password"]
+    assert first.password == ""
 
 
 def test_confirmed_password_is_promoted_across_already_planned_archives():
@@ -437,11 +455,20 @@ def test_confirmed_password_is_promoted_across_already_planned_archives():
     )
 
     resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
-    archive_a = resolver.resolve("first.unknown", archive_key="first")
-    archive_b = resolver.resolve("second.unknown", archive_key="second")
+    required = FactBag()
+    required.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
+    })
+    archive_a = resolver.resolve("first.unknown", fact_bag=required, archive_key="first")
+    archive_b = resolver.resolve("second.unknown", fact_bag=required, archive_key="second")
 
     resolver.confirm_extraction(archive_a, password="shared-secret")
-    promoted_b = resolver.resolve("second.unknown", archive_key="second")
+    promoted_b = resolver.resolve("second.unknown", fact_bag=required, archive_key="second")
 
     assert archive_a.candidate_passwords == ("wrong-a", "wrong-b", "shared-secret")
     assert promoted_b.password == "shared-secret"
@@ -453,11 +480,24 @@ def test_hundreds_of_archives_reuse_confirmed_password_after_one_candidate_batch
     tester.password_store = PasswordStore.from_sources(cli_passwords=passwords, builtin_passwords=[])
 
     resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
-    resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
+    required = FactBag()
+    required.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
+    })
+    resolution = resolver.resolve("archive-0.mixed", fact_bag=required, archive_key="archive-0")
     assert resolution.candidate_passwords == tuple(passwords)
     resolver.confirm_extraction(resolution, password="shared-secret")
 
     for index in range(1, 100):
-        resolution = resolver.resolve(f"archive-{index}.mixed", archive_key=f"archive-{index}")
+        resolution = resolver.resolve(
+            f"archive-{index}.mixed",
+            fact_bag=required,
+            archive_key=f"archive-{index}",
+        )
         assert resolution.password == "shared-secret"
         resolver.confirm_extraction(resolution)

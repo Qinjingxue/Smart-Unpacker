@@ -47,12 +47,14 @@ class SevenZipFastVerifier:
         attempts = int(outcome.get("attempts", 0))
         message = str(outcome.get("message") or "")
         return PasswordBatchVerification(
-            ok=status == "match" and matched_index >= 0,
+            ok=(status == "match" and matched_index >= 0) or status == "not_required",
             status=status,
             matched_index=matched_index,
             attempts=attempts,
             test_result=outcome,
             error_text=message.lower(),
             terminal=status in {"damaged", "needs_volume_or_tail_damaged"},
-            final_confirmation_required="7z encrypted header opened" not in message.lower(),
+            final_confirmation_required=(
+                False if status == "not_required" else "7z encrypted header opened" not in message.lower()
+            ),
         )

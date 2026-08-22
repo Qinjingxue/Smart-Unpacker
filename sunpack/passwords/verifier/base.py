@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 VerifierStatus = Literal[
     "match",
+    "not_required",
     "no_match",
     "unknown_needs_final_verifier",
     "damaged",
@@ -17,6 +18,7 @@ VerifierStatus = Literal[
 
 VERIFIER_STATUSES = {
     "match",
+    "not_required",
     "no_match",
     "unknown_needs_final_verifier",
     "damaged",
@@ -29,6 +31,8 @@ VERIFIER_STATUSES = {
 def normalize_verifier_status(value: object) -> VerifierStatus:
     normalized = str(value or "").strip().lower()
     aliases = {
+        "unencrypted": "not_required",
+        "not_encrypted": "not_required",
         "unknown_need_fallback": "unknown_needs_final_verifier",
         "unknown_needs_fallback": "unknown_needs_final_verifier",
         "inconclusive": "unknown_needs_final_verifier",

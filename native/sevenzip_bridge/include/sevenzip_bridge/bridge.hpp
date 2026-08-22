@@ -151,6 +151,7 @@ struct ExtractArchiveResult {
     bool password_rejected = false;
     bool password_crc_proven = false;
     bool password_candidate_batch = false;
+    bool password_candidate_direct = false;
     bool password_candidates_all_rejected = false;
     bool unsupported_method = false;
     bool output_inventory_complete = false;

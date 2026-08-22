@@ -51,6 +51,9 @@ class PasswordVerifierChain:
             total_fast_attempts += max(fast_outcome.attempts, len(remaining) if fast_outcome.status == "no_match" else 0)
             last_error = fast_outcome.error_text or last_error
 
+            if fast_outcome.status == "not_required":
+                return fast_outcome
+
             if fast_outcome.status == "match" and fast_outcome.matched_index >= 0:
                 local_matched_indices = fast_outcome.matched_indices or (fast_outcome.matched_index,)
                 candidate_indices = tuple(

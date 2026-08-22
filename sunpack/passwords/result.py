@@ -25,7 +25,7 @@ class PasswordProbeResult:
 
     @property
     def ok(self) -> bool:
-        return self.status == "match"
+        return self.status in {"match", "not_required"}
 
     @property
     def returncode(self) -> int:

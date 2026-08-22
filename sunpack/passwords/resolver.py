@@ -211,7 +211,8 @@ class PasswordResolver:
                 archive_key=archive_key,
             )
 
-        if self._facts_confirm_unencrypted(fact_bag):
+        password_state = archive_structure_password_state(fact_bag)
+        if password_state == "not_required":
             return self._remember(
                 archive_key,
                 "",
@@ -219,7 +220,7 @@ class PasswordResolver:
                 encrypted=False,
             )
 
-        if self._facts_have_patches(fact_bag) and self._facts_require_password(fact_bag):
+        if self._facts_have_patches(fact_bag) and password_state == "required":
             return PasswordResolution(
                 password=None,
                 status=PasswordResolutionStatus.PASSWORD_REQUIRED,
@@ -238,7 +239,7 @@ class PasswordResolver:
         directory_passwords = list(directory_passwords or [])
         candidates = self.password_tester.password_store.candidates(directory_passwords=directory_passwords)
         if not candidates:
-            if self._facts_require_password(fact_bag):
+            if password_state == "required":
                 return PasswordResolution(
                     password=None,
                     status=PasswordResolutionStatus.PASSWORD_REQUIRED,
@@ -250,37 +251,21 @@ class PasswordResolver:
             # password instead of performing a complete preflight test pass.
             return self._confirmation_resolution(archive_key, "", fingerprint.key, fact_bag)
 
-        embedded_unknown = (
-            not self._facts_require_password(fact_bag)
-            and str(archive_input.get("open_mode") or archive_input.get("kind") or "")
-            in {"file_range", "concat_ranges"}
-        )
-        if embedded_unknown:
-            # A carrier-level encryption result cannot classify each logical
-            # archive.  Let the real bounded extraction prove the empty
-            # password first, then retry the supplied candidates only when the
-            # segment actually needs one.  This avoids a duplicate preflight
-            # read and keeps plain segments independent from encrypted peers.
-            extraction_candidates = tuple(dict.fromkeys(["", *candidates]))
-            return self._confirmation_resolution(
-                archive_key,
-                extraction_candidates[0],
-                fingerprint.key,
-                fact_bag,
-                candidate_evidence="embedded_unknown_encryption",
-                candidate_passwords=extraction_candidates,
-            )
-
         search = self._plan_password_search(
             archive_path,
             fact_bag=fact_bag,
             part_paths=part_paths,
             fingerprint=fingerprint,
             directory_passwords=directory_passwords,
+            include_empty=password_state == "unknown",
         )
-        if search.status == PasswordSearchStatus.FOUND:
-            resolution = self._remember_search(archive_key, search, encrypted=True)
-            if resolution.password is not None:
+        if search.status in {PasswordSearchStatus.FOUND, PasswordSearchStatus.UNENCRYPTED}:
+            resolution = self._remember_search(
+                archive_key,
+                search,
+                encrypted=search.status == PasswordSearchStatus.FOUND,
+            )
+            if resolution.password:
                 self._promote_success(resolution.password)
             return resolution
         if search.extraction_candidates:
@@ -305,7 +290,8 @@ class PasswordResolver:
             return
         self.password_session.set_resolved(resolution.archive_key, password)
         self.password_scheduler.remember_extraction_success(resolution.fingerprint_key, password)
-        self._promote_success(password)
+        if password:
+            self._promote_success(password)
 
     def reject_extraction_candidates(self, resolution: PasswordResolution) -> None:
         if not resolution.requires_extraction_confirmation:
@@ -322,11 +308,13 @@ class PasswordResolver:
         part_paths: list[str] | None,
         fingerprint,
         directory_passwords: list[str] | None,
+        include_empty: bool = False,
     ) -> PasswordSearchResult:
         archive_input = self._archive_input_for_password_probe(fact_bag)
         candidates = PasswordCandidatePipeline.from_password_store(
             self.password_tester.password_store,
             directory_passwords=directory_passwords,
+            include_empty=include_empty,
         )
         return self.password_scheduler.plan_for_extraction(PasswordJob(
             archive_path=archive_path,
@@ -411,6 +399,7 @@ class PasswordResolver:
     ) -> PasswordResolution:
         status = {
             PasswordSearchStatus.FOUND: PasswordResolutionStatus.RESOLVED,
+            PasswordSearchStatus.UNENCRYPTED: PasswordResolutionStatus.UNENCRYPTED,
             PasswordSearchStatus.EXHAUSTED: PasswordResolutionStatus.CANDIDATES_EXHAUSTED,
             PasswordSearchStatus.DAMAGED: PasswordResolutionStatus.DAMAGED,
             PasswordSearchStatus.UNSUPPORTED: PasswordResolutionStatus.UNSUPPORTED,
@@ -428,10 +417,6 @@ class PasswordResolver:
             encrypted=encrypted,
             remember_only_on_success=True,
         )
-
-    @staticmethod
-    def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
-        return archive_structure_password_state(fact_bag) == "not_required"
 
     @staticmethod
     def _facts_require_password(fact_bag: FactBag | None) -> bool:

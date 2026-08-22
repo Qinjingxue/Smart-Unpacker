@@ -17,6 +17,7 @@ from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 
 class PasswordSearchStatus(str, Enum):
     FOUND = "found"
+    UNENCRYPTED = "unencrypted"
     EXHAUSTED = "exhausted"
     INCONCLUSIVE = "inconclusive"
     DAMAGED = "damaged"
@@ -83,7 +84,16 @@ class PasswordScheduler:
         )
         cached_success = self.cache.get_success(fingerprint.key)
         if cached_success is not None:
-            result = PasswordSearchResult(password=cached_success, status=PasswordSearchStatus.FOUND, attempts=0, stopped_reason="cache_hit")
+            result = PasswordSearchResult(
+                password=cached_success,
+                status=(
+                    PasswordSearchStatus.UNENCRYPTED
+                    if cached_success == ""
+                    else PasswordSearchStatus.FOUND
+                ),
+                attempts=0,
+                stopped_reason="cache_hit",
+            )
             self._emit_finished(job, result, started_at, candidates_seen=0, skipped=0)
             return result
 
@@ -170,7 +180,11 @@ class PasswordScheduler:
         if cached_success is not None:
             result = PasswordSearchResult(
                 password=cached_success,
-                status=PasswordSearchStatus.FOUND,
+                status=(
+                    PasswordSearchStatus.UNENCRYPTED
+                    if cached_success == ""
+                    else PasswordSearchStatus.FOUND
+                ),
                 attempts=0,
                 stopped_reason="cache_hit",
             )
@@ -214,6 +228,17 @@ class PasswordScheduler:
                 archive_input=job.archive_input,
             )
             attempts += max(0, min(int(verification.attempts or 0), len(batch)))
+            if verification.status == "not_required":
+                self.cache.remember_success(fingerprint.key, "")
+                result = PasswordSearchResult(
+                    password="",
+                    status=PasswordSearchStatus.UNENCRYPTED,
+                    test_result=verification.test_result,
+                    attempts=attempts,
+                    stopped_reason="fast_not_required",
+                )
+                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                return result
             matched_indices = _valid_matched_indices(verification, len(batch))
             if verification.status == "match" and matched_indices:
                 matched = batch[matched_indices[0]]
@@ -346,6 +371,15 @@ class PasswordScheduler:
             password_found=verification.ok and not verification.final_confirmation_required,
             error_text=verification.error_text,
         ))
+        if verification.status == "not_required":
+            self.cache.remember_success(fingerprint_key, "")
+            return PasswordSearchResult(
+                password="",
+                status=PasswordSearchStatus.UNENCRYPTED,
+                test_result=verification.test_result,
+                attempts=total_attempts,
+                stopped_reason="fast_not_required",
+            )
         if verification.ok and verification.final_confirmation_required:
             matched_indices = _valid_matched_indices(verification, len(batch))
             return PasswordSearchResult(

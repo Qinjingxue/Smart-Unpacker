@@ -371,6 +371,45 @@ def test_extraction_plan_accepts_strong_fast_proof_and_caches_it(tmp_path):
     assert fast.batches == [["bad", "secret"]]
 
 
+def test_extraction_plan_accepts_not_required_fast_result_and_never_calls_final(tmp_path):
+    archive = tmp_path / "plain.embedded"
+    archive.write_bytes(b"archive")
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="not_required",
+        matched_index=-1,
+        attempts=0,
+        final_confirmation_required=False,
+    ))
+    final = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        attempts=1,
+    ))
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast], final))
+    job = PasswordJob(
+        archive_path=str(archive),
+        archive_input={"open_mode": "file_range", "format_hint": "zip"},
+        candidates=PasswordCandidatePipeline.from_values(["", "secret"]),
+    )
+
+    result = scheduler.plan_for_extraction(job)
+    cached = scheduler.plan_for_extraction(job)
+
+    assert result.password == ""
+    assert result.status == PasswordSearchStatus.UNENCRYPTED
+    assert result.stopped_reason == "fast_not_required"
+    assert cached.password == ""
+    assert cached.status == PasswordSearchStatus.UNENCRYPTED
+    assert cached.stopped_reason == "cache_hit"
+    assert scheduler.cache.get_success(build_archive_fingerprint(
+        str(archive), archive_input=job.archive_input,
+    ).key) == ""
+    assert fast.batches == [["", "secret"]]
+    assert final.batches == []
+
+
 def test_extraction_plan_preserves_zipcrypto_candidate_evidence(tmp_path):
     archive = tmp_path / "encrypted.zip"
     archive.write_bytes(b"archive")

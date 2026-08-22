@@ -192,7 +192,7 @@ fn verify_zip_volumes(
         };
         (disk, offset) = next;
     }
-    simple_status(py, "unsupported_method", 0, "zip has no encrypted entries")
+    simple_status(py, "not_required", -1, "zip has no encrypted entries")
 }
 
 fn verify_zip_volume_entry(
@@ -381,7 +381,7 @@ fn verify_zip_header<R: Read + Seek>(
 ) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
     if !header.encrypted {
-        result.set_item("status", "unsupported_method")?;
+        result.set_item("status", "not_required")?;
         result.set_item("matched_index", -1)?;
         result.set_item("attempts", 0)?;
         result.set_item("message", "zip entry is not encrypted")?;

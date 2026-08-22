@@ -251,6 +251,40 @@ def test_worker_candidate_batch_probes_then_extracts_with_selected_password(tmp_
     assert (out_dir / filename).read_text(encoding="utf-8") == "encrypted worker payload"
 
 
+def test_worker_single_candidate_skips_probe_and_extracts_directly(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, filename = _create_encrypted_zip(tmp_path)
+    out_dir = tmp_path / "out-single"
+    payload = {
+        "job_id": "candidate-direct-success",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+        "format_hint": "zip",
+        "password": "fast-verifier-placeholder",
+        "password_candidates": ["secret"],
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["status"] == "ok"
+    assert worker_result["password_candidate_direct"] is True
+    assert worker_result["password_candidate_batch"] is False
+    assert worker_result["password_candidate_count"] == 1
+    assert worker_result["password_attempts"] == 0
+    assert worker_result["matched_index"] == 0
+    assert (out_dir / filename).read_text(encoding="utf-8") == "encrypted worker payload"
+
+
 def test_worker_candidate_batch_rejects_all_candidates_without_full_extraction(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()

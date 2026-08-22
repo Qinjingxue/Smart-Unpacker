@@ -24,10 +24,13 @@ class PasswordCandidatePipeline:
         store: PasswordStore,
         *,
         directory_passwords: Iterable[str] | None = None,
+        include_empty: bool = False,
     ) -> "PasswordCandidatePipeline":
-        return cls([
-            _store_candidates(store, directory_passwords=directory_passwords),
-        ])
+        sources: list[Iterable[PasswordCandidate]] = []
+        if include_empty:
+            sources.append((PasswordCandidate("", source="empty", priority=0),))
+        sources.append(_store_candidates(store, directory_passwords=directory_passwords))
+        return cls(sources)
 
     @classmethod
     def from_values(cls, passwords: Iterable[str], *, source: str = "manual") -> "PasswordCandidatePipeline":
