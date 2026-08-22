@@ -1104,11 +1104,10 @@ class WatchScheduler:
         summary_failures = list(getattr(summary, "failures", []) or [])
         if getattr(target_result, "failure", None) is not None and target_result.failure not in summary_failures:
             summary_failures.append(target_result.failure)
-        missing_volume_failures = [
-            failure
-            for failure in summary_failures
-            if _failure_contains(failure, FailureKind.MISSING_VOLUME)
-        ]
+        missing_volume_failures = _candidate_missing_volume_failures(
+            target_result,
+            summary_failures,
+        )
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS and missing_volume_failures:
             self._cleanup_probe_workspace(request.probe_workspace)
@@ -1143,6 +1142,46 @@ class WatchScheduler:
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
             self._cleanup_probe_workspace(request.probe_workspace)
+            nested_missing_volume = _nested_missing_volume_failures(
+                target_result,
+                summary_failures,
+            )
+            if nested_missing_volume:
+                error = _nested_missing_volume_error(nested_missing_volume[0])
+                failure_payloads = [_failure_to_dict(failure) for failure in nested_missing_volume]
+                payload = {
+                    **(failure_payloads[0] if failure_payloads else {}),
+                    "blockers": [],
+                    "details": {
+                        "scope": "nested_archive",
+                        "reason": FailureKind.MISSING_VOLUME.value,
+                    },
+                }
+                if group is not None:
+                    self.state.record_group_terminal(
+                        group,
+                        status="failed_nested_missing_volume",
+                        failure_payload=payload,
+                    )
+                self.state.mark(
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    file_id=candidate.file_id,
+                    change_usn=candidate.change_usn,
+                    status="failed_nested_missing_volume",
+                    error=error,
+                    failure_payload=payload,
+                )
+                self.log.write(
+                    "failed_nested_missing_volume",
+                    path=candidate.path,
+                    error=error,
+                    failures=failure_payloads,
+                )
+                self._notify("failed", request.notification_id, [error], failure_payloads)
+                return WatchRunResult(processed=1, failed=1, errors=[error])
+
             error = "watch extraction rejected partial content"
             if group is not None:
                 self.state.record_group_terminal(group, status="failed")
@@ -1169,10 +1208,15 @@ class WatchScheduler:
             failures = list(getattr(summary, "failures", []) or [])
             failure_payloads = [_failure_to_dict(failure) for failure in failures]
             is_password_failure = any(getattr(failure, "is_password_failure", False) for failure in failures)
-            is_missing_volume = any(
-                _failure_contains(failure, FailureKind.MISSING_VOLUME)
-                for failure in failures
+            is_missing_volume = bool(_candidate_missing_volume_failures(
+                target_result,
+                failures,
+            ))
+            nested_missing_volume_failures = _nested_missing_volume_failures(
+                target_result,
+                failures,
             )
+            is_nested_missing_volume = bool(nested_missing_volume_failures)
             blockers = []
             if is_missing_volume:
                 blockers.append(BLOCKER_MISSING_VOLUME)
@@ -1183,15 +1227,25 @@ class WatchScheduler:
                 if is_password_failure
                 else "suspended_missing_volume"
                 if is_missing_volume
+                else "failed_nested_missing_volume"
+                if is_nested_missing_volume
                 else "failed_terminal"
             )
+            if is_nested_missing_volume:
+                error = f"嵌套压缩包内层分卷缺失：{error}"
             payload = failure_payloads[0] if failure_payloads else {}
             payload = {**payload, "blockers": list(blockers)}
+            if is_nested_missing_volume:
+                payload["details"] = {
+                    **(payload.get("details") if isinstance(payload.get("details"), dict) else {}),
+                    "scope": "nested_archive",
+                    "reason": FailureKind.MISSING_VOLUME.value,
+                }
             if group is not None:
                 if blockers:
                     self.state.record_group_suspended(group, blockers=blockers, failure_payload=payload)
                 else:
-                    self.state.record_group_terminal(group, status="failed_terminal", failure_payload=payload)
+                    self.state.record_group_terminal(group, status=status, failure_payload=payload)
             self.state.mark(
                 candidate.path,
                 candidate.size,
@@ -1208,7 +1262,11 @@ class WatchScheduler:
                 self._notify("suppressed", request.notification_id)
             else:
                 self._notify("failed", request.notification_id, failed, failure_payloads)
-            return WatchRunResult(processed=1, failed=1, errors=failed)
+            return WatchRunResult(
+                processed=1,
+                failed=1,
+                errors=[error] if is_nested_missing_volume else failed,
+            )
         if _summary_processed_no_tasks(summary):
             if group is not None:
                 self.state.record_group_terminal(group, status="ignored_no_tasks")
@@ -1731,6 +1789,14 @@ def _failure_to_dict(failure) -> dict:
 
 
 def _failure_contains(failure, kind: FailureKind) -> bool:
+    if isinstance(failure, dict):
+        raw_kind = failure.get("kind")
+        if raw_kind in {kind, kind.value, str(kind)}:
+            return True
+        return any(
+            _failure_contains(cause, kind)
+            for cause in (failure.get("causes") or [])
+        )
     contains = getattr(failure, "contains", None)
     if callable(contains):
         try:
@@ -1738,6 +1804,55 @@ def _failure_contains(failure, kind: FailureKind) -> bool:
         except Exception:
             pass
     return getattr(failure, "kind", None) == kind
+
+
+def _target_result_failure(target_result):
+    if isinstance(target_result, dict):
+        return target_result.get("failure")
+    return getattr(target_result, "failure", None) if target_result is not None else None
+
+
+def _candidate_missing_volume_failures(target_result, failures) -> list:
+    """Return missing-volume failures owned by the watched candidate.
+
+    A pipeline response may contain failures from recursively extracted child
+    archives.  Those failures must not turn the parent archive into a split
+    volume watch blocker.  Real responses carry a TargetRunResult for every
+    archive, so use the current candidate's direct failure there.  The
+    target-result-free fallback keeps lightweight scheduler fakes compatible.
+    """
+    target_failure = _target_result_failure(target_result)
+    if target_result is None:
+        return [
+            failure
+            for failure in failures
+            if _failure_contains(failure, FailureKind.MISSING_VOLUME)
+        ]
+    if _failure_contains(target_failure, FailureKind.MISSING_VOLUME):
+        return [target_failure]
+    return []
+
+
+def _nested_missing_volume_failures(target_result, failures) -> list:
+    """Return missing-volume failures that belong to a recursively extracted child."""
+    if target_result is None:
+        return []
+    if _candidate_missing_volume_failures(target_result, failures):
+        return []
+    return [
+        failure
+        for failure in failures
+        if _failure_contains(failure, FailureKind.MISSING_VOLUME)
+    ]
+
+
+def _nested_missing_volume_error(failure) -> str:
+    message = (
+        failure.get("message")
+        if isinstance(failure, dict)
+        else getattr(failure, "message", "")
+    ) or "possible missing split volume"
+    return f"嵌套压缩包内层分卷缺失：{message}"
 
 
 def _summary_processed_no_tasks(summary) -> bool:
