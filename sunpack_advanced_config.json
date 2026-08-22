@@ -93,7 +93,6 @@
       "profile_improvement_ratio": 1.2,
       "profile_calibration_max_delta": 1,
       "profile_calibration_min_parallel": 2,
-      "profile_calibration_cache_enabled": true,
       "cpu_scale_up_threshold_percent": 65,
       "cpu_scale_down_threshold_percent": 88,
       "memory_scale_down_available_mb": 1024,

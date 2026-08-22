@@ -187,7 +187,7 @@ CLI 可用 `--recur` 临时覆盖。
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `performance.worker.profile` | `str` | `auto`、`conservative` 或 `aggressive`。 |
-| `performance.worker.idle_decay_seconds` | `int` / `float` | worker 空闲多久后衰减短期反馈；不会清除持久 profile 校准。 |
+| `performance.worker.idle_decay_seconds` | `int` / `float` | worker 空闲多久后衰减短期反馈；进程退出后反馈数据不保留。 |
 | `performance.worker.max_task_seconds` | `int` / `float` | 单个解压任务总时长上限，`0` 表示不限。 |
 | `performance.worker.watchdog_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
 | `performance.worker.watchdog_interval_ms` | `int` / `float` | Python 仅用于发现 worker 丢失的检查间隔。 |
@@ -203,11 +203,11 @@ CLI 可用 `--recur` 临时覆盖。
 | `performance.worker.writer_threads` | `int` | native worker 统一写出线程数。 |
 | `performance.worker.memory_budget_bytes` | `int` | native worker 的估算内存准入预算；`0` 使用可用物理内存的默认比例。 |
 | `performance.worker.job_buffer_budget_bytes` | `int` | 单个 native 解压任务的输出 inflight 缓冲上限。 |
-| `performance.worker.profile_calibration_*` | 多种 | native worker 的在线反馈调节和持久化；worker 自己读取、更新并原子写回 profile cache。 |
+| `performance.worker.profile_calibration_*` | 多种 | native worker 进程内的在线反馈调节；worker 退出后反馈数据丢弃，不落盘。 |
 | `resource_guard` | `dict` | 可选资源护栏，用 analysis 估算的文件数、解包大小、压缩比等限制任务。 |
 
 `auto` 由 native worker 根据 CPU、物理内存和线程硬上限选择保守或激进初始档。配置文件中的超时会覆盖 profile 内置值。
-native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `performance.worker.idle_decay_seconds` 后逐步恢复初始动态限制，但不清除已持久化的 profile 校准。Python 不再根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 native worker holder。
+native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `performance.worker.idle_decay_seconds` 后逐步恢复初始动态限制。profile 反馈仅在当前 worker 进程内有效，worker 退出时丢弃。Python 不再根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 native worker holder。
 
 `resource_guard` 当前常用字段：
 

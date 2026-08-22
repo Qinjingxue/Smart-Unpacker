@@ -150,7 +150,6 @@ def _run_case(*, workspace: BenchmarkWorkspace, worker_path: Path, dll: Path, ar
         "initial_active_jobs": 0 if controller == "adaptive" else capacity,
         "sample_interval_ms": max(100, int(sample_interval * 1000)),
         "memory_budget_bytes": memory_budget_bytes,
-        "profile_calibration_cache_enabled": False,
     })
     process = psutil.Process(worker.process.pid) if worker.process is not None else None
     sampler = ProcessSampler(interval_seconds=0.02)

@@ -5,11 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <cstdio>
-#include <fstream>
-#include <iomanip>
 #include <limits>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -360,63 +356,6 @@ public:
         return found == profile_adjustments_.end() ? NativeProfileAdjustment{} : found->second;
     }
 
-    bool load_profile_cache(const std::string& path) {
-        if (path.empty()) {
-            return false;
-        }
-        std::ifstream input(path);
-        if (!input) {
-            return false;
-        }
-        std::string version;
-        if (!std::getline(input, version) || version != "SUNPACK_NATIVE_PROFILE_V2") {
-            return false;
-        }
-        std::string key;
-        NativeProfileAdjustment adjustment;
-        while (input >> std::quoted(key) >> adjustment.cpu >> adjustment.memory) {
-            adjustment.cpu = (std::max)(-profile_calibration_max_delta_,
-                (std::min)(profile_calibration_max_delta_, adjustment.cpu));
-            adjustment.memory = (std::max)(-profile_calibration_max_delta_,
-                (std::min)(profile_calibration_max_delta_, adjustment.memory));
-            profile_adjustments_[key] = adjustment;
-        }
-        profile_adjustments_dirty_ = false;
-        return true;
-    }
-
-    bool save_profile_cache(const std::string& path) const {
-        if (path.empty()) {
-            return true;
-        }
-        const std::string temporary_path = path + ".tmp";
-        std::ofstream output(temporary_path, std::ios::trunc);
-        if (!output) {
-            return false;
-        }
-        output << "SUNPACK_NATIVE_PROFILE_V2\n";
-        for (const auto& [key, adjustment] : profile_adjustments_) {
-            output << std::quoted(key) << ' '
-                   << adjustment.cpu << ' '
-                   << adjustment.memory << '\n';
-        }
-        output.close();
-        if (!output) {
-            std::remove(temporary_path.c_str());
-            return false;
-        }
-        std::remove(path.c_str());
-        if (std::rename(temporary_path.c_str(), path.c_str()) != 0) {
-            std::remove(temporary_path.c_str());
-            return false;
-        }
-        return true;
-    }
-
-    bool profile_adjustments_dirty() const noexcept {
-        return profile_adjustments_dirty_;
-    }
-
     void record_job(
         const std::string& profile_key,
         std::uint64_t estimated_bytes,
@@ -472,12 +411,8 @@ public:
         }
         if (memory_reserve >= (2ULL << 30)) {
             auto& memory_adjustment = profile_adjustments_[profile_key];
-            const int before_memory = memory_adjustment.memory;
             memory_adjustment.memory = (std::min)(
                 profile_calibration_max_delta_, memory_adjustment.memory + 1);
-            if (memory_adjustment.memory != before_memory) {
-                profile_adjustments_dirty_ = true;
-            }
         }
         auto& samples = profile_samples_[profile_key];
         samples.push_back(sample);
@@ -518,7 +453,6 @@ public:
         }
 
         auto& adjustment = profile_adjustments_[profile_key];
-        const NativeProfileAdjustment before = adjustment;
         if (recent_total < previous_total * profile_regression_ratio_) {
             adjustment.cpu = (std::min)(profile_calibration_max_delta_, adjustment.cpu + 1);
             throughput_allows_scale_up_ = false;
@@ -529,9 +463,6 @@ public:
             throughput_allows_scale_up_ = true;
         } else {
             throughput_allows_scale_up_ = true;
-        }
-        if (adjustment.cpu != before.cpu || adjustment.memory != before.memory) {
-            profile_adjustments_dirty_ = true;
         }
     }
 
@@ -612,7 +543,6 @@ private:
     std::deque<ProfileSample> throughput_samples_;
     std::unordered_map<std::string, std::deque<ProfileSample>> profile_samples_;
     std::unordered_map<std::string, NativeProfileAdjustment> profile_adjustments_;
-    bool profile_adjustments_dirty_ = false;
 };
 
 } // namespace sunpack::sevenzip

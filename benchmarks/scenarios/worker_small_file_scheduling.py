@@ -221,9 +221,6 @@ def _run_batch(
             "initial_active_jobs": initial_active_jobs,
             "sample_interval_ms": sample_interval_ms,
             "memory_budget_bytes": admission_case["memory_budget_bytes"],
-            # Admission cases must isolate one constraint; persisted profile
-            # calibration would otherwise silently change CPU/IO weights.
-            "profile_calibration_cache_enabled": False,
         },
     )
     worker_process = psutil.Process(worker.process.pid) if worker.process is not None else None

@@ -121,16 +121,10 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     environment.pop("SUNPACK_NATIVE_PROCESS_MODE", None)
     if process_mode == "background":
         environment["SUNPACK_NATIVE_PROCESS_MODE"] = process_mode
-    profile_cache_path = process_config.get("profile_calibration_cache_path")
-    if profile_cache_path:
-        environment["SUNPACK_NATIVE_PROFILE_CACHE_PATH"] = str(profile_cache_path)
-    profile_cache_enabled = process_config.get("profile_calibration_cache_enabled")
-    if profile_cache_enabled is not None:
-        if isinstance(profile_cache_enabled, str):
-            enabled = profile_cache_enabled.strip().lower() not in {"0", "false", "no", "off"}
-        else:
-            enabled = bool(profile_cache_enabled)
-        environment["SUNPACK_NATIVE_PROFILE_CACHE_ENABLED"] = "1" if enabled else "0"
+    # Profile feedback is process-local. Drop removed cache variables from the
+    # inherited environment as well.
+    environment.pop("SUNPACK_NATIVE_PROFILE_CACHE_PATH", None)
+    environment.pop("SUNPACK_NATIVE_PROFILE_CACHE_ENABLED", None)
     return environment
 
 

@@ -1116,28 +1116,6 @@ std::size_t configured_native_memory_budget() noexcept {
     return (std::numeric_limits<std::size_t>::max)();
 }
 
-bool configured_native_profile_cache_enabled() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_PROFILE_CACHE_ENABLED");
-    if (!value || !*value) {
-        return true;
-    }
-    return std::string(value) != "0" && std::string(value) != "false" && std::string(value) != "False";
-}
-
-std::string configured_native_profile_cache_path() {
-    const char* value = std::getenv("SUNPACK_NATIVE_PROFILE_CACHE_PATH");
-    if (value && *value) {
-        return value;
-    }
-#ifdef _WIN32
-    const char* local_app_data = std::getenv("LOCALAPPDATA");
-    if (local_app_data && *local_app_data) {
-        return (std::filesystem::path(local_app_data) / "Sunpack" / "native_profile_calibration.tsv").string();
-    }
-#endif
-    return (std::filesystem::path(".sunpack_cache") / "native_profile_calibration.tsv").string();
-}
-
 std::size_t configured_native_queue_capacity() noexcept {
     const char* value = std::getenv("SUNPACK_NATIVE_MAX_QUEUE_JOBS");
     if (!value || !*value) {
@@ -1338,20 +1316,10 @@ public:
           worker_count_((std::max)(std::size_t{1}, worker_count)),
           memory_budget_(configured_native_memory_budget()),
           queue_capacity_(configured_native_queue_capacity()),
-          profile_cache_path_(configured_native_profile_cache_path()),
-          profile_cache_enabled_(configured_native_profile_cache_enabled()),
           runtime_controller_(
               worker_count_,
               memory_budget_,
               configured_native_runtime_config(worker_count_)) {
-        if (profile_cache_enabled_) {
-            const std::filesystem::path cache_path(profile_cache_path_);
-            if (cache_path.has_parent_path()) {
-                std::error_code error;
-                std::filesystem::create_directories(cache_path.parent_path(), error);
-            }
-            runtime_controller_.load_profile_cache(profile_cache_path_);
-        }
         workers_.reserve(worker_count_);
         for (std::size_t index = 0; index < worker_count_; ++index) {
             workers_.emplace_back([this] { worker_loop(); });
@@ -1460,9 +1428,6 @@ public:
             }
         }
         workers_.clear();
-        if (profile_cache_enabled_ && runtime_controller_.profile_adjustments_dirty()) {
-            runtime_controller_.save_profile_cache(profile_cache_path_);
-        }
 #ifdef _WIN32
         if (shared_writer_) {
             shared_writer_->finish();
@@ -1962,8 +1927,6 @@ private:
     const std::size_t worker_count_;
     const std::size_t memory_budget_;
     const std::size_t queue_capacity_;
-    const std::string profile_cache_path_;
-    const bool profile_cache_enabled_;
     sunpack::sevenzip::NativeRuntimeControl runtime_controller_;
     std::size_t active_jobs_ = 0;
     std::size_t active_cpu_weight_ = 0;

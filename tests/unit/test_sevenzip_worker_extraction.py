@@ -443,6 +443,24 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
 
 
+def test_native_environment_drops_removed_profile_cache_settings():
+    environment = {
+        "SUNPACK_NATIVE_PROFILE_CACHE_PATH": "legacy.tsv",
+        "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED": "1",
+    }
+
+    _apply_native_environment(
+        environment,
+        {
+            "profile_calibration_cache_path": "ignored.tsv",
+            "profile_calibration_cache_enabled": True,
+        },
+    )
+
+    assert "SUNPACK_NATIVE_PROFILE_CACHE_PATH" not in environment
+    assert "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED" not in environment
+
+
 def test_native_environment_configures_idle_monitor_windows():
     environment = {}
 

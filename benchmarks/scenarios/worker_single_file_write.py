@@ -150,7 +150,6 @@ def _run_worker(
             "thread_capacity": 1,
             "adaptive_enabled": False,
             "initial_active_jobs": 1,
-            "profile_calibration_cache_enabled": False,
             "writer_threads": writer_threads,
         },
     )
