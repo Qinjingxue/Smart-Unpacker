@@ -54,3 +54,16 @@ def test_watch_launcher_forwards_runtime_identity(monkeypatch):
         "--_sunpack-runtime-id=v2-0123456789abcdef",
         "--once",
     ]
+
+
+def test_watch_launcher_forwards_initial_scan(monkeypatch):
+    monkeypatch.setattr(runtime_identity, "_runtime_id", None)
+    monkeypatch.setattr(launcher_module, "packaged_watch_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(launcher_module.sys, "executable", r"C:\Python310\python.exe")
+
+    assert launcher_module.watch_launch_argv(initial_scan=True) == [
+        r"C:\Python310\python.exe",
+        "-m",
+        "sunpack.gui",
+        "--initial-scan",
+    ]

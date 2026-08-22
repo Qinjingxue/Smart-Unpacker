@@ -13,11 +13,21 @@ def test_watch_gui_main_applies_background_mode_and_forwards_options(monkeypatch
     monkeypatch.setattr(
         gui_main,
         "_run_watch_service",
-        lambda *, once, no_tray: captured.update(once=once, no_tray=no_tray) or 7,
+        lambda *, once, no_tray, initial_scan: captured.update(
+            once=once,
+            no_tray=no_tray,
+            initial_scan=initial_scan,
+        ) or 7,
     )
 
     assert gui_main.main(["--once", "--no-tray"]) == 7
-    assert captured == {"cwd": str(tmp_path), "qos": "background", "once": True, "no_tray": True}
+    assert captured == {
+        "cwd": str(tmp_path),
+        "qos": "background",
+        "once": True,
+        "no_tray": True,
+        "initial_scan": False,
+    }
 
 
 def test_watch_gui_main_stops_after_elevation_request(monkeypatch):
@@ -50,7 +60,12 @@ def test_watch_gui_elevation_relaunch_preserves_launch_options(monkeypatch, tmp_
 
     assert gui_main._request_watch_elevation(gui_main._parse_args(["--once", "--no-tray"]))
     assert captured == {
-        "launch_kwargs": {"once": True, "no_tray": True, "prefer_windowed_python": True},
+        "launch_kwargs": {
+            "once": True,
+            "no_tray": True,
+            "initial_scan": False,
+            "prefer_windowed_python": True,
+        },
         "argv": ["sunpack-watch.exe", "--once", "--no-tray"],
         "cwd": str(tmp_path),
     }

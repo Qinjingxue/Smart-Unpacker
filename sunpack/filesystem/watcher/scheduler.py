@@ -93,7 +93,6 @@ class _ActiveCandidateState:
     filtered_mtime: float
     generation: int = 1
     force: bool = False
-    event_requires_attempt: bool = False
     filter_revision: int = 0
 
 
@@ -133,6 +132,7 @@ class WatchScheduler:
         state_path: str,
         quiet_seconds: float | None = None,
         initial_scan: bool | None = None,
+        initial_scan_roots: Iterable[str] | None = None,
         observer_stop_timeout_seconds: float | None = None,
         pipeline_engine=None,
         group_coordinator=None,
@@ -158,7 +158,12 @@ class WatchScheduler:
         )
         self.quiet_seconds = self.cold_start_seconds
         self.recursive = False
-        self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
+        self.initial_scan = bool(initial_scan)
+        self.initial_scan_roots = (
+            None
+            if initial_scan_roots is None
+            else dedupe_normalized_paths(initial_scan_roots)
+        )
         self.observer_stop_timeout_seconds = max(
             0.0,
             float(
@@ -278,20 +283,22 @@ class WatchScheduler:
         self._observer.start()
         self._clipboard_monitor.start()
         self._started = True
-        for snapshot in self.state.pending_snapshots():
-            if os.path.exists(snapshot.path):
-                self.enqueue(snapshot.path, force=snapshot.force, event_type="recovery")
+        for pending in self.state.pending_work_items():
+            if os.path.exists(pending.path):
+                self.enqueue(pending.path, force=pending.force, event_type="recovery")
             else:
-                self.state.forget_path(snapshot.path)
-        if self.initial_scan:
-            for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
+                self.state.forget_path(pending.path)
+        if self.initial_scan or self.initial_scan_roots is not None:
+            scan_roots = self.watch_roots if self.initial_scan_roots is None else self.initial_scan_roots
+            for candidate in scan_watch_candidates(scan_roots, recursive=self.recursive):
                 self.enqueue(candidate.path, event_type="initial_scan")
         self.log.write(
             "scheduler_started",
             roots=self.watch_roots,
             out_dir=self.out_dir,
             recursive=self.recursive,
-            initial_scan=self.initial_scan,
+            initial_scan=bool(self.initial_scan or self.initial_scan_roots is not None),
+            initial_scan_roots=self.initial_scan_roots,
             pending=self.pending_count,
             cold_start_seconds=self.cold_start_seconds,
             quiet_min_seconds=self._quiet_policy.minimum_seconds,
@@ -602,13 +609,6 @@ class WatchScheduler:
             self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
         now = time.time()
-        event_requires_attempt = _event_requires_attempt(event_type) and not self.state.snapshot_matches(
-            candidate.path,
-            candidate.size,
-            candidate.mtime,
-            candidate.file_id,
-            candidate.change_usn,
-        )
         with self._lock:
             state = self._active_states.get(candidate.path)
             if state is not None:
@@ -628,7 +628,6 @@ class WatchScheduler:
                     state.last_event_at = now
                     state.quiet_seconds = quiet_seconds
                 state.generation += 1
-                state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
                 state.filter_revision = self._filter_revision
                 state.filtered_size = candidate.size
                 state.filtered_mtime = candidate.mtime
@@ -659,7 +658,6 @@ class WatchScheduler:
                     filtered_size=candidate.size,
                     filtered_mtime=candidate.mtime,
                     force=force,
-                    event_requires_attempt=event_requires_attempt,
                     filter_revision=self._filter_revision,
                 )
             else:
@@ -678,12 +676,11 @@ class WatchScheduler:
                         state.last_event_at = now
                         state.quiet_seconds = active_quiet_seconds
                     state.generation += 1
-                    state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
                     state.filter_revision = self._filter_revision
                     state.filtered_size = candidate.size
                     state.filtered_mtime = candidate.mtime
         if became_active:
-            self.state.queue_active(candidate, force=force or event_requires_attempt)
+            self.state.queue_active(candidate, force=force)
             self.log.write(
                 "candidate_active",
                 path=candidate.path,
@@ -782,7 +779,7 @@ class WatchScheduler:
 
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
-        due: list[tuple[str, WatchCandidate, int, bool, bool, int, int, float, float]] = []
+        due: list[tuple[str, WatchCandidate, int, bool, int, int, float, float]] = []
         with self._lock:
             inflight_paths = self._inflight_path_keys_locked()
             for path, candidate in self._pending.items():
@@ -795,14 +792,13 @@ class WatchScheduler:
                         candidate,
                         state.generation,
                         state.force,
-                        state.event_requires_attempt,
                         state.filter_revision,
                         state.filtered_size,
                         state.filtered_mtime,
                         state.quiet_seconds,
                     ))
 
-        for path, candidate, generation, force, event_requires_attempt, filter_revision, filtered_size, filtered_mtime, quiet_seconds in due:
+        for path, candidate, generation, force, filter_revision, filtered_size, filtered_mtime, quiet_seconds in due:
             refreshed = _candidate_for_event_path(path, since_usn=candidate.change_usn)
             if refreshed is None:
                 self._drop_active(path, generation)
@@ -846,16 +842,6 @@ class WatchScheduler:
                     continue
                 self._pending.pop(path, None)
                 self._active_states.pop(path, None)
-            if not force and not event_requires_attempt and self.state.snapshot_matches(
-                identified.path,
-                identified.size,
-                identified.mtime,
-                identified.file_id,
-                identified.change_usn,
-            ):
-                self.state.complete_work([path])
-                self._log_candidate_ignored(path, "unchanged_input", size=identified.size, mtime=identified.mtime)
-                continue
             self.state.record_attempt(
                 identified.path,
                 identified.size,
@@ -960,9 +946,6 @@ class WatchScheduler:
             quiet_seconds=quiet_seconds,
             filtered_size=candidate.size,
             filtered_mtime=candidate.mtime,
-            # Keep the attempt armed without pinning the in-memory force flag,
-            # mirroring how a plain "modified" event arms a candidate.
-            event_requires_attempt=True,
             filter_revision=self._filter_revision,
         )
         with self._lock:
@@ -1669,10 +1652,6 @@ def _candidate_content_changed(previous: WatchCandidate, current: WatchCandidate
     if current.mtime < previous.mtime - RESTORED_MTIME_MINIMUM_BACKSTEP_SECONDS:
         return False
     return previous.mtime != current.mtime or previous.change_usn != current.change_usn
-
-
-def _event_requires_attempt(event_type: str) -> bool:
-    return event_type in {"created", "modified", "moved"}
 
 
 def _file_entry_from_watch_candidate(candidate: WatchCandidate) -> FileEntry:

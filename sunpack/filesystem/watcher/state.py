@@ -16,12 +16,12 @@ from .group_models import (
 )
 
 
-STATE_VERSION = 12
-LOADABLE_STATE_VERSIONS = {11, STATE_VERSION}
+STATE_VERSION = 13
+LOADABLE_STATE_VERSIONS = {STATE_VERSION}
 
 
 @dataclass
-class WatchInputSnapshot:
+class WatchPendingWork:
     path: str
     size: int
     mtime: float
@@ -60,13 +60,12 @@ class WatchStateEntry:
 
 
 class WatchStateStore:
-    """Persistent input snapshot, crash queue, and retry blockers for watch mode."""
+    """Persistent crash queue and retry blockers for watch mode."""
 
     def __init__(self, path: str):
         self.path = Path(path)
         self._save_lock = threading.RLock()
-        self.snapshots: dict[str, WatchInputSnapshot] = {}
-        self.pending_work: dict[str, WatchInputSnapshot] = {}
+        self.pending_work: dict[str, WatchPendingWork] = {}
         self.entries: dict[str, WatchStateEntry] = {}
         self.groups: dict[str, WatchGroupState] = {}
         self.password_generation = 0
@@ -84,26 +83,19 @@ class WatchStateStore:
             return
         version = payload.get("version")
         if version not in LOADABLE_STATE_VERSIONS:
+            # State schemas are intentionally not migrated. Replace an old
+            # or incompatible snapshot immediately so obsolete processed-file
+            # history cannot remain on disk when the watcher is idle.
+            self.save()
             return
         try:
             self.password_generation = max(0, int(payload.get("password_generation", 0)))
         except (TypeError, ValueError):
             self.password_generation = 0
         self.password_source_signature = str(payload.get("password_source_signature") or "")
-        self.snapshots = self._load_records(payload.get("snapshots"), WatchInputSnapshot)
-        self.pending_work = self._load_records(payload.get("pending_work"), WatchInputSnapshot)
+        self.pending_work = self._load_records(payload.get("pending_work"), WatchPendingWork)
         self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
         self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
-        if version < STATE_VERSION:
-            # v11 treated a successful split group as a permanent content
-            # dedupe record. It cannot distinguish a re-arrival from the
-            # original lifecycle, so retain only unfinished retry state.
-            self.groups = {
-                group_id: group
-                for group_id, group in self.groups.items()
-                if group.status != "done"
-            }
-            self.save()
 
     @staticmethod
     def _load_records(payload, record_type, *, normalize_keys: bool = True) -> dict:
@@ -128,7 +120,6 @@ class WatchStateStore:
                 "version": STATE_VERSION,
                 "password_generation": self.password_generation,
                 "password_source_signature": self.password_source_signature,
-                "snapshots": {key: asdict(value) for key, value in self.snapshots.items()},
                 "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
                 "entries": {key: asdict(value) for key, value in self.entries.items()},
                 "groups": {key: asdict(value) for key, value in self.groups.items()},
@@ -153,25 +144,8 @@ class WatchStateStore:
                     except FileNotFoundError:
                         pass
 
-    def snapshot_matches(
-        self,
-        path: str,
-        size: int,
-        mtime: float,
-        file_id: str = "",
-        change_usn: int = 0,
-    ) -> bool:
-        snapshot = self.snapshots.get(_path_key(path))
-        return bool(
-            snapshot
-            and snapshot.size == size
-            and snapshot.mtime == mtime
-            and snapshot.file_id == file_id
-            and snapshot.change_usn == int(change_usn)
-        )
-
     def queue_active(self, candidate, *, force: bool = False) -> None:
-        snapshot = WatchInputSnapshot(
+        pending = WatchPendingWork(
             path=os.path.abspath(candidate.path),
             size=int(candidate.size),
             mtime=float(candidate.mtime),
@@ -179,7 +153,7 @@ class WatchStateStore:
             change_usn=int(getattr(candidate, "change_usn", 0) or 0),
             force=bool(force),
         )
-        self.pending_work[_path_key(candidate.path)] = snapshot
+        self.pending_work[_path_key(candidate.path)] = pending
         self.save()
 
     def record_attempt(
@@ -190,7 +164,7 @@ class WatchStateStore:
         file_id: str = "",
         change_usn: int = 0,
     ) -> None:
-        snapshot = WatchInputSnapshot(
+        pending = WatchPendingWork(
             path=os.path.abspath(path),
             size=size,
             mtime=mtime,
@@ -199,11 +173,10 @@ class WatchStateStore:
             force=False,
         )
         key = _path_key(path)
-        self.snapshots[key] = snapshot
-        self.pending_work[key] = snapshot
+        self.pending_work[key] = pending
         self.save()
 
-    def pending_snapshots(self) -> list[WatchInputSnapshot]:
+    def pending_work_items(self) -> list[WatchPendingWork]:
         return list(self.pending_work.values())
 
     def complete_work(self, paths: Iterable[str]) -> None:
@@ -232,13 +205,12 @@ class WatchStateStore:
         normalized = os.path.abspath(path)
         keys = {
             key
-            for collection in (self.snapshots, self.pending_work, self.entries)
+            for collection in (self.pending_work, self.entries)
             for key in collection
             if _path_matches(key, normalized, recursive=recursive)
         }
         changed = False
         for key in keys:
-            changed = self.snapshots.pop(key, None) is not None or changed
             changed = self.pending_work.pop(key, None) is not None or changed
             changed = self.entries.pop(key, None) is not None or changed
         for group_id, group in list(self.groups.items()):

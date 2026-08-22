@@ -24,8 +24,9 @@ def test_native_launcher_starts_watch_only_after_watch_add_succeeds():
     assert 'wcscmp(argv[2], L"add") == 0' in source
     assert 'wcscmp(argv[index], L"--start") == 0' in source
     assert "request(context, request_arguments, shutdown, code, invocation_cwd)" in source
-    assert "if (ok && code == 0 && start_after_add && !spawn_watch" in source
-    assert "spawn_watch(context, {}, true, nullptr)" in source
+    assert "if (ok && code == 0 && start_after_add)" in source
+    assert "if (initial_scan_after_add) watch_start_arguments.emplace_back(L\"--initial-scan\");" in source
+    assert "spawn_watch(context, watch_start_arguments, true, nullptr)" in source
     assert "spawn_runtime(forwarded, false, &code, invocation_cwd)" not in source
 
 

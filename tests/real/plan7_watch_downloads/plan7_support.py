@@ -835,22 +835,16 @@ def assert_plan7_success(
 
     # 单文件归档每个恰好提交一次；分卷乱序到达时，watch 会对“已到头卷但还
     # 缺尾卷”的不完整组做探测性提交（借后端确认缺卷），所以分卷场景只要求
-    # 每个归档至少提交一次。两者都要求完成后重放不得再次提交。
+    # 每个归档至少提交一次。持久化 snapshot 去重已移除，成功文件收到新的
+    # enqueue 事件后应按新事件再次处理。
     if expect_exact_submissions:
         assert len(harness.submit_times) == completed_count, harness.submit_times
     else:
         assert len(harness.submit_times) >= completed_count, harness.submit_times
-    submissions_after_success = len(harness.submit_times)
-    for plan7_case in cases.values():
-        for path in harness.watch_root.iterdir():
-            if path.name == ".sunpack-passwords.txt":
-                continue
-            harness.watcher.enqueue(str(path))
-    replay_started_at = time.perf_counter()
-    replay = drive_watch_until(harness.watcher, lambda: True, timeout_seconds=10)
-    harness.timer.record("replay_drive", time.perf_counter() - replay_started_at)
-    assert replay.processed == 0, replay
-    assert len(harness.submit_times) == submissions_after_success, harness.submit_times
+    # Repeated-event behavior is covered by the scheduler unit tests. Do not
+    # replay the entire real fixture matrix here: after snapshot dedupe is
+    # removed, that would intentionally launch a second full extraction pass
+    # and turn the performance scenario into an unrelated stress test.
 
     assert max(tick_latencies) < MAX_WATCH_TICK_LATENCY_SECONDS, tick_latencies
     memory = sampler.summary()

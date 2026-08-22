@@ -9,7 +9,12 @@ from sunpack.filesystem.watcher.service import WatchService
 from sunpack.platform.windows.toast_host import ToastHostManager
 
 
-async def run_watch_service(*, tray_enabled: bool = True, once: bool = False) -> int:
+async def run_watch_service(
+    *,
+    tray_enabled: bool = True,
+    once: bool = False,
+    initial_scan: bool = False,
+) -> int:
     tray_factory = None
     if tray_enabled and not once:
         from sunpack.gui.tray import WindowsTrayIcon
@@ -42,4 +47,4 @@ async def run_watch_service(*, tray_enabled: bool = True, once: bool = False) ->
         group_coordinator_factory=WatchGroupCoordinator,
         toast_manager_factory=None if once else toast_manager_factory,
     )
-    return await service.run(once=once)
+    return await service.run(once=once, initial_scan=initial_scan)

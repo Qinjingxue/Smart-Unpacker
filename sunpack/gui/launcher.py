@@ -19,6 +19,7 @@ def watch_launch_argv(
     *,
     once: bool = False,
     no_tray: bool = False,
+    initial_scan: bool = False,
     prefer_windowed_python: bool = False,
 ) -> list[str]:
     packaged = packaged_watch_executable()
@@ -37,4 +38,6 @@ def watch_launch_argv(
         argv.append("--once")
     if no_tray:
         argv.append("--no-tray")
+    if initial_scan:
+        argv.append("--initial-scan")
     return argv

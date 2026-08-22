@@ -3,7 +3,9 @@ from __future__ import annotations
 import ctypes
 import asyncio
 import hashlib
+import json
 import os
+import tempfile
 import threading
 import time
 from copy import deepcopy
@@ -22,6 +24,8 @@ from sunpack.support.resources import get_resource_path
 
 
 SERVICE_STATE = "state.json"
+INITIAL_SCAN_REQUEST = "initial_scan_request.json"
+INITIAL_SCAN_REQUEST_TTL_SECONDS = 60.0
 WATCH_ROOTS_FILENAME = "sunpack_watch_roots.txt"
 CONTROL_EVENT_PREFIX = "Local\\SunPackWatchControl"
 ROOTS_MUTEX_PREFIX = "Local\\SunPackWatchRoots"
@@ -78,6 +82,92 @@ def service_state_dir(config: dict) -> str:
     if state_dir:
         return resolve_service_path(state_dir)
     return os.path.join(normalize_root(str(watch_roots_path().resolve().parent)), ".sunpack_watch")
+
+
+def initial_scan_request_path(config: dict) -> Path:
+    return Path(service_state_dir(config)) / INITIAL_SCAN_REQUEST
+
+
+def request_initial_scan(config: dict, roots: list[str]) -> Path | None:
+    requested_roots = _normalize_scan_roots(roots)
+    if not requested_roots:
+        return None
+    request_path = initial_scan_request_path(config)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    with _watch_roots_mutex():
+        merged_roots = list(requested_roots)
+        try:
+            previous = json.loads(request_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            previous = None
+        if isinstance(previous, dict):
+            try:
+                age = max(0.0, time.time() - float(previous.get("requested_at", 0.0)))
+            except (TypeError, ValueError):
+                age = INITIAL_SCAN_REQUEST_TTL_SECONDS + 1.0
+            if age <= INITIAL_SCAN_REQUEST_TTL_SECONDS:
+                merged_roots = _normalize_scan_roots(
+                    [*(previous.get("roots") or []), *merged_roots]
+                )
+        payload = {"requested_at": time.time(), "roots": merged_roots}
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=request_path.parent,
+                prefix=f".{request_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp:
+                temp_path = Path(temp.name)
+                json.dump(payload, temp, ensure_ascii=False, separators=(",", ":"))
+            os.replace(temp_path, request_path)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+    return request_path
+
+
+def consume_initial_scan_request(config: dict) -> list[str] | None:
+    request_path = initial_scan_request_path(config)
+    with _watch_roots_mutex():
+        try:
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            payload = None
+        try:
+            request_path.unlink()
+        except FileNotFoundError:
+            pass
+    if not isinstance(payload, dict):
+        return None
+    try:
+        age = max(0.0, time.time() - float(payload.get("requested_at", 0.0)))
+    except (TypeError, ValueError):
+        return None
+    if age > INITIAL_SCAN_REQUEST_TTL_SECONDS:
+        return None
+    return _normalize_scan_roots(payload.get("roots") or [])
+
+
+def _normalize_scan_roots(roots) -> list[str]:
+    result = []
+    seen = set()
+    for root in roots or []:
+        value = str(root or "").strip()
+        if not value:
+            continue
+        normalized = normalize_root(value)
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+    return result
 
 
 def watch_roots_path() -> Path:
@@ -237,17 +327,23 @@ class WatchService:
     def roots(self) -> list[str]:
         return existing_roots(list(self.service_config.get("roots") or []))
 
-    async def run(self, *, once: bool = False) -> int:
+    async def run(self, *, once: bool = False, initial_scan: bool = False) -> int:
         self._loop = asyncio.get_running_loop()
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
         if not self._acquire_lock():
             self.log.write("service_lock_busy", lock_name=self.lock_name)
             return 2
-        self.log.write("service_started", state_dir=self.state_dir, roots=self.roots, once=once)
+        self.log.write(
+            "service_started",
+            state_dir=self.state_dir,
+            roots=self.roots,
+            once=once,
+            initial_scan=bool(initial_scan),
+        )
         try:
             self.control_events.start()
             self._start_control_bridge()
-            await self._start_scheduler()
+            await self._start_scheduler(initial_scan=bool(initial_scan))
             self._start_tray()
             if once:
                 if self.scheduler is None:
@@ -371,8 +467,9 @@ class WatchService:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config()))
 
-    async def _start_scheduler(self) -> None:
+    async def _start_scheduler(self, *, initial_scan: bool = False) -> None:
         await self._stop_scheduler()
+        requested_scan_roots = consume_initial_scan_request(self.config)
         roots = self.roots
         if not roots:
             self._stop_toast_host()
@@ -408,7 +505,8 @@ class WatchService:
                         watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
                     )
                 ),
-                initial_scan=bool(watch_config.get("initial_scan", True)),
+                initial_scan=bool(initial_scan),
+                initial_scan_roots=requested_scan_roots,
                 observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
                 pipeline_engine=pipeline_engine,
                 group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),

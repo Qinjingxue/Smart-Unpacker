@@ -538,11 +538,15 @@ int wmain(int argc, wchar_t** argv) {
     const bool shutdown = shutdown_request;
     bool pause = false;
     bool start_after_add = false;
+    bool initial_scan_after_add = false;
     std::vector<std::wstring> request_arguments;
     const int first_request_argument = shutdown ? 2 : 1;
     for (int index = first_request_argument; index < argc; ++index) {
         if (watch_add && wcscmp(argv[index], L"--start") == 0) {
             start_after_add = true;
+        } else if (watch_add && wcscmp(argv[index], L"--initial-scan") == 0) {
+            initial_scan_after_add = true;
+            request_arguments.emplace_back(argv[index]);
         } else if (wcscmp(argv[index], L"--pause") == 0) {
             pause = true;
         } else {
@@ -581,8 +585,10 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (!ok && shutdown) code = 0;
-    if (ok && code == 0 && start_after_add && !spawn_watch(context, {}, true, nullptr)) {
-        code = 1;
+    if (ok && code == 0 && start_after_add) {
+        std::vector<std::wstring> watch_start_arguments;
+        if (initial_scan_after_add) watch_start_arguments.emplace_back(L"--initial-scan");
+        if (!spawn_watch(context, watch_start_arguments, true, nullptr)) code = 1;
     }
     std::string language;
     if (pause || (!ok && !shutdown)) {

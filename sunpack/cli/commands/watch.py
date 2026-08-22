@@ -14,6 +14,7 @@ from sunpack.filesystem.watcher.service import (
     is_watch_lock_active,
     list_watch_roots,
     remove_watch_roots,
+    request_initial_scan,
     service_state_dir,
     signal_reload,
     signal_stop,
@@ -40,10 +41,12 @@ def register(subparsers, ctx):
     start_parser = actions.add_parser("start", parents=[common], help=ctx.t("cli.watch.start"), formatter_class=CliHelpFormatter)
     start_parser.add_argument("--once", action="store_true", help=ctx.t("cli.watch.once"))
     start_parser.add_argument("--no-tray", action="store_true", help=ctx.t("cli.watch.no_tray"))
+    start_parser.add_argument("--initial-scan", action="store_true", help=ctx.t("cli.watch.initial_scan"))
 
     add_parser = actions.add_parser("add", parents=[common], help=ctx.t("cli.watch.add"), formatter_class=CliHelpFormatter)
     add_parser.add_argument("paths", nargs="+", help=ctx.t("cli.watch.paths"))
     add_parser.add_argument("--start", action="store_true", help=ctx.t("cli.watch.start_after_add"))
+    add_parser.add_argument("--initial-scan", action="store_true", help=ctx.t("cli.watch.initial_scan"))
 
     remove_parser = actions.add_parser("remove", parents=[common], help=ctx.t("cli.watch.remove"), formatter_class=CliHelpFormatter)
     remove_parser.add_argument("paths", nargs="+", help=ctx.t("cli.watch.paths"))
@@ -93,6 +96,7 @@ async def _handle_start(args, ctx):
     code = await run_watch_service(
         tray_enabled=not bool(getattr(args, "no_tray", False)),
         once=bool(getattr(args, "once", False)),
+        initial_scan=bool(getattr(args, "initial_scan", False)),
     )
     if code == 2:
         return EXIT_TASK_FAILED, CliCommandResult(
@@ -105,8 +109,15 @@ async def _handle_start(args, ctx):
 
 
 def _handle_add(args, ctx):
+    start_requested = bool(getattr(args, "start", False))
+    initial_scan_requested = bool(getattr(args, "initial_scan", False))
     roots_path, added = add_watch_roots(list(args.paths or []))
     config = load_request_config(ctx.cwd)
+    scan_request_path = (
+        request_initial_scan(config, list(args.paths or []))
+        if initial_scan_requested
+        else None
+    )
     reload_event = signal_reload(config)
     return 0, CliCommandResult(
         command=COMMAND,
@@ -115,7 +126,9 @@ def _handle_add(args, ctx):
             "roots_path": str(roots_path),
             "added": added,
             "reload_event": reload_event,
-            "start_requested": bool(getattr(args, "start", False)),
+            "start_requested": start_requested,
+            "initial_scan_requested": initial_scan_requested,
+            "initial_scan_request_path": str(scan_request_path) if scan_request_path else "",
         },
         items=added,
     )
@@ -196,6 +209,8 @@ def _watch_cli_start_argv(args) -> list[str]:
         command.append("--once")
     if bool(getattr(args, "no_tray", False)):
         command.append("--no-tray")
+    if bool(getattr(args, "initial_scan", False)):
+        command.append("--initial-scan")
     if getattr(sys, "frozen", False):
         argv = [str(Path(sys.executable).resolve()), *command]
     else:

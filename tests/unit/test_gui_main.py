@@ -9,15 +9,15 @@ def test_gui_main_runs_shared_watch_service(monkeypatch):
     monkeypatch.setattr(
         gui_main,
         "_run_watch_service",
-        lambda *, once, no_tray: calls.append((once, no_tray)) or 0,
+        lambda *, once, no_tray, initial_scan: calls.append((once, no_tray, initial_scan)) or 0,
     )
 
     assert gui_main.main([]) == 0
-    assert calls == [(False, False)]
+    assert calls == [(False, False, False)]
 
 
 def test_gui_main_logs_bootstrap_failure(tmp_path, monkeypatch):
-    def fail(*, once, no_tray):
+    def fail(*, once, no_tray, initial_scan):
         raise RuntimeError("startup failed")
 
     monkeypatch.setattr(gui_main, "_request_watch_elevation", lambda _args: False)
@@ -37,7 +37,7 @@ def test_gui_main_exits_after_elevated_relaunch(monkeypatch):
     monkeypatch.setattr(
         gui_main,
         "_run_watch_service",
-        lambda *, once, no_tray: calls.append((once, no_tray)) or 0,
+        lambda *, once, no_tray, initial_scan: calls.append((once, no_tray, initial_scan)) or 0,
     )
 
     assert gui_main.main([]) == 0

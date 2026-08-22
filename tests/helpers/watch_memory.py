@@ -386,7 +386,6 @@ def _watch_filesystem_cache_stats() -> dict[str, Any]:
 def _state_stats(watcher: WatchScheduler, state_path: Path) -> dict[str, Any]:
     state = watcher.state
     result = {
-        "snapshots": len(state.snapshots),
         "pending_work": len(state.pending_work),
         "entries": len(state.entries),
         "groups": len(state.groups),

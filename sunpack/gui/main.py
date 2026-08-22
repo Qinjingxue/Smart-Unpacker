@@ -21,7 +21,11 @@ def main(argv: list[str] | None = None) -> int:
         from sunpack.platform.windows.process_qos import enter_background_processing
 
         enter_background_processing()
-        return _run_watch_service(once=args.once, no_tray=args.no_tray)
+        return _run_watch_service(
+            once=args.once,
+            no_tray=args.no_tray,
+            initial_scan=args.initial_scan,
+        )
     except Exception as exc:
         _write_bootstrap_error(exc)
         return 1
@@ -31,13 +35,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--no-tray", action="store_true")
+    parser.add_argument("--initial-scan", action="store_true")
     return parser.parse_args(sys.argv[1:] if argv is None else argv)
 
 
-def _run_watch_service(*, once: bool, no_tray: bool) -> int:
+def _run_watch_service(*, once: bool, no_tray: bool, initial_scan: bool = False) -> int:
     from sunpack.coordinator.watch_runtime import run_watch_service
 
-    return asyncio.run(run_watch_service(tray_enabled=not no_tray, once=once))
+    return asyncio.run(
+        run_watch_service(
+            tray_enabled=not no_tray,
+            once=once,
+            initial_scan=initial_scan,
+        )
+    )
 
 
 def _request_watch_elevation(args: argparse.Namespace) -> bool:
@@ -48,6 +59,7 @@ def _request_watch_elevation(args: argparse.Namespace) -> bool:
         watch_launch_argv(
             once=bool(args.once),
             no_tray=bool(args.no_tray),
+            initial_scan=bool(args.initial_scan),
             prefer_windowed_python=True,
         ),
         cwd=runtime_working_directory(),

@@ -150,6 +150,7 @@ def test_output_deletion_primitives_are_confined_to_approved_infrastructure():
         Path("sunpack/cli/persistent_process.py"),
         Path("sunpack/coordinator/reporting.py"),
         Path("sunpack/filesystem/watcher/scheduler.py"),
+        Path("sunpack/filesystem/watcher/service.py"),
         Path("sunpack/filesystem/watcher/state.py"),
     }
     violations: list[str] = []

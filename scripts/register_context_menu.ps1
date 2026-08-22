@@ -136,10 +136,10 @@ function New-WatchCommandString {
     )
 
     if ($Launcher.Mode -eq "app") {
-        return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @("watch", "add", $TargetToken, "--start")
+        return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @("watch", "add", $TargetToken, "--start", "--initial-scan")
     }
 
-    return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @($Launcher.ScriptPath, "watch", "add", $TargetToken, "--start")
+    return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @($Launcher.ScriptPath, "watch", "add", $TargetToken, "--start", "--initial-scan")
 }
 
 function New-HiddenStartProcessCommand {
