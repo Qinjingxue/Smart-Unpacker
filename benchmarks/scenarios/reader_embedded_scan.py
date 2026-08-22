@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import random
 import statistics
@@ -42,6 +43,15 @@ def parse_args() -> argparse.Namespace:
         help="Generate a stored ZIP64 fixture of this size and benchmark it (for example, 10).",
     )
     parser.add_argument(
+        "--generate-plan5-mib",
+        type=int,
+        default=0,
+        help=(
+            "Generate a Plan 5 mixed embedded-archive carrier of this size in MiB. "
+            "The fixture contains 128 real ZIP/7z/RAR/TAR/gzip/bzip2/xz/zstd archives."
+        ),
+    )
+    parser.add_argument(
         "--iocp-chunk-mib",
         action="append",
         type=float,
@@ -63,6 +73,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cli-timeout", type=float, default=600.0, help="Wall-clock timeout for the CLI scan subprocess.")
     parser.add_argument("--results-root", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
+    parser.add_argument(
+        "--baseline-report",
+        type=Path,
+        help="Compare the first native window with a previous report.json and fail on regression.",
+    )
+    parser.add_argument(
+        "--max-regression-percent",
+        type=float,
+        default=5.0,
+        help="Maximum allowed native wall-median regression (default: 5%%).",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +135,7 @@ def benchmark_native(
     iocp_chunk_mib: float = 2.0,
     iocp_buffers: int = 8,
     iocp_workers: int = 2,
+    expected_candidates: set[tuple[str, int]] | None = None,
 ) -> dict:
     clear_reader_resources()
     session = NativeArchiveSession(str(path))
@@ -130,6 +152,13 @@ def benchmark_native(
         )
         assert result["complete"] is True
         assert int(result["read_bytes"]) == path.stat().st_size
+        if expected_candidates is not None:
+            actual = {
+                (str(candidate["format"]), int(candidate["offset"]))
+                for candidate in result["candidates"]
+            }
+            missing = expected_candidates - actual
+            assert not missing, f"embedded scan missed {len(missing)} expected archives: {sorted(missing)[:8]}"
         return result
 
     sampler = ProcessSampler(interval_seconds=sample_interval)
@@ -207,7 +236,68 @@ def generate_stored_zip64(path: Path, payload_gib: float) -> Path:
     return path
 
 
-def run_report(path: Path, args: argparse.Namespace, config: dict[str, object]) -> dict:
+def generate_plan5_mixed_carrier(
+    root: Path,
+    target: Path,
+    size_mib: int,
+) -> tuple[Path, set[tuple[str, int]], dict[str, object]]:
+    """Build the real Plan 5 matrix and center it in a streamed fixed-size carrier."""
+
+    from tests.real.plan5_embedded_archives.plan5_support import build_large_embedded_case
+
+    target_size = size_mib * 1024**2
+    if target_size < 1:
+        raise ValueError("size_mib must be positive")
+    case = build_large_embedded_case(root / "plan5", count=128, payload_size=64)
+    source_size = case.file_path.stat().st_size
+    if source_size > target_size:
+        raise ValueError(
+            f"Plan 5 matrix is {source_size} bytes and does not fit in {target_size} bytes"
+        )
+
+    prefix_size = (target_size - source_size) // 2
+    suffix_size = target_size - prefix_size - source_size
+    zero_block = bytes(1024 * 1024)
+
+    def write_zeros(writer, count: int) -> None:
+        remaining = count
+        while remaining:
+            chunk_size = min(remaining, len(zero_block))
+            writer.write(zero_block[:chunk_size])
+            remaining -= chunk_size
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("wb") as writer, case.file_path.open("rb") as source:
+        write_zeros(writer, prefix_size)
+        while chunk := source.read(1024 * 1024):
+            writer.write(chunk)
+        write_zeros(writer, suffix_size)
+
+    expected = {
+        (segment.archive_format, prefix_size + segment.offset)
+        for segment in case.segments
+    }
+    formats = sorted({archive_format for archive_format, _offset in expected})
+    required_formats = {"zip", "7z", "rar", "tar", "gzip", "bzip2", "xz", "zstd"}
+    missing_formats = required_formats - set(formats)
+    if missing_formats:
+        raise RuntimeError(f"Plan 5 benchmark is missing formats: {sorted(missing_formats)}")
+    return target, expected, {
+        "size_mib": size_mib,
+        "segment_count": len(case.segments),
+        "formats": formats,
+        "matrix_size_bytes": source_size,
+        "matrix_offset": prefix_size,
+        "padding": "streamed-zero-fill",
+    }
+
+
+def run_report(
+    path: Path,
+    args: argparse.Namespace,
+    config: dict[str, object],
+    expected_candidates: set[tuple[str, int]] | None = None,
+) -> dict:
     path = path.resolve()
     if not path.is_file():
         raise SystemExit(f"sample does not exist: {path}")
@@ -232,7 +322,45 @@ def run_report(path: Path, args: argparse.Namespace, config: dict[str, object]) 
             float(config.get("iocp_chunk_mib", 2.0)),
             int(config.get("iocp_buffers", 2)),
             int(config.get("iocp_workers", 4)),
+            expected_candidates,
         ),
+    }
+
+
+def compare_with_baseline(current: dict, baseline_path: Path, max_regression_percent: float) -> dict:
+    if max_regression_percent < 0:
+        raise ValueError("max_regression_percent must be nonnegative")
+    baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline_summary = baseline_payload["summary"]
+    baseline_window = (
+        baseline_summary["window_results"][0]
+        if "window_results" in baseline_summary
+        else baseline_summary
+    )
+    current_native = current["native_embedded_scan"]
+    baseline_native = baseline_window["native_embedded_scan"]
+    current_median = float(current_native["wall_median_ms"])
+    baseline_median = float(baseline_native["wall_median_ms"])
+    regression_percent = (current_median / baseline_median - 1.0) * 100.0
+    current_candidates = int(current_native["rounds"][0]["candidates"])
+    baseline_candidates = int(baseline_native["rounds"][0]["candidates"])
+    if current_candidates != baseline_candidates:
+        raise RuntimeError(
+            f"candidate count changed: baseline={baseline_candidates}, current={current_candidates}"
+        )
+    if regression_percent > max_regression_percent:
+        raise RuntimeError(
+            f"embedded scan regressed {regression_percent:.3f}% "
+            f"(allowed {max_regression_percent:.3f}%)"
+        )
+    return {
+        "baseline_report": str(baseline_path.resolve()),
+        "baseline_wall_median_ms": baseline_median,
+        "current_wall_median_ms": current_median,
+        "wall_regression_percent": round(regression_percent, 3),
+        "max_regression_percent": max_regression_percent,
+        "candidate_count": current_candidates,
+        "passed": True,
     }
 
 
@@ -240,6 +368,10 @@ def main() -> None:
     args = parse_args()
     if args.generate_gib < 0:
         raise SystemExit("generate-gib must be nonnegative")
+    if args.generate_plan5_mib < 0:
+        raise SystemExit("generate-plan5-mib must be nonnegative")
+    if args.generate_gib > 0 and args.generate_plan5_mib > 0:
+        raise SystemExit("generate-gib and generate-plan5-mib are mutually exclusive")
     iocp_chunks = args.iocp_chunk_mib or [2.0]
     iocp_buffers = args.iocp_buffers or [2]
     iocp_workers = args.iocp_workers or [4]
@@ -257,6 +389,32 @@ def main() -> None:
     ]
     if len(configs) > 1:
         random.Random(0x5343_494F).shuffle(configs)
+    if args.generate_plan5_mib > 0:
+        with BenchmarkWorkspace(
+            SCENARIO,
+            results_root=args.results_root,
+            keep_workdir=args.keep_workdir,
+        ) as workspace:
+            path, expected, generated_fixture = generate_plan5_mixed_carrier(
+                workspace.work,
+                workspace.corpus / "plan5-embedded-mixed.bin",
+                args.generate_plan5_mib,
+            )
+            results = [run_report(path, args, config, expected) for config in configs]
+            result = {
+                "path": str(path.resolve()),
+                "size_bytes": path.stat().st_size,
+                "generated_fixture": generated_fixture,
+                "window_results": results,
+            }
+            if args.baseline_report:
+                result["regression_check"] = compare_with_baseline(
+                    results[0], args.baseline_report, args.max_regression_percent
+                )
+            rendered = render_report(report_from_payload(SCENARIO, result))
+            workspace.write_result_text("report.json", rendered)
+            print(rendered)
+        return
     if args.generate_gib > 0:
         with BenchmarkWorkspace(
             SCENARIO,
@@ -278,6 +436,10 @@ def main() -> None:
                 "generated_fixture": generated_fixture,
                 "window_results": results,
             }
+            if args.baseline_report:
+                result["regression_check"] = compare_with_baseline(
+                    results[0], args.baseline_report, args.max_regression_percent
+                )
             rendered = render_report(report_from_payload(SCENARIO, result))
             workspace.write_result_text("report.json", rendered)
             print(rendered)

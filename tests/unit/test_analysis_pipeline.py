@@ -483,7 +483,7 @@ def test_analysis_does_not_call_a_zstd_header_fragment_extractable(tmp_path):
     }["zstd"]
 
     assert evidence.status != "extractable"
-    assert evidence.details["validation_complete"] is False
+    assert evidence.details["structure_validation_complete"] is False
 
 
 def test_analysis_scheduler_detects_compressed_tar_variants(tmp_path):

@@ -56,11 +56,13 @@ class CompressionStreamIdentityScoreRule(RuleBase):
 def _format_evidence(format_name: str, structure: dict[str, Any]) -> tuple[bool, bool, bool, bool]:
     error = str(structure.get("error") or "")
     damage = {str(item) for item in structure.get("damage_flags") or []}
+    structure_complete = bool(structure.get("structure_validation_complete"))
+    integrity_verified = str(structure.get("integrity_status") or "") == "verified"
     if format_name == "gzip":
         method = structure.get("member.header.compression_method")
         header_ok = method == 8 and available(structure.get("member.header.flags"))
-        secondary = available(structure.get("member.deflate.blocks")) or _positive_int(structure.get("decoded_bytes"))
-        integrity = bool(structure.get("validation_complete")) or text_contains(
+        secondary = structure_complete or available(structure.get("member.deflate.blocks")) or _positive_int(structure.get("decoded_bytes"))
+        integrity = integrity_verified or text_contains(
             structure.get("member.trailer.crc32"), "ok=true"
         )
         contradiction = "reserved_flags" in error or (available(method) and method != 8)
@@ -69,23 +71,21 @@ def _format_evidence(format_name: str, structure: dict[str, Any]) -> tuple[bool,
         block_size = structure.get("stream.block_size_100k")
         header_ok = isinstance(block_size, int) and 1 <= block_size <= 9
         marker = structure.get("block.marker")
-        secondary = available(marker) and marker != 2**64 - 1
-        integrity = bool(structure.get("stream.end_marker")) or bool(structure.get("validation_complete"))
+        secondary = structure_complete or (available(marker) and marker != 2**64 - 1)
+        integrity = integrity_verified
         return header_ok, secondary, integrity, False
     if format_name == "xz":
         flags = structure.get("stream.header.flags")
         header_ok = available(flags) and not text_contains(error, "reserved")
-        secondary = available(structure.get("stream.footer.magic")) or available(structure.get("block.header.size"))
-        integrity = text_contains(structure.get("stream.header.crc32"), "ok=true") or bool(
-            structure.get("validation_complete")
-        )
+        secondary = structure_complete or available(structure.get("stream.footer.magic")) or available(structure.get("block.header.size"))
+        integrity = integrity_verified
         contradiction = text_contains(error, "reserved")
         return header_ok, secondary, integrity, contradiction
 
     descriptor = structure.get("frame.header.descriptor")
     header_ok = available(descriptor) and not text_contains(error, "reserved_bit")
-    secondary = available(structure.get("block.header.type")) or _positive_int(structure.get("frame.sequence"))
-    integrity = bool(structure.get("validation_complete")) or available(structure.get("frame.content_checksum"))
+    secondary = structure_complete or available(structure.get("block.header.type")) or _positive_int(structure.get("frame.sequence"))
+    integrity = integrity_verified
     contradiction = "zstd_reserved_bit_set" in damage or text_contains(error, "reserved_bit")
     return header_ok, secondary, integrity, contradiction
 

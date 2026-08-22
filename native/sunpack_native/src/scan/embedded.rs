@@ -1,15 +1,17 @@
 #[cfg(windows)]
 use crate::io::iocp;
 use crate::io::reader::ManagedReader;
+use crate::scan::compression_stream::{
+    validate_bzip2_structure, validate_gzip_structure, validate_xz_structure_exact,
+    validate_zstd_structure, ValidationError,
+};
 use aho_corasick::{packed, AhoCorasick};
-use bzip2::{Decompress as Bzip2Decompress, Status as Bzip2Status};
-use crc32fast::{hash as crc32, Hasher};
-use flate2::read::DeflateDecoder;
+use crc32fast::hash as crc32;
+use memchr::memmem;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::io::{self, Read};
+use std::io;
 use std::sync::OnceLock;
-use xz2::stream::{Action as XzAction, Status as XzStatus, Stream as XzStream};
 
 use rayon::prelude::*;
 
@@ -23,6 +25,7 @@ const BZIP2: &[u8] = b"BZh";
 const XZ: &[u8] = b"\xfd7zXZ\x00";
 const ZSTD: &[u8] = b"\x28\xb5\x2f\xfd";
 const TAR_USTAR: &[u8] = b"ustar";
+const XZ_FOOTER_MAGIC: &[u8] = b"YZ";
 
 type PatternSpec = (&'static [u8], &'static str, &'static str);
 
@@ -221,13 +224,26 @@ fn scan_embedded_archives_native_with_iocp(
         }
         #[cfg(not(windows))]
         {
-            let _ = (reader, file_size, iocp_chunk_bytes, iocp_buffers, iocp_workers);
+            let _ = (
+                reader,
+                file_size,
+                iocp_chunk_bytes,
+                iocp_buffers,
+                iocp_workers,
+            );
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "IOCP embedded scanning requires Windows",
             ));
         }
     };
+    let mut xz_footer_ends = raw_hits
+        .iter()
+        .filter(|hit| hit.kind == "xz_footer")
+        .map(|hit| hit.offset + XZ_FOOTER_MAGIC.len() as u64)
+        .collect::<Vec<_>>();
+    xz_footer_ends.sort_unstable();
+    raw_hits.retain(|hit| hit.kind != "xz_footer");
     raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
     let raw_hit_count = raw_hits.len();
     if raw_hit_count > MAX_VALIDATION_RAW_HITS {
@@ -243,7 +259,7 @@ fn scan_embedded_archives_native_with_iocp(
         });
     }
 
-    let mut candidates = validate_raw_hits(&reader, file_size, &raw_hits)?;
+    let mut candidates = validate_raw_hits(&reader, file_size, &raw_hits, &xz_footer_ends)?;
     candidates.sort_by_key(|candidate| {
         (
             candidate.offset,
@@ -282,6 +298,7 @@ fn validate_raw_hits(
     reader: &ManagedReader,
     file_size: u64,
     raw_hits: &[RawHit],
+    xz_footer_ends: &[u64],
 ) -> io::Result<Vec<EmbeddedCandidate>> {
     let collect_parallel = |hits: Vec<&RawHit>| -> io::Result<Vec<EmbeddedCandidate>> {
         hits.par_iter()
@@ -308,10 +325,19 @@ fn validate_raw_hits(
     let mut ordinary = collect_parallel(
         raw_hits
             .iter()
-            .filter(|hit| !matches!(hit.kind, "zip_eocd" | "zip" | "tar" | "bzip2"))
+            .filter(|hit| !matches!(hit.kind, "zip_eocd" | "zip" | "tar" | "bzip2" | "xz"))
             .collect(),
     )?;
     candidates.append(&mut ordinary);
+
+    let xz_candidates = raw_hits
+        .iter()
+        .filter(|hit| hit.kind == "xz")
+        .collect::<Vec<_>>()
+        .par_iter()
+        .map(|hit| validate_xz(reader, file_size, hit.offset, xz_footer_ends))
+        .collect::<io::Result<Vec<_>>>()?;
+    candidates.extend(xz_candidates.into_iter().flatten());
 
     // A bzip2 file may be a concatenation of complete streams.  Validation
     // from the first stream walks every immediately adjacent stream, so later
@@ -529,6 +555,16 @@ fn scan_sample(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<RawHit>
             );
         }
     }
+    for start in memmem::find_iter(sample, XZ_FOOTER_MAGIC) {
+        let end = start + XZ_FOOTER_MAGIC.len();
+        if end > carry_len {
+            hits.push(RawHit {
+                hit_name: "xz_footer",
+                kind: "xz_footer",
+                offset: base_offset + start as u64,
+            });
+        }
+    }
     hits
 }
 
@@ -577,7 +613,6 @@ fn validate_candidate(
         "rar5" => validate_rar5(file, file_size, offset),
         "gzip" => validate_gzip(file, file_size, offset),
         "bzip2" => validate_bzip2(file, file_size, offset),
-        "xz" => validate_xz(file, file_size, offset),
         "zstd" => validate_zstd(file, file_size, offset),
         "tar" => validate_tar(file, file_size, offset),
         _ => Ok(None),
@@ -846,19 +881,6 @@ fn zip64_central_local_offset(
 
 fn read_at(file: &ManagedReader, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
     file.read_at(offset, len)
-}
-
-struct PositionalReader<'a> {
-    file: &'a ManagedReader,
-    offset: u64,
-}
-
-impl Read for PositionalReader<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = self.file.read_direct_into_at(self.offset, buffer)?;
-        self.offset = self.offset.saturating_add(count as u64);
-        Ok(count)
-    }
 }
 
 fn validate_zip(
@@ -1154,103 +1176,23 @@ fn validate_gzip(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let fixed = read_at(file, offset, 10)?;
-    if fixed.len() < 10 || &fixed[..3] != GZIP || fixed[3] & 0xe0 != 0 || offset + 18 > size {
-        return Ok(None);
-    }
-    let flags = fixed[3];
-    let mut header = fixed;
-    let mut cursor = offset + 10;
-    if flags & 0x04 != 0 {
-        let length_bytes = read_at(file, cursor, 2)?;
-        if length_bytes.len() != 2 {
-            return Ok(None);
-        }
-        let length = u16::from_le_bytes(length_bytes[..2].try_into().unwrap()) as usize;
-        header.extend_from_slice(&length_bytes);
-        cursor += 2;
-        let extra = read_at(file, cursor, length)?;
-        if extra.len() != length {
-            return Ok(None);
-        }
-        header.extend_from_slice(&extra);
-        cursor += length as u64;
-    }
-    for flag in [0x08, 0x10] {
-        if flags & flag != 0 && !read_gzip_c_string(file, size, &mut cursor, &mut header)? {
-            return Ok(None);
-        }
-    }
-    if flags & 0x02 != 0 {
-        let stored = read_at(file, cursor, 2)?;
-        if stored.len() != 2
-            || (crc32(&header) & 0xffff) as u16
-                != u16::from_le_bytes(stored[..2].try_into().unwrap())
-        {
-            return Ok(None);
-        }
-        cursor += 2;
-    }
-
-    let mut compressed_reader = PositionalReader {
-        file,
-        offset: cursor,
+    let structure = match validate_gzip_structure(file, offset, size) {
+        Ok(value) => value,
+        Err(ValidationError::Invalid(_)) => return Ok(None),
+        Err(ValidationError::Io(error)) => return Err(error),
     };
-    let mut decoder = DeflateDecoder::new(&mut compressed_reader);
-    let mut output_crc = Hasher::new();
-    let mut output_size = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = match decoder.read(&mut buffer) {
-            Ok(count) => count,
-            Err(_) => return Ok(None),
-        };
-        if count == 0 {
-            break;
-        }
-        output_crc.update(&buffer[..count]);
-        output_size = output_size.wrapping_add(count as u64);
-    }
-    let compressed_size = decoder.total_in();
-    drop(decoder);
-    let Some(trailer_offset) = cursor.checked_add(compressed_size) else {
-        return Ok(None);
-    };
-    let trailer = read_at(file, trailer_offset, 8)?;
-    if trailer.len() != 8
-        || u32::from_le_bytes(trailer[..4].try_into().unwrap()) != output_crc.finalize()
-        || u32::from_le_bytes(trailer[4..8].try_into().unwrap()) != output_size as u32
-    {
-        return Ok(None);
-    }
     Ok(Some(candidate(
         "gzip",
         ".gz",
         offset,
-        Some(trailer_offset + 8),
-        1.0,
-        "rfc1952_stream_crc_and_size",
+        Some(structure.end_offset),
+        0.99,
+        if structure.stream_count > 1 {
+            "rfc1952_concatenated_members_complete_deflate_walk"
+        } else {
+            "rfc1952_complete_deflate_walk"
+        },
     )))
-}
-
-fn read_gzip_c_string(
-    file: &ManagedReader,
-    size: u64,
-    cursor: &mut u64,
-    header: &mut Vec<u8>,
-) -> std::io::Result<bool> {
-    while *cursor < size {
-        let byte = read_at(file, *cursor, 1)?;
-        if byte.is_empty() {
-            return Ok(false);
-        }
-        *cursor += 1;
-        header.push(byte[0]);
-        if byte[0] == 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn validate_bzip2(
@@ -1258,82 +1200,30 @@ fn validate_bzip2(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let Some(mut end) = validate_one_bzip2_stream(file, size, offset)? else {
-        return Ok(None);
+    let structure = match validate_bzip2_structure(file, offset, size) {
+        Ok(value) => value,
+        Err(ValidationError::Invalid(_)) => return Ok(None),
+        Err(ValidationError::Io(error)) => return Err(error),
     };
-    let mut stream_count = 1usize;
-    while stream_count < MAX_ARCHIVE_METADATA_RECORDS && end < size {
-        let header = read_at(file, end, 4)?;
-        if header.len() < 4 || &header[..3] != BZIP2 || !(b'1'..=b'9').contains(&header[3]) {
-            break;
-        }
-        let Some(next_end) = validate_one_bzip2_stream(file, size, end)? else {
-            break;
-        };
-        end = next_end;
-        stream_count += 1;
-    }
     Ok(Some(candidate(
         "bzip2",
         ".bz2",
         offset,
-        Some(end),
-        1.0,
-        if stream_count > 1 {
-            "bzip2_concatenated_streams_and_combined_crcs"
+        Some(structure.end_offset),
+        0.99,
+        if structure.stream_count > 1 {
+            "bzip2_concatenated_streams_complete_huffman_walk"
         } else {
-            "bzip2_stream_end_and_combined_crc"
+            "bzip2_complete_huffman_walk_and_crc_chain"
         },
     )))
-}
-
-fn validate_one_bzip2_stream(
-    file: &ManagedReader,
-    size: u64,
-    offset: u64,
-) -> std::io::Result<Option<u64>> {
-    let header = read_at(file, offset, 4)?;
-    if header.len() < 4 || &header[..3] != BZIP2 || !(b'1'..=b'9').contains(&header[3]) {
-        return Ok(None);
-    }
-    let mut decoder = Bzip2Decompress::new(false);
-    let mut output = [0u8; 64 * 1024];
-    loop {
-        let consumed_before = decoder.total_in();
-        let produced_before = decoder.total_out();
-        let input_offset = match offset.checked_add(consumed_before) {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-        let input = read_at(file, input_offset, 64 * 1024)?;
-        if input.is_empty() {
-            return Ok(None);
-        }
-        let status = match decoder.decompress(&input, &mut output) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
-        if status == Bzip2Status::StreamEnd {
-            break;
-        }
-        if decoder.total_in() == consumed_before && decoder.total_out() == produced_before {
-            return Ok(None);
-        }
-    }
-    let consumed = decoder.total_in();
-    let Some(end) = offset.checked_add(consumed) else {
-        return Ok(None);
-    };
-    if consumed < 14 || end > size {
-        return Ok(None);
-    }
-    Ok(Some(end))
 }
 
 fn validate_xz(
     file: &ManagedReader,
     size: u64,
     offset: u64,
+    footer_ends: &[u64],
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, offset, 12)?;
     if header.len() < 12
@@ -1348,47 +1238,31 @@ fn validate_xz(
     if crc32(&header[6..8]) != stored {
         return Ok(None);
     }
-    let mut decoder = match XzStream::new_stream_decoder(u64::MAX, 0) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let mut output = [0u8; 64 * 1024];
-    loop {
-        let consumed_before = decoder.total_in();
-        let produced_before = decoder.total_out();
-        let input_offset = match offset.checked_add(consumed_before) {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-        let input = read_at(file, input_offset, 64 * 1024)?;
-        if input.is_empty() {
-            return Ok(None);
-        }
-        let status = match decoder.process(&input, &mut output, XzAction::Run) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
-        if status == XzStatus::StreamEnd {
+    let first_possible = footer_ends.partition_point(|end| *end < offset + 24);
+    let mut structure = None;
+    for &end in &footer_ends[first_possible..] {
+        if end > size {
             break;
         }
-        if decoder.total_in() == consumed_before && decoder.total_out() == produced_before {
-            return Ok(None);
+        match validate_xz_structure_exact(file, offset, end) {
+            Ok(value) => {
+                structure = Some(value);
+                break;
+            }
+            Err(ValidationError::Invalid(_)) => {}
+            Err(ValidationError::Io(error)) => return Err(error),
         }
     }
-    let consumed = decoder.total_in();
-    let Some(end) = offset.checked_add(consumed) else {
+    let Some(structure) = structure else {
         return Ok(None);
     };
-    if consumed < 24 || end > size {
-        return Ok(None);
-    }
     Ok(Some(candidate(
         "xz",
         ".xz",
         offset,
-        Some(end),
-        1.0,
-        "xz_stream_header_index_footer_and_checks",
+        Some(structure.end_offset),
+        0.99,
+        "xz_header_block_index_footer_structure_walk",
     )))
 }
 
@@ -1397,65 +1271,22 @@ fn validate_zstd(
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    // RFC 8878 permits a 14-byte Frame_Header after the four-byte magic.
-    // Read the following Block_Header as well so every legal layout can be
-    // validated from one fixed-size prefix.
-    let header = read_at(file, offset, 21)?;
-    let Some((frame_header_size, _, _)) = parse_zstd_prefix(&header) else {
-        return Ok(None);
+    let structure = match validate_zstd_structure(file, offset, size) {
+        Ok(value) => value,
+        Err(ValidationError::Invalid(_)) => return Ok(None),
+        Err(ValidationError::Io(error)) => return Err(error),
     };
-    let checksum = header[4] & 0x04 != 0;
-    let mut cursor = offset + frame_header_size as u64;
-    for _ in 0..MAX_ARCHIVE_METADATA_RECORDS {
-        let block = read_at(file, cursor, 3)?;
-        if block.len() != 3 {
-            return Ok(None);
-        }
-        let value = u32::from(block[0]) | (u32::from(block[1]) << 8) | (u32::from(block[2]) << 16);
-        let last = value & 1 != 0;
-        let block_type = (value >> 1) & 0x03;
-        let block_size = u64::from(value >> 3);
-        if block_type == 3 || block_size > 128 * 1024 {
-            return Ok(None);
-        }
-        let encoded = if block_type == 1 { 1 } else { block_size };
-        let Some(next) = cursor
-            .checked_add(3)
-            .and_then(|value| value.checked_add(encoded))
-        else {
-            return Ok(None);
-        };
-        if next > size {
-            return Ok(None);
-        }
-        cursor = next;
-        if last {
-            if checksum {
-                cursor = match cursor.checked_add(4) {
-                    Some(value) if value <= size => value,
-                    _ => return Ok(None),
-                };
-            }
-            return Ok(Some(candidate(
-                "zstd",
-                ".zst",
-                offset,
-                Some(cursor),
-                0.99,
-                "rfc8878_complete_frame_block_walk",
-            )));
-        }
-    }
-    Ok(Some(logical_candidate(
+    Ok(Some(candidate(
         "zstd",
         ".zst",
         offset,
-        None,
-        0.90,
-        "zstd_block_walk_limit_reached",
+        Some(structure.end_offset),
+        0.99,
+        "rfc8878_complete_frame_block_walk",
     )))
 }
 
+#[cfg(test)]
 fn parse_zstd_prefix(header: &[u8]) -> Option<(usize, u64, u64)> {
     if header.len() < 6 || &header[..4] != ZSTD || header[4] & 0x18 != 0 {
         return None;
@@ -1733,6 +1564,7 @@ mod tests {
 
     fn optimized_raw_hits(data: &[u8]) -> Vec<RawHit> {
         let mut hits = scan_sample(data, 0, 0);
+        hits.retain(|hit| hit.kind != "xz_footer");
         hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
         hits
     }
@@ -1897,7 +1729,7 @@ mod tests {
         assert_eq!(bzip2[0].contained_anchor_count, 2);
         assert_eq!(
             bzip2[0].validation,
-            "bzip2_concatenated_streams_and_combined_crcs"
+            "bzip2_concatenated_streams_complete_huffman_walk"
         );
         let _ = fs::remove_file(path);
     }
@@ -2210,16 +2042,10 @@ mod tests {
 
         let mut expected = reference_raw_hits(&data);
         expected.sort_by_key(|hit| (hit.offset, hit.hit_name));
-        let iocp = scan_embedded_archives_native_with_iocp(
-            reader,
-            TEST_IOCP_CHUNK_SIZE,
-            4,
-            4,
-        )
-        .unwrap();
+        let iocp =
+            scan_embedded_archives_native_with_iocp(reader, TEST_IOCP_CHUNK_SIZE, 4, 4).unwrap();
 
         assert_eq!(iocp.raw_hits, expected);
         let _ = fs::remove_file(path);
     }
-
 }

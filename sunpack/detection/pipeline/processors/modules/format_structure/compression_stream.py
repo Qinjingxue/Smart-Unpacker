@@ -9,7 +9,7 @@ def inspect_compression_stream_structure(
     path: str,
     identity: tuple[str, int, int] | None = None,
 ) -> dict[str, Any]:
-    """Compatibility facade; compression analysis is owned by Analysis."""
+    """Return the compression structure observation owned by Analysis."""
     del identity
     return ArchiveAnalyzer().probe_compression_stream(path).to_raw_dict()
 

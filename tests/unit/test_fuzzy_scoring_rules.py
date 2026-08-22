@@ -126,7 +126,7 @@ def test_embedded_zip_with_verified_directory_and_local_links_reaches_threshold(
     assert bag.get("file.probe_offset") == 4096
 
 
-def test_truncated_gzip_header_can_score_without_complete_decode():
+def test_truncated_gzip_header_can_score_without_complete_structure():
     bag = _bag("damaged.gz")
     bag.set("compression.stream_structure", {
         "format": "gzip",
@@ -135,7 +135,8 @@ def test_truncated_gzip_header_can_score_without_complete_decode():
         "member.header.compression_method": 8,
         "member.header.flags": 0,
         "member.deflate.blocks": "unavailable",
-        "validation_complete": False,
+        "structure_validation_complete": False,
+        "integrity_status": "deferred",
         "damage_flags": ["truncated_stream"],
     })
 

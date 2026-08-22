@@ -59,9 +59,10 @@ class _CompressionModule:
         if not result.get("magic_matched"):
             return ArchiveFormatEvidence(format=self.fmt, confidence=0.0, status="not_found", details=result)
         damage_flags = _stream_damage_flags(result)
-        validation_complete = bool(result.get("validation_complete"))
+        structure_complete = bool(result.get("structure_validation_complete"))
+        boundary_exact = bool(result.get("boundary_exact"))
         trailing = int(result.get("archive.trailing_data") or 0)
-        if result.get("plausible") and validation_complete and not damage_flags and trailing == 0:
+        if result.get("plausible") and structure_complete and boundary_exact and not damage_flags and trailing == 0:
             confidence = 0.97
             return ArchiveFormatEvidence(
                 format=self.fmt,
@@ -71,8 +72,8 @@ class _CompressionModule:
                 details=result,
             )
         if result.get("plausible"):
-            if not validation_complete:
-                damage_flags = sorted(set(damage_flags + ["validation_incomplete"]))
+            if not structure_complete:
+                damage_flags = sorted(set(damage_flags + ["structure_validation_incomplete"]))
             confidence = 0.78 if not damage_flags else 0.68
             return ArchiveFormatEvidence(
                 format=self.fmt,

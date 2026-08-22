@@ -129,7 +129,10 @@ def test_native_stream_structure_decode_is_bounded_for_high_ratio_input(tmp_path
     result = sunpack_native.inspect_compression_stream_structure(str(path))
 
     assert result["plausible"] is True
-    assert result["validation_complete"] is False
+    assert result["structure_status"] == "complete"
+    assert result["structure_validation_complete"] is True
+    assert result["boundary_exact"] is True
+    assert result["integrity_status"] in {"deferred", "not_present"}
     assert not {"gzip_footer_bad", "bzip2_block_bad", "xz_structural_validation_failed", "zstd_frame_bad"}.intersection(
         result["damage_flags"]
     )

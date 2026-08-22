@@ -8,7 +8,7 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 @register_rule(name="compression_stream_accept", layer="precheck")
 class CompressionStreamAcceptRule(RuleBase):
-    """Accept a stream only after the native decoder reached its exact end."""
+    """Accept an exact, complete structural walk without claiming payload integrity."""
 
     required_facts = {"compression.stream_structure"}
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
@@ -27,7 +27,9 @@ class CompressionStreamAcceptRule(RuleBase):
         damage = list(structure.get("damage_flags") or [])
         if not (
             structure.get("plausible")
-            and structure.get("validation_complete")
+            and structure.get("structure_validation_complete")
+            and structure.get("boundary_exact")
+            and str(structure.get("structure_status") or "") == "complete"
             and str(structure.get("confidence") or "") == "strong"
             and not damage
             and int(structure.get("archive.trailing_data") or 0) == 0
@@ -40,5 +42,5 @@ class CompressionStreamAcceptRule(RuleBase):
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
         return RuleEffect.accept(
-            f"{structure.get('format') or 'compression'} stream passed complete native validation"
+            f"{structure.get('format') or 'compression'} stream passed complete structural validation"
         )

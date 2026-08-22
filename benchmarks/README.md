@@ -15,6 +15,9 @@ python -m benchmarks reader password-fast-path --rounds 5
 python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 5
 python -m benchmarks reader embedded-scan --generate-gib 10 --rounds 3 --skip-cli `
   --iocp-chunk-mib 2 --iocp-buffers 8 --iocp-workers 2
+python -m benchmarks reader embedded-scan --generate-plan5-mib 500 --rounds 3 --skip-cli `
+  --baseline-report benchmarks/results/reader.embedded-scan/<baseline-run>/report.json `
+  --max-regression-percent 5
 python -m benchmarks scan hotspots . --mode full --json-out benchmarks/results/scan-hotspots.json
 python -m benchmarks extraction format-matrix --runs 5 --json-out benchmarks/results/extraction-benchmark.json
 python -m benchmarks extraction sevenzip-worker-matrix --runs 3 --warmups 1 --json-out benchmarks/results/sevenzip-worker-baseline.json
@@ -169,6 +172,13 @@ with `--iocp-chunk-mib`, `--iocp-buffers`, and `--iocp-workers` without changing
 the normal reader cache or `read_at()` behavior. `iocp-buffers` controls the
 bounded in-flight read depth; `iocp-workers` controls parallel signature
 scanning independently.
+
+`reader embedded-scan --generate-plan5-mib 500 --rounds 3 --skip-cli` creates a
+500 MiB carrier around the real Plan 5 embedded-archive matrix. The matrix has
+128 independently generated archives and covers ZIP, 7z, RAR4/5, TAR, gzip,
+bzip2, xz, and zstd plus their container/codec variants. The scenario verifies
+every expected format/offset on every measured run, so throughput results cannot
+hide candidate-validation regressions or missed archives.
 
 `extraction real-archive` measures the current architecture: `sunpack extract`
 delegates to the long-lived persistent server process, so RSS accounting
