@@ -4,7 +4,7 @@ from sunpack.config.schema import normalize_config
 from tests.helpers.detection_config import with_detection_pipeline
 
 
-def archive_pressure_config(passwords: list[str] | None = None, worker_profile: str = "auto") -> dict:
+def archive_pressure_config(passwords: list[str] | None = None) -> dict:
     return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "2",
@@ -12,7 +12,6 @@ def archive_pressure_config(passwords: list[str] | None = None, worker_profile: 
         "user_passwords": passwords or [],
         "builtin_passwords": [],
         "max_retries": 1,
-        "performance": {"worker": {"profile": worker_profile}},
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
         {"name": "embedded_payload_identity", "enabled": True},

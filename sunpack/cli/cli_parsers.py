@@ -1,6 +1,5 @@
 import argparse
 
-from sunpack.cli.cli_constants import WORKER_PROFILES
 from sunpack.cli.cli_context import CliContext
 from sunpack.cli.cli_values import parse_archive_cleanup_value, parse_recursive_extract_value
 from sunpack.i18n import I18nContext
@@ -77,7 +76,6 @@ def build_detection_parser(ctx: CliContext) -> argparse.ArgumentParser:
 def build_extract_config_override_parser(ctx: CliContext) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--recur", dest="recursive_extract", type=parse_recursive_extract_value, help=ctx.t("cli.recursive_extract"))
-    parser.add_argument("--worker-profile", dest="worker_profile", choices=sorted(WORKER_PROFILES), help=ctx.t("cli.worker_profile"))
     parser.add_argument("--cleanup", dest="archive_cleanup_mode", type=parse_archive_cleanup_value, help=ctx.t("cli.archive_cleanup_mode"))
     parser.add_argument("-o", "--out-dir", dest="output_dir", help=ctx.t("cli.output_dir"))
     flatten_group = parser.add_mutually_exclusive_group()

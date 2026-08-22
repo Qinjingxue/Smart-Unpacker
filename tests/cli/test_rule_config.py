@@ -86,24 +86,18 @@ def test_config_validate_checks_verification_methods_are_registered():
     assert any("Unknown verification method" in error for error in result["errors"])
 
 
-def test_worker_profile_override_expands_worker_config():
-    class Args:
-        worker_profile = "aggressive"
-        recursive_extract = None
-        archive_cleanup_mode = None
-        flatten_single_directory = None
-        write_progress_manifest = False
+def test_config_validate_rejects_removed_worker_profile():
+    payload = _payload()
+    payload["performance"] = {"worker": {"profile": "auto"}}
 
-    config = {}
-    overrides = apply_runtime_config_overrides(config, Args())
+    result = validate_config_payload(payload)
 
-    assert overrides["worker_profile"] == "aggressive"
-    assert config["performance"] == {"worker": {"profile": "aggressive"}}
+    assert not result["ok"]
+    assert any("performance.worker.profile was removed" in error for error in result["errors"])
 
 
 def test_write_manifest_override_enables_extraction_manifest_files():
     class Args:
-        worker_profile = None
         recursive_extract = None
         archive_cleanup_mode = None
         flatten_single_directory = None
@@ -118,7 +112,6 @@ def test_write_manifest_override_enables_extraction_manifest_files():
 
 def test_output_dir_override_is_relative_to_the_request_cwd(tmp_path):
     class Args:
-        worker_profile = None
         recursive_extract = None
         archive_cleanup_mode = None
         output_dir = "output"
@@ -143,14 +136,13 @@ def test_effective_config_includes_thresholds_native_worker_and_rule_pipeline():
         ]
     }
     config["thresholds"] = {"archive_score_threshold": 6, "maybe_archive_threshold": 3}
-    config["performance"] = {"worker": {"profile": "auto"}}
+    config["performance"] = {"worker": {"thread_capacity": 0, "initial_active_jobs": 0}}
 
     effective = build_effective_config(config)
 
     assert effective["thresholds"]["archive_score_threshold"] == 6
     assert effective["size_range_min_bytes"] == 1048576
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
-    assert effective["worker"]["profile"] == "auto"
     assert effective["worker"]["controller"] == "native_worker"
-    assert effective["worker"]["machine_profile"] == "selected_by_worker"
+    assert effective["worker"]["sizing"] == "selected_by_worker"
     assert effective["detection"]["rule_pipeline"]["precheck"][0]["name"] == "embedded_payload_identity"

@@ -67,11 +67,6 @@
       }
     ]
   },
-  "performance": {
-    "worker": {
-      "profile": "auto"
-    }
-  },
   "repair": {
     "telemetry": {
       "enabled": false

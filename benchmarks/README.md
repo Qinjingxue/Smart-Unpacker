@@ -129,6 +129,16 @@ the spread to each request's first admission, and the longest same-request admis
 run. The early index detects short-term monopolization; the overall index detects
 whether requests receive equal admission counts by the end of the batch.
 
+`extraction worker-initial-concurrency-matrix` calibrates the startup admission
+limit against real ZIP stored/deflate, 7z solid/non-solid, and RAR solid/non-solid
+archives. It sweeps `--initial-active-jobs` while holding the detected CPU/RAM
+capacity constant, and reports median throughput, p95 queue latency, peak active
+jobs, worker RSS, and normalized cross-format recommendations with and without
+solid formats. Candidate order is alternated between rounds to reduce thermal and
+ordering bias. Production uses one CPU token per job; `--cpu-weight-mode legacy`
+replays the former format-dependent CPU weights for A/B comparison. Solid and
+large-dictionary cases remain bounded by memory admission without a separate global mutex.
+
 `extraction worker-resource-pressure` uses real 7z archives and the native worker
 to measure resource contention rather than synthetic weights. `cpu` uses highly
 compressible LZMA2 data with a large dictionary to stress decoding; `io` uses

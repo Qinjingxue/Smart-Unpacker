@@ -2,6 +2,7 @@
 #include "internal/sevenzip_paths.hpp"
 #include "internal/sevenzip_status.hpp"
 #include "internal/native_runtime_control.hpp"
+#include "internal/native_worker_sizing.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -156,6 +157,64 @@ bool check_runtime_control_fast_scale_up_after_resume() {
         snapshot.memory_limit == 2;
 }
 
+bool check_native_sizing_scales_linearly_with_cpu() {
+    using namespace sunpack::sevenzip;
+    NativeSizingOverrides foreground;
+    NativeSizingOverrides background;
+    background.background = true;
+    constexpr std::uint64_t abundant_memory = 64ULL << 30;
+    struct Expected {
+        std::size_t logical_processors;
+        std::size_t foreground_jobs;
+        std::size_t background_jobs;
+    };
+    const Expected cases[] = {
+        {2, 1, 1},
+        {4, 2, 1},
+        {8, 4, 2},
+        {16, 8, 4},
+        {32, 16, 8},
+        {64, 32, 16},
+        {128, 32, 32},
+    };
+    for (const auto& expected : cases) {
+        const NativeMachineResources resources{
+            expected.logical_processors,
+            abundant_memory,
+            abundant_memory,
+        };
+        const auto foreground_plan = derive_native_sizing_plan(resources, foreground);
+        const auto background_plan = derive_native_sizing_plan(resources, background);
+        if (foreground_plan.initial_active_jobs != expected.foreground_jobs ||
+            background_plan.initial_active_jobs != expected.background_jobs) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool check_native_sizing_respects_memory_and_overrides() {
+    using namespace sunpack::sevenzip;
+    const NativeMachineResources resources{32, 8ULL << 30, 4ULL << 30};
+    const auto automatic = derive_native_sizing_plan(resources, {});
+    // 70% of 4 GiB permits five 512 MiB startup slots.
+    if (automatic.thread_capacity != 5 || automatic.initial_active_jobs != 5 ||
+        automatic.medium_floor_jobs != 3 || automatic.high_floor_jobs != 4) {
+        return false;
+    }
+
+    NativeSizingOverrides overrides;
+    overrides.thread_capacity = 12;
+    overrides.initial_active_jobs = 10;
+    overrides.memory_budget_bytes = 2ULL << 30;
+    const auto configured = derive_native_sizing_plan(resources, overrides);
+    return configured.thread_capacity == 12 && configured.initial_active_jobs == 10 &&
+        configured.memory_budget_bytes == (2ULL << 30) &&
+        configured.thread_capacity_overridden &&
+        configured.initial_active_jobs_overridden &&
+        configured.memory_budget_overridden;
+}
+
 }  // namespace
 #endif
 
@@ -192,6 +251,14 @@ int wmain(int argc, wchar_t** argv) {
     if (!check_runtime_control_fast_scale_up_after_resume()) {
         std::cerr << "runtime control fast resume scale-up check failed\n";
         return 9;
+    }
+    if (!check_native_sizing_scales_linearly_with_cpu()) {
+        std::cerr << "native sizing CPU extrapolation check failed\n";
+        return 10;
+    }
+    if (!check_native_sizing_respects_memory_and_overrides()) {
+        std::cerr << "native sizing memory/override check failed\n";
+        return 11;
     }
 #endif
 

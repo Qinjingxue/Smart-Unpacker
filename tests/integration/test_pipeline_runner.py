@@ -28,7 +28,6 @@ def test_pipeline_runner_passes_native_worker_overrides():
         "recursive_extract": "1",
         "performance": {
             "worker": {
-                "profile": "auto",
                 "max_task_seconds": 1800,
                 "watchdog_no_progress_timeout_seconds": 180,
             },

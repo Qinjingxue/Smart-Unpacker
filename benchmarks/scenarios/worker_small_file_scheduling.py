@@ -36,7 +36,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "cpu_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
-        "solid_archive": False,
         "expected_max_active": None,
     },
     "fixed-capacity": {
@@ -47,7 +46,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "cpu_weight": 1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
-        "solid_archive": False,
         "expected_max_active": None,
     },
     "cpu-bound": {
@@ -58,7 +56,6 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "cpu_weight": -1,
         "memory_reserve_bytes": 8 << 20,
         "memory_budget_bytes": 0,
-        "solid_archive": False,
         "expected_max_active": 1,
     },
     "memory-bound": {
@@ -69,19 +66,7 @@ ADMISSION_CASES: dict[str, dict[str, Any]] = {
         "cpu_weight": 1,
         "memory_reserve_bytes": 16 << 20,
         "memory_budget_bytes": 32 << 20,
-        "solid_archive": False,
         "expected_max_active": 2,
-    },
-    "solid-exclusive": {
-        "description": "Solid jobs are mutually exclusive in native admission.",
-        "blocker": "solid-archive-exclusion",
-        "adaptive_enabled": False,
-        "initial_active_jobs": -1,
-        "cpu_weight": 1,
-        "memory_reserve_bytes": 8 << 20,
-        "memory_budget_bytes": 0,
-        "solid_archive": True,
-        "expected_max_active": 1,
     },
 }
 
@@ -163,7 +148,8 @@ def _job_payload(
     expected_output_bytes: int,
     cpu_weight: int,
     memory_reserve_bytes: int,
-    solid_archive: bool,
+    format_hint: str = "zip",
+    profile_key: str = "benchmark-small-zip",
 ) -> str:
     return json.dumps(
         {
@@ -174,12 +160,11 @@ def _job_payload(
             "part_paths": [str(archive)],
             "output_dir": str(output_dir),
             "password": "",
-            "format_hint": "zip",
+            "format_hint": format_hint,
             "native_cpu_weight": cpu_weight,
             "native_memory_reserve_bytes": memory_reserve_bytes,
-            "native_solid_archive": solid_archive,
             "native_expected_output_bytes": expected_output_bytes,
-            "native_profile_key": "benchmark-small-zip",
+            "native_profile_key": profile_key,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -298,7 +283,8 @@ def _run_batch(
                     expected_output_bytes=int(corpus["payload_bytes_per_job"]),
                     cpu_weight=configured_cpu_weight,
                     memory_reserve_bytes=int(admission_case["memory_reserve_bytes"]),
-                    solid_archive=bool(admission_case["solid_archive"]),
+                    format_hint=str(corpus.get("format_hint") or "zip"),
+                    profile_key=str(corpus.get("profile_key") or "benchmark-small-zip"),
                 )
                 worker.submit_async(payload, job_id, on_line=make_callback(job_id), on_timeout=on_timeout(job_id))
         submission_finished_at = time.perf_counter()

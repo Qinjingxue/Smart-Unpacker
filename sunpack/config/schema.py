@@ -77,6 +77,12 @@ def normalize_config(payload: dict[str, Any], *, validate: bool = True) -> dict[
 
 def validate_external_config(payload: dict[str, Any]) -> list[str]:
     errors = []
+    performance = payload.get("performance") if isinstance(payload, dict) else None
+    worker = performance.get("worker") if isinstance(performance, dict) else None
+    if isinstance(worker, dict) and "profile" in worker:
+        errors.append(
+            "performance.worker.profile was removed; native worker sizing is derived from CPU and available memory"
+        )
     for field in config_fields().values():
         try:
             normalize_config_value(field.path, get_config_value(payload, field.path))

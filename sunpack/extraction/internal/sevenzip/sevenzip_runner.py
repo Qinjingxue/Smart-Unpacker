@@ -114,9 +114,7 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     set_int("max_queue_jobs", "SUNPACK_NATIVE_MAX_QUEUE_JOBS")
     set_float("profile_regression_ratio", "SUNPACK_NATIVE_PROFILE_REGRESSION_RATIO")
     set_float("profile_improvement_ratio", "SUNPACK_NATIVE_PROFILE_IMPROVEMENT_RATIO")
-    worker_profile = process_config.get("profile")
-    if worker_profile:
-        environment["SUNPACK_NATIVE_WORKER_PROFILE"] = str(worker_profile)
+    environment.pop("SUNPACK_NATIVE_WORKER_PROFILE", None)
     process_mode = str(process_config.get("windows_process_mode") or "").strip().lower()
     environment.pop("SUNPACK_NATIVE_PROCESS_MODE", None)
     if process_mode == "background":
@@ -452,13 +450,9 @@ class _AsyncNativeWorkerProcess:
         ]
         try:
             await asyncio.wait_for(asyncio.shield(self._ready), timeout=2.0)
-        except asyncio.TimeoutError:
-            self.handshake = {
-                "profile": str(self.process_config.get("profile") or "auto"),
-                "thread_capacity": int(self.process_config.get("thread_capacity", 0) or (os.cpu_count() or 1)),
-                "initial_active_limit": int(self.process_config.get("initial_active_jobs", 0) or 1),
-                "legacy_worker": True,
-            }
+        except asyncio.TimeoutError as exc:
+            await self.close()
+            raise RuntimeError("sevenzip_worker did not emit worker_ready during startup") from exc
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -1309,7 +1303,6 @@ class SevenZipRunner:
         job["native_cpu_weight"] = cpu_weight
         job["native_memory_reserve_bytes"] = native_memory
         job["native_dictionary_reserve_bytes"] = dictionary_bytes
-        job["native_solid_archive"] = bool(analysis.get("solid", False))
         profile_key = self._task_profile_key(task)
         if profile_key:
             job["native_profile_key"] = profile_key

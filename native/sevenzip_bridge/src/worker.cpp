@@ -30,6 +30,7 @@
 #include "internal/archive_operations.hpp"
 #include "internal/sevenzip_formats.hpp"
 #include "internal/native_runtime_control.hpp"
+#include "internal/native_worker_sizing.hpp"
 #ifdef _WIN32
 #include "internal/sevenzip_async_output.hpp"
 #endif
@@ -1094,28 +1095,6 @@ int run_request(
     return ok ? 0 : 1;
 }
 
-std::size_t configured_native_memory_budget() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_MEMORY_BUDGET_BYTES");
-    if (value && *value) {
-        char* end = nullptr;
-        const unsigned long long configured = std::strtoull(value, &end, 10);
-        if (end != value && *end == '\0' && configured > 0) {
-            return static_cast<std::size_t>(configured);
-        }
-    }
-#ifdef _WIN32
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof(status);
-    if (GlobalMemoryStatusEx(&status) && status.ullAvailPhys > 0) {
-        const unsigned long long budget = status.ullAvailPhys * 7ULL / 10ULL;
-        return static_cast<std::size_t>((std::min)(
-            budget,
-            static_cast<unsigned long long>((std::numeric_limits<std::size_t>::max)())));
-    }
-#endif
-    return (std::numeric_limits<std::size_t>::max)();
-}
-
 std::size_t configured_native_queue_capacity() noexcept {
     const char* value = std::getenv("SUNPACK_NATIVE_MAX_QUEUE_JOBS");
     if (!value || !*value) {
@@ -1135,19 +1114,6 @@ bool configured_native_adaptive_enabled() noexcept {
         return true;
     }
     return std::string(value) != "0" && std::string(value) != "false" && std::string(value) != "False";
-}
-
-std::size_t configured_native_initial_active_jobs() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_INITIAL_ACTIVE_JOBS");
-    if (!value || !*value) {
-        return 0;
-    }
-    char* end = nullptr;
-    const unsigned long configured = std::strtoul(value, &end, 10);
-    if (end == value || *end != '\0' || configured == 0) {
-        return 0;
-    }
-    return static_cast<std::size_t>(configured);
 }
 
 std::size_t configured_native_size(
@@ -1189,37 +1155,42 @@ double configured_native_double(
     return (std::max)(minimum, (std::min)(maximum, configured));
 }
 
-unsigned native_cpu_count() noexcept {
+sunpack::sevenzip::NativeMachineResources native_machine_resources() noexcept {
+    sunpack::sevenzip::NativeMachineResources resources;
     const unsigned hardware = std::thread::hardware_concurrency();
-    return hardware == 0 ? 2U : hardware;
-}
-
-unsigned long long native_total_memory_bytes() noexcept {
+    resources.logical_processors = hardware == 0 ? std::size_t{2} : hardware;
 #ifdef _WIN32
+    const DWORD active_processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (active_processors != 0) {
+        resources.logical_processors = static_cast<std::size_t>(active_processors);
+    }
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
-    if (GlobalMemoryStatusEx(&status) && status.ullTotalPhys > 0) {
-        return status.ullTotalPhys;
+    if (GlobalMemoryStatusEx(&status)) {
+        resources.total_memory_bytes = status.ullTotalPhys;
+        resources.available_memory_bytes = status.ullAvailPhys;
     }
 #endif
-    return 0;
-}
-
-std::string native_worker_profile() {
-    const char* configured = std::getenv("SUNPACK_NATIVE_WORKER_PROFILE");
-    if (configured && *configured &&
-        (std::string(configured) == "aggressive" || std::string(configured) == "conservative")) {
-        return configured;
-    }
-    const unsigned long long total_memory = native_total_memory_bytes();
-    return native_cpu_count() >= 12 && total_memory >= (24ULL << 30)
-        ? "aggressive"
-        : "conservative";
+    return resources;
 }
 
 std::string requested_native_process_mode() {
     const char* configured = std::getenv("SUNPACK_NATIVE_PROCESS_MODE");
     return configured && std::string(configured) == "background" ? "background" : "normal";
+}
+
+sunpack::sevenzip::NativeSizingOverrides configured_native_sizing_overrides(
+    bool background
+) noexcept {
+    sunpack::sevenzip::NativeSizingOverrides overrides;
+    overrides.thread_capacity = configured_native_size(
+        "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY", 0, 0, 32);
+    overrides.initial_active_jobs = configured_native_size(
+        "SUNPACK_NATIVE_INITIAL_ACTIVE_JOBS", 0, 0, 32);
+    overrides.memory_budget_bytes = configured_native_size(
+        "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES", 0, 0);
+    overrides.background = background;
+    return overrides;
 }
 
 bool apply_native_process_mode(const std::string& mode) noexcept {
@@ -1231,19 +1202,11 @@ bool apply_native_process_mode(const std::string& mode) noexcept {
 }
 
 sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
-    std::size_t max_active_jobs
+    const sunpack::sevenzip::NativeSizingPlan& sizing
 ) noexcept {
     sunpack::sevenzip::NativeRuntimeConfig config;
-    const bool aggressive = native_worker_profile() == "aggressive";
     config.adaptive_enabled = configured_native_adaptive_enabled();
-    config.initial_active_jobs = configured_native_initial_active_jobs();
-    if (config.initial_active_jobs == 0) {
-        const bool background = requested_native_process_mode() == "background";
-        config.initial_active_jobs = (std::min)(
-            max_active_jobs,
-            background ? (aggressive ? std::size_t{3} : std::size_t{2})
-                       : (aggressive ? std::size_t{8} : std::size_t{4}));
-    }
+    config.initial_active_jobs = sizing.initial_active_jobs;
     config.throughput_window_size = configured_native_size(
         "SUNPACK_NATIVE_THROUGHPUT_WINDOW_SIZE", config.throughput_window_size, 4);
     config.throughput_regression_ratio = configured_native_double(
@@ -1265,10 +1228,10 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
         "SUNPACK_NATIVE_HIGH_BACKLOG_THRESHOLD", config.high_backlog_threshold);
     config.medium_floor_jobs = configured_native_size(
         "SUNPACK_NATIVE_MEDIUM_FLOOR_JOBS",
-        aggressive ? std::size_t{4} : std::size_t{2});
+        sizing.medium_floor_jobs);
     config.high_floor_jobs = configured_native_size(
         "SUNPACK_NATIVE_HIGH_FLOOR_JOBS",
-        aggressive ? std::size_t{6} : std::size_t{3});
+        sizing.high_floor_jobs);
     config.idle_decay_seconds = configured_native_double(
         "SUNPACK_NATIVE_WORKER_IDLE_DECAY_SECONDS",
         config.idle_decay_seconds,
@@ -1311,15 +1274,18 @@ sunpack::sevenzip::NativeRuntimeConfig configured_native_runtime_config(
 
 class NativeJobExecutor final {
 public:
-    explicit NativeJobExecutor(std::size_t worker_count)
+    NativeJobExecutor(
+        const sunpack::sevenzip::NativeSizingPlan& sizing,
+        sunpack::sevenzip::NativeRuntimeConfig runtime_config
+    )
         : shared_writer_(make_shared_writer()),
-          worker_count_((std::max)(std::size_t{1}, worker_count)),
-          memory_budget_(configured_native_memory_budget()),
+          worker_count_((std::max)(std::size_t{1}, sizing.thread_capacity)),
+          memory_budget_(sizing.memory_budget_bytes),
           queue_capacity_(configured_native_queue_capacity()),
           runtime_controller_(
               worker_count_,
               memory_budget_,
-              configured_native_runtime_config(worker_count_)) {
+              std::move(runtime_config)) {
         workers_.reserve(worker_count_);
         for (std::size_t index = 0; index < worker_count_; ++index) {
             workers_.emplace_back([this] { worker_loop(); });
@@ -1442,7 +1408,6 @@ private:
         std::size_t cpu_weight = 1;
         std::size_t memory_reserve = 64U << 20;
         std::size_t dictionary_reserve = 0;
-        bool solid_archive = false;
         std::uint64_t expected_output_bytes = 0;
         std::string profile_key;
     };
@@ -1481,7 +1446,6 @@ private:
                 : metadata.dictionary_reserve + decoder_scratch;
             metadata.memory_reserve = (std::max)(metadata.memory_reserve, dictionary_memory);
         }
-        metadata.solid_archive = json_bool_field(request, "native_solid_archive", false);
         if (json_uint_field_in_object(request, "native_expected_output_bytes", &value)) {
             metadata.expected_output_bytes = value;
         }
@@ -1515,9 +1479,6 @@ private:
                 active_memory_,
                 job.metadata.cpu_weight,
                 job.metadata.memory_reserve)) {
-            return false;
-        }
-        if (job.metadata.solid_archive && active_solid_jobs_ > 0) {
             return false;
         }
         return true;
@@ -1851,9 +1812,6 @@ private:
                 active_jobs_ += 1;
                 active_cpu_weight_ += job.metadata.cpu_weight;
                 active_memory_ += job.metadata.memory_reserve;
-                if (job.metadata.solid_archive) {
-                    active_solid_jobs_ += 1;
-                }
                 admitted_jobs = active_jobs_;
                 admitted_cpu = active_cpu_weight_;
                 admitted_memory = active_memory_;
@@ -1882,9 +1840,6 @@ private:
                     ? active_cpu_weight_ - job.metadata.cpu_weight : 0;
                 active_memory_ = active_memory_ >= job.metadata.memory_reserve
                     ? active_memory_ - job.metadata.memory_reserve : 0;
-                if (job.metadata.solid_archive && active_solid_jobs_ > 0) {
-                    active_solid_jobs_ -= 1;
-                }
                 remaining_jobs = active_jobs_;
                 remaining_cpu = active_cpu_weight_;
                 remaining_memory = active_memory_;
@@ -1931,7 +1886,6 @@ private:
     std::size_t active_jobs_ = 0;
     std::size_t active_cpu_weight_ = 0;
     std::size_t active_memory_ = 0;
-    std::size_t active_solid_jobs_ = 0;
     bool controller_recheck_ = false;
     bool any_job_failed_ = false;
     bool stopping_ = false;
@@ -1942,39 +1896,6 @@ private:
     std::uint64_t previous_user_time_ = 0;
 #endif
 };
-
-std::size_t auto_native_worker_count() noexcept {
-    const unsigned hardware = std::thread::hardware_concurrency();
-    std::size_t detected = hardware == 0 ? std::size_t{2} : static_cast<std::size_t>(hardware);
-    detected = (std::max)(std::size_t{1}, (std::min)(detected, std::size_t{32}));
-#ifdef _WIN32
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof(status);
-    if (GlobalMemoryStatusEx(&status) && status.ullAvailPhys > 0) {
-        constexpr unsigned long long memory_per_thread = 512ULL << 20;
-        const std::size_t memory_slots = static_cast<std::size_t>(
-            (std::max)(1ULL, status.ullAvailPhys / memory_per_thread));
-        detected = (std::min)(detected, (std::max)(std::size_t{1}, memory_slots));
-    }
-#endif
-    return detected;
-}
-
-std::size_t configured_native_worker_count() noexcept {
-    const char* value = std::getenv("SUNPACK_NATIVE_WORKER_THREAD_CAPACITY");
-    if (!value || !*value) {
-        return auto_native_worker_count();
-    }
-    char* end = nullptr;
-    const unsigned long configured = std::strtoul(value, &end, 10);
-    if (end == value || *end != '\0') {
-        return auto_native_worker_count();
-    }
-    if (configured == 0) {
-        return auto_native_worker_count();
-    }
-    return (std::min)(static_cast<std::size_t>(configured), std::size_t{32});
-}
 
 int run_message(
     const std::string& request,
@@ -2000,13 +1921,25 @@ int run_message(
 int main() {
     const std::string requested_process_mode = requested_native_process_mode();
     const bool process_mode_applied = apply_native_process_mode(requested_process_mode);
-    const std::size_t worker_count = configured_native_worker_count();
-    const auto runtime_config = configured_native_runtime_config(worker_count);
-    NativeJobExecutor executor(worker_count);
+    const auto resources = native_machine_resources();
+    const auto sizing = sunpack::sevenzip::derive_native_sizing_plan(
+        resources,
+        configured_native_sizing_overrides(requested_process_mode == "background"));
+    const auto runtime_config = configured_native_runtime_config(sizing);
+    NativeJobExecutor executor(sizing, runtime_config);
+    const bool sizing_overridden = sizing.thread_capacity_overridden ||
+        sizing.initial_active_jobs_overridden || sizing.memory_budget_overridden;
     print_json_line(
-        "{\"type\":\"worker_ready\",\"profile\":\"" + json_escape(native_worker_profile()) +
-        "\",\"thread_capacity\":" + std::to_string(worker_count) +
+        "{\"type\":\"worker_ready\",\"sizing_mode\":\"" +
+        std::string(sizing_overridden ? "overridden" : "dynamic") +
+        "\",\"logical_processors\":" + std::to_string(resources.logical_processors) +
+        ",\"total_memory_bytes\":" + std::to_string(resources.total_memory_bytes) +
+        ",\"available_memory_bytes\":" + std::to_string(resources.available_memory_bytes) +
+        ",\"memory_budget_bytes\":" + std::to_string(sizing.memory_budget_bytes) +
+        ",\"thread_capacity\":" + std::to_string(sizing.thread_capacity) +
         ",\"initial_active_limit\":" + std::to_string(runtime_config.initial_active_jobs) +
+        ",\"medium_floor_jobs\":" + std::to_string(runtime_config.medium_floor_jobs) +
+        ",\"high_floor_jobs\":" + std::to_string(runtime_config.high_floor_jobs) +
         ",\"process_mode\":\"" + requested_process_mode +
         "\",\"process_mode_applied\":" + (process_mode_applied ? "true" : "false") + "}");
     std::string line;

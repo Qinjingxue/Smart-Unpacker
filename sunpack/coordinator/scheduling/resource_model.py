@@ -32,8 +32,6 @@ def estimate_resource_demand(analysis: Any) -> ResourceDemand:
     if not getattr(analysis, "ok", False):
         return ResourceDemand()
 
-    method = (getattr(analysis, "dominant_method", "") or "").lower()
-    archive_type = (getattr(analysis, "archive_type", "") or "").lower()
     archive_mb = max(0, int(getattr(analysis, "archive_size", 0) or 0)) / (1024 * 1024)
     unpacked_mb = max(0, int(getattr(analysis, "total_unpacked_size", 0) or 0)) / (1024 * 1024)
     packed_mb = max(0, int(getattr(analysis, "total_packed_size", 0) or 0)) / (1024 * 1024)
@@ -41,22 +39,11 @@ def estimate_resource_demand(analysis: Any) -> ResourceDemand:
     file_count = max(0, int(getattr(analysis, "file_count", 0) or 0))
     solid = bool(getattr(analysis, "solid", False))
 
-    cpu = 1
     io = 1
     memory = 1
 
-    if any(token in method for token in ("lzma", "ppmd")):
-        cpu += 2
-    elif any(token in method for token in ("bzip2", "deflate64")):
-        cpu += 1
-    elif "deflate" in method:
-        cpu += 1
-
     if solid:
-        cpu += 1
         memory += 1
-    if archive_type == "7z" and not method:
-        cpu += 1
 
     if dictionary_mb >= 256:
         memory += 3
@@ -75,12 +62,11 @@ def estimate_resource_demand(analysis: Any) -> ResourceDemand:
 
     if file_count >= 50_000:
         io += 2
-        cpu += 1
     elif file_count >= 10_000:
         io += 1
 
     return ResourceDemand(
-        cpu=min(cpu, 6),
+        cpu=1,
         io=min(io, 6),
         memory=min(memory, 6),
     ).normalized()

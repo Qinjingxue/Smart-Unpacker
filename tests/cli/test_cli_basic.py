@@ -9,9 +9,12 @@ from pathlib import Path
 from tests.helpers.generated_fixtures import build_cli_pipeline_fixture
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 def run_cli(*args):
     return subprocess.run(
-        [sys.executable, "-B", "sunpack.py", *args],
+        [sys.executable, "-B", str(PROJECT_ROOT / "sunpack.py"), *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -140,7 +143,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("--color", result.stdout)
         self.assertIn("--recur", result.stdout)
-        self.assertIn("--worker-profile", result.stdout)
+        self.assertNotIn("--worker-profile", result.stdout)
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
         self.assertIn("--write-manifest", result.stdout)

@@ -37,7 +37,7 @@ python sunpack.py scan C:\Archives
 $env:SUNPACK_CONFIG_OVERRIDES = '{"filesystem": {"scan_filters": [{"name": "size_range", "range": "r >= 0"}]}}'
 ```
 
-覆盖里出现未知的顶层配置节会直接报错，避免拼错字段名被静默忽略。CLI 参数（如 `--recur`、`--worker-profile`、`--cleanup`）与运行覆盖共用同一套合并逻辑，在加载完成后作为最后一层生效。
+覆盖里出现未知的顶层配置节会直接报错，避免拼错字段名被静默忽略。CLI 参数（如 `--recur`、`--cleanup`）与运行覆盖共用同一套合并逻辑，在加载完成后作为最后一层生效。
 
 pytest 默认注入一份覆盖，关闭 `size_range` 过滤器，因此测试可以使用小于 1MB 的文件；调用方如果自己设置了 `SUNPACK_CONFIG_OVERRIDES`，pytest 会保留调用方的值。
 
@@ -186,7 +186,6 @@ CLI 可用 `--recur` 临时覆盖。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `performance.worker.profile` | `str` | `auto`、`conservative` 或 `aggressive`。 |
 | `performance.worker.idle_decay_seconds` | `int` / `float` | worker 空闲多久后衰减短期反馈；进程退出后反馈数据不保留。 |
 | `performance.worker.max_task_seconds` | `int` / `float` | 单个解压任务总时长上限，`0` 表示不限。 |
 | `performance.worker.watchdog_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
@@ -206,8 +205,11 @@ CLI 可用 `--recur` 临时覆盖。
 | `performance.worker.profile_calibration_*` | 多种 | native worker 进程内的在线反馈调节；worker 退出后反馈数据丢弃，不落盘。 |
 | `resource_guard` | `dict` | 可选资源护栏，用 analysis 估算的文件数、解包大小、压缩比等限制任务。 |
 
-`auto` 由 native worker 根据 CPU、物理内存和线程硬上限选择保守或激进初始档。配置文件中的超时会覆盖 profile 内置值。
-native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `performance.worker.idle_decay_seconds` 后逐步恢复初始动态限制。profile 反馈仅在当前 worker 进程内有效，worker 退出时丢弃。Python 不再根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 native worker holder。
+native worker 启动时只采集一次逻辑处理器数、总物理内存和可用物理内存，并由同一份资源快照计算线程容量、内存预算、初始并发和 backlog 下限。自动内存预算取可用物理内存的 70%，每个启动槽按 512 MiB 估算；线程容量为逻辑处理器数、内存槽位数和 32 的最小值。前台初始并发为 `ceil(逻辑处理器数 / 2)`，后台为 `ceil(逻辑处理器数 / 4)`，再由内存槽位和线程容量约束。`thread_capacity`、`initial_active_jobs` 和 `memory_budget_bytes` 的正数值会分别覆盖自动结果，`0` 表示自动计算。
+
+native worker 只在存在排队任务或活跃解压任务时采集 CPU、内存和进程 IO；空闲达到 `performance.worker.idle_decay_seconds` 后逐步恢复动态初始限制。任务类型的在线反馈仅在当前 worker 进程内有效，worker 退出时丢弃。Python 不根据这些采样决定 worker 数量或 native 解压准入；CLI、右键菜单和 watch 共用同一个 native worker holder。
+
+所有归档任务的静态初始成本统一为 1 个 CPU token，不再按压缩格式、算法、solid 状态或文件数量设置静态 CPU 权重；同机格式矩阵表明旧权重会明显压低大体积 7z 的吞吐。运行期仍允许 worker 根据该 profile 的实测吞吐回退动态提高 CPU 成本，这依赖实际反馈而不是文件类型猜测。solid 归档不使用全局单任务互斥，但仍提高内存权重，字典大小、预计输出量和 IO 规模也继续参与内存与 IO 准入，因此不同 solid 归档可以并行，但不会绕过资源预算。
 
 `resource_guard` 当前常用字段：
 

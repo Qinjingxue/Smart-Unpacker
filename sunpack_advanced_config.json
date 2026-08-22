@@ -68,7 +68,6 @@
     "precise_resource_min_size_mb": 256,
     "persistent_server_idle_seconds": 15,
     "worker": {
-      "profile": "auto",
       "throughput_window_size": 8,
       "throughput_regression_ratio": 0.95,
       "idle_decay_seconds": 30.0,

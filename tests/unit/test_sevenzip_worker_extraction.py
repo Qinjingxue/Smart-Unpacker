@@ -443,8 +443,9 @@ def test_native_environment_zero_memory_budget_uses_native_auto_budget():
     assert environment["SUNPACK_NATIVE_ADAPTIVE_ENABLED"] == "1"
 
 
-def test_native_environment_drops_removed_profile_cache_settings():
+def test_native_environment_drops_removed_worker_profile_and_profile_cache_settings():
     environment = {
+        "SUNPACK_NATIVE_WORKER_PROFILE": "aggressive",
         "SUNPACK_NATIVE_PROFILE_CACHE_PATH": "legacy.tsv",
         "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED": "1",
     }
@@ -457,6 +458,7 @@ def test_native_environment_drops_removed_profile_cache_settings():
         },
     )
 
+    assert "SUNPACK_NATIVE_WORKER_PROFILE" not in environment
     assert "SUNPACK_NATIVE_PROFILE_CACHE_PATH" not in environment
     assert "SUNPACK_NATIVE_PROFILE_CACHE_ENABLED" not in environment
 
@@ -488,6 +490,46 @@ def test_native_environment_marks_background_worker_mode_explicitly():
     _apply_native_environment(environment, {})
 
     assert "SUNPACK_NATIVE_PROCESS_MODE" not in environment
+
+
+def test_native_worker_reports_locally_calibrated_sizing_plan():
+    worker_path = _require_worker_or_skip()
+    environment = os.environ.copy()
+    for key in (
+        "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY",
+        "SUNPACK_NATIVE_INITIAL_ACTIVE_JOBS",
+        "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES",
+        "SUNPACK_NATIVE_PROCESS_MODE",
+        "SUNPACK_NATIVE_WORKER_PROFILE",
+    ):
+        environment.pop(key, None)
+    completed = subprocess.run(
+        [worker_path],
+        input='{"worker_command":"shutdown","job_id":"shutdown"}\n',
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        timeout=10,
+        check=True,
+    )
+    handshake = json.loads(completed.stdout.splitlines()[0])
+
+    logical_processors = max(1, int(handshake["logical_processors"]))
+    available_memory = int(handshake["available_memory_bytes"])
+    expected_budget = available_memory * 7 // 10 if available_memory else 0
+    memory_slots = 32 if expected_budget == 0 else max(1, min(32, expected_budget // (512 << 20)))
+    expected_capacity = max(1, min(logical_processors, memory_slots, 32))
+    expected_initial = max(1, min((logical_processors + 1) // 2, memory_slots, expected_capacity))
+
+    assert handshake["type"] == "worker_ready"
+    assert handshake["sizing_mode"] == "dynamic"
+    assert int(handshake["memory_budget_bytes"]) == expected_budget
+    assert int(handshake["thread_capacity"]) == expected_capacity
+    assert int(handshake["initial_active_limit"]) == expected_initial
+    assert int(handshake["medium_floor_jobs"]) == (expected_initial + 1) // 2
+    assert int(handshake["high_floor_jobs"]) == (expected_initial * 3 + 3) // 4
 
 
 def test_compact_worker_manifest_is_parsed_into_native_storage():
