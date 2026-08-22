@@ -490,6 +490,7 @@ def start_watch(
     quiet_seconds: float = 0.0,
     state_path: Path | None = None,
     initial_scan: bool = False,
+    notification_sink: Any | None = None,
 ) -> WatchHarness:
     watch_root = tmp_path / label / "watch"
     output_root = tmp_path / label / "out"
@@ -520,6 +521,7 @@ def start_watch(
             initial_scan=initial_scan,
             pipeline_engine=engine,
             group_coordinator=WatchGroupCoordinator(config),
+            notification_sink=notification_sink,
         )
     async_run_once = watcher.run_once
     async_start = watcher.start

@@ -15,7 +15,7 @@ from typing import Callable, Iterable
 
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.detection import FactBag
-from sunpack.contracts.failures import FailureKind
+from sunpack.contracts.failures import FailureKind, PASSWORD_FAILURE_KINDS
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.results import OutcomeKind
 from sunpack.contracts.tasks import ArchiveTask
@@ -1092,9 +1092,22 @@ class WatchScheduler:
         ])
 
         summary_failures = list(getattr(summary, "failures", []) or [])
-        if getattr(target_result, "failure", None) is not None and target_result.failure not in summary_failures:
-            summary_failures.append(target_result.failure)
+        target_failure = _target_result_failure(target_result)
+        if target_failure is not None and target_failure not in summary_failures:
+            summary_failures.append(target_failure)
         missing_volume_failures = _candidate_missing_volume_failures(
+            target_result,
+            summary_failures,
+        )
+        candidate_password_failures = _candidate_password_failures(
+            target_result,
+            summary_failures,
+        )
+        nested_missing_volume_failures = _nested_missing_volume_failures(
+            target_result,
+            summary_failures,
+        )
+        nested_password_failures = _nested_password_failures(
             target_result,
             summary_failures,
         )
@@ -1132,39 +1145,60 @@ class WatchScheduler:
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
             self._cleanup_probe_workspace(request.probe_workspace)
-            nested_missing_volume = _nested_missing_volume_failures(
-                target_result,
-                summary_failures,
+            nested_reasons = _nested_failure_reasons(
+                nested_password_failures,
+                nested_missing_volume_failures,
             )
-            if nested_missing_volume:
-                error = _nested_missing_volume_error(nested_missing_volume[0])
-                failure_payloads = [_failure_to_dict(failure) for failure in nested_missing_volume]
-                payload = {
-                    **(failure_payloads[0] if failure_payloads else {}),
-                    "blockers": [],
-                    "details": {
-                        "scope": "nested_archive",
-                        "reason": FailureKind.MISSING_VOLUME.value,
+            if nested_reasons:
+                failed = list(summary.failed_tasks)
+                nested_failures = _nested_related_failures(
+                    nested_password_failures,
+                    nested_missing_volume_failures,
+                )
+                primary_failure = nested_failures[0] if nested_failures else None
+                raw_error = failed[0] if failed else ""
+                error = _nested_failure_error(
+                    nested_reasons[0],
+                    primary_failure,
+                    fallback=raw_error,
+                )
+                failure_payloads = [_failure_to_dict(failure) for failure in nested_failures]
+                blockers = [BLOCKER_PASSWORD] if "password" in nested_reasons else []
+                status = (
+                    "failed_password"
+                    if blockers
+                    else "failed_nested_missing_volume"
+                )
+                payload = _add_nested_failure_details(
+                    {
+                        **(failure_payloads[0] if failure_payloads else {}),
+                        "blockers": list(blockers),
                     },
-                }
+                    nested_reasons,
+                )
+                if failure_payloads:
+                    failure_payloads[0] = payload
                 if group is not None:
-                    self.state.record_group_terminal(
-                        group,
-                        status="failed_nested_missing_volume",
-                        failure_payload=payload,
-                    )
+                    if blockers:
+                        self.state.record_group_suspended(
+                            group,
+                            blockers=blockers,
+                            failure_payload=payload,
+                        )
+                    else:
+                        self.state.record_group_terminal(group, status=status, failure_payload=payload)
                 self.state.mark(
                     candidate.path,
                     candidate.size,
                     candidate.mtime,
                     file_id=candidate.file_id,
                     change_usn=candidate.change_usn,
-                    status="failed_nested_missing_volume",
+                    status=status,
                     error=error,
                     failure_payload=payload,
                 )
                 self.log.write(
-                    "failed_nested_missing_volume",
+                    status,
                     path=candidate.path,
                     error=error,
                     failures=failure_payloads,
@@ -1195,18 +1229,19 @@ class WatchScheduler:
         failed = list(summary.failed_tasks)
         if failed:
             error = failed[0] if failed else "watch extraction failed"
-            failures = list(getattr(summary, "failures", []) or [])
+            failures = summary_failures
             failure_payloads = [_failure_to_dict(failure) for failure in failures]
-            is_password_failure = any(getattr(failure, "is_password_failure", False) for failure in failures)
-            is_missing_volume = bool(_candidate_missing_volume_failures(
-                target_result,
-                failures,
-            ))
-            nested_missing_volume_failures = _nested_missing_volume_failures(
-                target_result,
-                failures,
+            is_password_failure = bool(
+                candidate_password_failures or nested_password_failures
             )
-            is_nested_missing_volume = bool(nested_missing_volume_failures)
+            is_missing_volume = bool(missing_volume_failures)
+            nested_reasons = _nested_failure_reasons(
+                nested_password_failures,
+                nested_missing_volume_failures,
+            )
+            nested_notification = bool(nested_reasons) and not (
+                candidate_password_failures or missing_volume_failures
+            )
             blockers = []
             if is_missing_volume:
                 blockers.append(BLOCKER_MISSING_VOLUME)
@@ -1218,19 +1253,38 @@ class WatchScheduler:
                 else "suspended_missing_volume"
                 if is_missing_volume
                 else "failed_nested_missing_volume"
-                if is_nested_missing_volume
+                if "missing_volume" in nested_reasons
                 else "failed_terminal"
             )
-            if is_nested_missing_volume:
-                error = f"嵌套压缩包内层分卷缺失：{error}"
-            payload = failure_payloads[0] if failure_payloads else {}
-            payload = {**payload, "blockers": list(blockers)}
-            if is_nested_missing_volume:
-                payload["details"] = {
-                    **(payload.get("details") if isinstance(payload.get("details"), dict) else {}),
-                    "scope": "nested_archive",
-                    "reason": FailureKind.MISSING_VOLUME.value,
-                }
+            if nested_notification:
+                error = _nested_failure_error(
+                    nested_reasons[0],
+                    _nested_related_failures(
+                        nested_password_failures,
+                        nested_missing_volume_failures,
+                    )[0],
+                    fallback=error,
+                )
+            primary_failures = (
+                candidate_password_failures
+                or missing_volume_failures
+                or nested_password_failures
+                or nested_missing_volume_failures
+                or failures
+            )
+            primary_payload = _failure_to_dict(primary_failures[0]) if primary_failures else {}
+            payload = _add_nested_failure_details(
+                {**primary_payload, "blockers": list(blockers)},
+                nested_reasons,
+            )
+            if nested_reasons:
+                primary_raw_payload = _failure_to_dict(primary_failures[0]) if primary_failures else {}
+                for index, failure_payload in enumerate(failure_payloads):
+                    if failure_payload == primary_raw_payload:
+                        failure_payloads[index] = payload
+                        break
+                else:
+                    failure_payloads.insert(0, payload)
             if group is not None:
                 if blockers:
                     self.state.record_group_suspended(group, blockers=blockers, failure_payload=payload)
@@ -1248,14 +1302,19 @@ class WatchScheduler:
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             self._cleanup_probe_workspace(request.probe_workspace)
-            if blockers:
+            if blockers and not nested_notification:
                 self._notify("suppressed", request.notification_id)
             else:
-                self._notify("failed", request.notification_id, failed, failure_payloads)
+                self._notify(
+                    "failed",
+                    request.notification_id,
+                    [error] if nested_notification else failed,
+                    failure_payloads,
+                )
             return WatchRunResult(
                 processed=1,
                 failed=1,
-                errors=[error] if is_nested_missing_volume else failed,
+                errors=[error] if nested_notification else failed,
             )
         if _summary_processed_no_tasks(summary):
             if group is not None:
@@ -1766,6 +1825,8 @@ def _password_source_signature(
 
 
 def _failure_to_dict(failure) -> dict:
+    if isinstance(failure, dict):
+        return dict(failure)
     if hasattr(failure, "to_dict"):
         try:
             return failure.to_dict()
@@ -1792,10 +1853,41 @@ def _failure_contains(failure, kind: FailureKind) -> bool:
     return getattr(failure, "kind", None) == kind
 
 
+def _failure_is_password(failure) -> bool:
+    if isinstance(failure, dict):
+        raw_kind = failure.get("kind")
+        try:
+            if FailureKind(str(raw_kind)) in PASSWORD_FAILURE_KINDS:
+                return True
+        except (TypeError, ValueError):
+            pass
+        return any(_failure_is_password(cause) for cause in (failure.get("causes") or []))
+    return bool(getattr(failure, "is_password_failure", False))
+
+
 def _target_result_failure(target_result):
     if isinstance(target_result, dict):
         return target_result.get("failure")
     return getattr(target_result, "failure", None) if target_result is not None else None
+
+
+def _candidate_failures(target_result, failures, predicate) -> list:
+    """Return failures owned by the watched candidate itself."""
+    target_failure = _target_result_failure(target_result)
+    if target_result is None:
+        return [failure for failure in failures if predicate(failure)]
+    if target_failure is not None and predicate(target_failure):
+        return [target_failure]
+    return []
+
+
+def _nested_failures(target_result, failures, predicate) -> list:
+    """Return failures owned by recursively extracted child archives."""
+    if target_result is None:
+        return []
+    if _candidate_failures(target_result, failures, predicate):
+        return []
+    return [failure for failure in failures if predicate(failure)]
 
 
 def _candidate_missing_volume_failures(target_result, failures) -> list:
@@ -1807,38 +1899,70 @@ def _candidate_missing_volume_failures(target_result, failures) -> list:
     archive, so use the current candidate's direct failure there.  The
     target-result-free fallback keeps lightweight scheduler fakes compatible.
     """
-    target_failure = _target_result_failure(target_result)
-    if target_result is None:
-        return [
-            failure
-            for failure in failures
-            if _failure_contains(failure, FailureKind.MISSING_VOLUME)
-        ]
-    if _failure_contains(target_failure, FailureKind.MISSING_VOLUME):
-        return [target_failure]
-    return []
+    return _candidate_failures(
+        target_result,
+        failures,
+        lambda failure: _failure_contains(failure, FailureKind.MISSING_VOLUME),
+    )
+
+
+def _candidate_password_failures(target_result, failures) -> list:
+    return _candidate_failures(target_result, failures, _failure_is_password)
 
 
 def _nested_missing_volume_failures(target_result, failures) -> list:
     """Return missing-volume failures that belong to a recursively extracted child."""
-    if target_result is None:
-        return []
-    if _candidate_missing_volume_failures(target_result, failures):
-        return []
-    return [
-        failure
-        for failure in failures
-        if _failure_contains(failure, FailureKind.MISSING_VOLUME)
-    ]
+    return _nested_failures(
+        target_result,
+        failures,
+        lambda failure: _failure_contains(failure, FailureKind.MISSING_VOLUME),
+    )
 
 
-def _nested_missing_volume_error(failure) -> str:
-    message = (
-        failure.get("message")
-        if isinstance(failure, dict)
-        else getattr(failure, "message", "")
-    ) or "possible missing split volume"
-    return f"嵌套压缩包内层分卷缺失：{message}"
+def _nested_password_failures(target_result, failures) -> list:
+    return _nested_failures(target_result, failures, _failure_is_password)
+
+
+def _nested_failure_reasons(password_failures, missing_volume_failures) -> list[str]:
+    reasons = []
+    if password_failures:
+        reasons.append("password")
+    if missing_volume_failures:
+        reasons.append(FailureKind.MISSING_VOLUME.value)
+    return reasons
+
+
+def _nested_related_failures(password_failures, missing_volume_failures) -> list:
+    return [*password_failures, *missing_volume_failures]
+
+
+def _nested_failure_error(reason: str, failure, *, fallback: str = "") -> str:
+    if reason == "password":
+        label = "密码错误"
+    else:
+        label = "分卷缺失"
+    if fallback:
+        message = fallback
+    elif isinstance(failure, dict):
+        message = failure.get("message") or ""
+    else:
+        message = getattr(failure, "message", "") if failure is not None else ""
+    message = str(message or "unknown nested archive failure")
+    return f"嵌套压缩包内层{label}：{message}"
+
+
+def _add_nested_failure_details(payload: dict, reasons: list[str]) -> dict:
+    if not reasons:
+        return payload
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    details = {
+        **details,
+        "scope": "nested_archive",
+        "reason": reasons[0],
+    }
+    if len(reasons) > 1:
+        details["reasons"] = list(reasons)
+    return {**payload, "details": details}
 
 
 def _summary_processed_no_tasks(summary) -> bool:

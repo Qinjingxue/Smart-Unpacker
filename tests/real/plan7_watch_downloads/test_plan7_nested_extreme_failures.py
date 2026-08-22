@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
 import zipfile
 from pathlib import Path
 
 from sunpack.contracts.failures import FailureKind
+from sunpack.filesystem.watcher.toast import WatchToastCoordinator
+from sunpack.platform.windows.toast_protocol import ToastSnapshotKind
 from tests.helpers.real_archives import (
     ArchiveFixtureFactory,
     create_encrypted_zip_archive,
@@ -12,12 +15,39 @@ from tests.real.plan1_real_archives.plan1_support import run_plan1_pipeline
 from tests.real.plan7_watch_downloads.plan7_support import (
     arrive_slowly,
     drive_watch_until,
+    plan7_watch_config,
     start_watch,
 )
 
 
 FACTORY = ArchiveFixtureFactory()
 INNER_PASSWORD = "nested-inner-password-only-fixture"
+
+
+class _ToastHost:
+    def __init__(self):
+        self.snapshots = []
+        self.clear_count = 0
+
+    def publish(self, snapshot):
+        self.snapshots.append(snapshot)
+
+    def clear(self):
+        self.clear_count += 1
+
+
+def _terminal_toast(host):
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        terminal = [
+            snapshot
+            for snapshot in host.snapshots
+            if snapshot.kind != ToastSnapshotKind.PROGRESS
+        ]
+        if terminal:
+            return terminal[-1]
+        time.sleep(0.01)
+    return None
 
 
 def _write_outer_zip(path: Path, entries: list[tuple[str, bytes]]) -> Path:
@@ -120,10 +150,21 @@ def test_plan7_nested_inner_unknown_password_watch_is_password_blocked(
 ):
     """watch 模式下，内层未知密码应阻塞密码而不是缺分卷。"""
     outer = _nested_encrypted_outer(tmp_path)
-    harness = start_watch(tmp_path, "nested-inner-password-watch", passwords=[])
+    label = "nested-inner-password-watch"
+    toast_config = plan7_watch_config(passwords=[])
+    toast_config["watch"]["toast_completion_debounce_ms"] = 0
+    toast_host = _ToastHost()
+    toast = WatchToastCoordinator(toast_host, toast_config, str(tmp_path / label))
+    harness = start_watch(
+        tmp_path,
+        label,
+        passwords=[],
+        notification_sink=toast,
+    )
     try:
         arrive_slowly(harness, outer)
         result = _settle_watch(harness)
+        terminal = _terminal_toast(toast_host)
         entry = next(iter(harness.watcher.state.entries.values()))
         plan7_error.update({
             "case": "nested_outer_plain_inner_encrypted_watch",
@@ -131,12 +172,22 @@ def test_plan7_nested_inner_unknown_password_watch_is_password_blocked(
             "entry_status": entry.status,
             "failure_kind": entry.failure_kind,
             "blockers": list((entry.failure_payload or {}).get("blockers") or []),
+            "toast_kind": terminal.kind.value if terminal is not None else "",
+            "toast_body": terminal.body if terminal is not None else "",
         })
         assert result.failed == 1
         assert entry.status == "failed_password"
         assert entry.failure_kind == FailureKind.WRONG_PASSWORD.value
         assert (entry.failure_payload or {}).get("blockers") == ["password"]
+        assert terminal is not None
+        assert terminal.kind == ToastSnapshotKind.FAILURE
+        assert "内层归档需要密码" in terminal.body
+        report_path = terminal.actions[-1].target
+        report = Path(report_path).read_text(encoding="utf-8")
+        assert "内层归档需要密码" in report
+        assert "nested-inner-encrypted.zip" in report
     finally:
+        toast.stop()
         harness.close()
 
 
@@ -146,10 +197,21 @@ def test_plan7_nested_inner_missing_volume_watch_is_not_outer_volume_blocked(
 ):
     """watch 模式下，内层缺分卷不得把外层 ZIP 放入缺分卷队列。"""
     outer = _nested_missing_volume_outer(tmp_path)
-    harness = start_watch(tmp_path, "nested-inner-missing-volume-watch", passwords=[])
+    label = "nested-inner-missing-volume-watch"
+    toast_config = plan7_watch_config(passwords=[])
+    toast_config["watch"]["toast_completion_debounce_ms"] = 0
+    toast_host = _ToastHost()
+    toast = WatchToastCoordinator(toast_host, toast_config, str(tmp_path / label))
+    harness = start_watch(
+        tmp_path,
+        label,
+        passwords=[],
+        notification_sink=toast,
+    )
     try:
         arrive_slowly(harness, outer)
         result = _settle_watch(harness)
+        terminal = _terminal_toast(toast_host)
         events = (tmp_path / "nested-inner-missing-volume-watch" / "events.jsonl").read_text(
             encoding="utf-8"
         )
@@ -160,6 +222,8 @@ def test_plan7_nested_inner_missing_volume_watch_is_not_outer_volume_blocked(
             "state_groups": list(harness.watcher.state.groups),
             "failed_nested_missing_volume_logged": '"event":"failed_nested_missing_volume"' in events,
             "suspended_missing_volume_logged": '"event":"suspended_missing_volume"' in events,
+            "toast_kind": terminal.kind.value if terminal is not None else "",
+            "toast_body": terminal.body if terminal is not None else "",
         })
         assert result.failed == 1
         assert not harness.watcher.state.entries
@@ -168,5 +232,13 @@ def test_plan7_nested_inner_missing_volume_watch_is_not_outer_volume_blocked(
         assert '"event":"suspended_missing_volume"' not in events
         assert any("嵌套压缩包内层分卷缺失" in error for error in result.errors)
         assert any("nested-inner-split.7z.001" in error for error in result.errors)
+        assert terminal is not None
+        assert terminal.kind == ToastSnapshotKind.FAILURE
+        assert "内层归档缺少分卷" in terminal.body
+        report_path = terminal.actions[-1].target
+        report = Path(report_path).read_text(encoding="utf-8")
+        assert "内层归档缺少分卷" in report
+        assert "nested-inner-split.7z.001" in report
     finally:
+        toast.stop()
         harness.close()

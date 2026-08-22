@@ -273,6 +273,18 @@ def _write_zip(path: Path):
         archive.writestr("inside.txt", "ok")
 
 
+def _nested_failure_summary(path: Path, failure: FailureInfo):
+    return SimpleNamespace(
+        success_count=1,
+        partial_success_count=0,
+        failed_tasks=[f"{path.parent / 'nested-inner.7z.001'}: {failure.message}"],
+        failures=[failure],
+        processed_keys=[str(path)],
+        recovered_outputs=[],
+        target_results=[TargetRunResult(str(path), OutcomeKind.COMPLETE_SUCCESS)],
+    )
+
+
 class _DeferredHandle:
     def __init__(self, path: str):
         self.path = path
@@ -1853,6 +1865,94 @@ def test_watch_scheduler_retries_terminal_failure_for_each_new_event(tmp_path, m
     assert watcher.pending_count == 0
     assert not watcher.state.entries
     assert [event[0] for event in notifications.events] == ["submitted", "failed", "submitted", "failed"]
+
+
+def test_nested_password_failure_notifies_but_keeps_password_blocker(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class NestedPasswordRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return _nested_failure_summary(
+                Path(paths[0]),
+                FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password"),
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "outer.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    notifications = CapturingNotificationSink()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(NestedPasswordRunner),
+        notification_sink=notifications,
+    )
+
+    watcher.enqueue(str(archive_path))
+    result = _await(watcher.run_once())
+
+    entry = next(iter(watcher.state.entries.values()))
+    failed_event = next(event for event in notifications.events if event[0] == "failed")
+    assert result.failed == 1
+    assert entry.status == "failed_password"
+    assert entry.failure_payload["blockers"] == ["password"]
+    assert entry.failure_payload["details"] == {
+        "scope": "nested_archive",
+        "reason": "password",
+    }
+    assert failed_event[2][0].startswith("嵌套压缩包内层密码错误：")
+    assert not any(event[0] == "suppressed" for event in notifications.events)
+
+
+def test_nested_missing_volume_notifies_without_missing_volume_blocker(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class NestedMissingRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return _nested_failure_summary(
+                Path(paths[0]),
+                FailureInfo(FailureKind.MISSING_VOLUME, "extraction", "missing split volume"),
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "outer.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    notifications = CapturingNotificationSink()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(NestedMissingRunner),
+        notification_sink=notifications,
+    )
+
+    watcher.enqueue(str(archive_path))
+    result = _await(watcher.run_once())
+
+    failed_event = next(event for event in notifications.events if event[0] == "failed")
+    assert result.failed == 1
+    assert not watcher.state.entries
+    assert failed_event[2][0].startswith("嵌套压缩包内层分卷缺失：")
+    assert failed_event[3][0]["details"] == {
+        "scope": "nested_archive",
+        "reason": "missing_volume",
+    }
+    assert not any(event[0] == "suppressed" for event in notifications.events)
 
 
 def test_watch_scheduler_does_not_retry_password_inconclusive_after_password_source_change(tmp_path, monkeypatch):
