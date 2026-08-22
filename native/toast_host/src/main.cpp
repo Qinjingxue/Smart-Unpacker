@@ -52,6 +52,21 @@ constexpr std::uint16_t kProtocolVersion = 1;
 constexpr std::size_t kHeaderBytes = 20;
 constexpr std::uint32_t kMaximumFrameBytes = 64 * 1024;
 
+class WinrtApartmentScope {
+public:
+    WinrtApartmentScope() {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    }
+
+    ~WinrtApartmentScope() {
+        winrt::clear_factory_cache();
+        winrt::uninit_apartment();
+    }
+
+    WinrtApartmentScope(const WinrtApartmentScope&) = delete;
+    WinrtApartmentScope& operator=(const WinrtApartmentScope&) = delete;
+};
+
 enum class MessageType : std::uint16_t {
     hello = 1,
     snapshot = 2,
@@ -1028,15 +1043,9 @@ int run_host(
     if (!is_ordinary_integrity()) {
         return ERROR_ELEVATION_REQUIRED;
     }
+    WinrtApartmentScope apartment;
     if (!toast_identity_registered()) {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
-        try {
-            register_toast_identity();
-        } catch (...) {
-            winrt::uninit_apartment();
-            throw;
-        }
-        winrt::uninit_apartment();
+        register_toast_identity();
     }
     winrt::check_hresult(SetCurrentProcessExplicitAppUserModelID(kAppId));
     HANDLE parent = parent_pid == 0 ? nullptr : OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
@@ -1053,14 +1062,9 @@ int run_host(
         winrt::throw_last_error();
     }
     std::unique_ptr<ToastPresenter> presenter;
-    bool toast_apartment_initialized = false;
     const auto release_presenter = [&] {
         if (presenter) presenter->clear();
         presenter.reset();
-        if (toast_apartment_initialized) {
-            winrt::uninit_apartment();
-            toast_apartment_initialized = false;
-        }
     };
     const auto expire = [&] { release_presenter(); };
     std::uint64_t last_sequence = 0;
@@ -1088,8 +1092,6 @@ int run_host(
             switch (frame->type) {
             case MessageType::snapshot:
                 if (!presenter) {
-                    winrt::init_apartment(winrt::apartment_type::multi_threaded);
-                    toast_apartment_initialized = true;
                     presenter = std::make_unique<ToastPresenter>(expiry_timer, diagnostic_log_path);
                 }
                 presenter->show(parse_snapshot(frame->payload), frame->sequence);
@@ -1129,6 +1131,13 @@ int self_test() {
     const auto decoded = hex_decode(hex_encode(original));
     if (!decoded || *decoded != original) return 1;
     if (xml_escape(L"<&\"'>") != L"&lt;&amp;&quot;&apos;&gt;") return 2;
+    {
+        WinrtApartmentScope apartment;
+        XmlDocument first;
+        first.LoadXml(L"<root><value>first</value></root>");
+        XmlDocument second;
+        second.LoadXml(L"<root><value>second</value></root>");
+    }
     return 0;
 }
 
