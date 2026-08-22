@@ -25,14 +25,21 @@ struct ArchiveOperationResult {
     bool command_ok = false;
     bool is_archive = false;
     bool is_encrypted = false;
+    bool password_required = false;
     bool is_broken = false;
     bool checksum_error = false;
+    bool missing_volume = false;
+    bool missing_volume_suspected = false;
+    bool missing_stub = false;
+    bool volume_open_failed = false;
     int matched_index = -1;
     int attempts = 0;
     unsigned long long archive_offset = 0;
     int item_count = 0;
     int operation_result = 0;
     std::wstring archive_type;
+    std::wstring missing_volume_name;
+    std::string missing_volume_evidence;
     std::string message;
 };
 

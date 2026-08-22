@@ -36,6 +36,12 @@ PasswordTestResult needs_volume_or_tail_damaged_result(
     PasswordTestResult result;
     result.backend_available = true;
     result.status = PasswordTestStatus::NeedsVolumeOrTailDamaged;
+    result.is_archive = true;
+    result.damaged = true;
+    result.missing_volume = true;
+    result.missing_volume_suspected = true;
+    result.missing_volume_evidence = evidence ? evidence : "";
+    result.missing_volume_name = requested_name;
     result.message = "password probe could not read required tail data; missing volume or damaged tail offset/structure";
     if (evidence && *evidence) {
         result.message += " [evidence=";
@@ -245,6 +251,16 @@ PasswordTestResult test_one_password(
 
             if (!stream_opened) {
 
+                if (is_sfx_path(archive_path) && !sorted_data_volume_paths(part_paths).empty()) {
+                    result.status = PasswordTestStatus::NeedsVolumeOrTailDamaged;
+                    result.is_archive = true;
+                    result.damaged = true;
+                    result.missing_stub = true;
+                    result.missing_volume_evidence = "sfx_stub_not_found";
+                    result.message = "split self-extracting archive stub is missing";
+                    return result;
+                }
+
                 result.status = PasswordTestStatus::Error;
 
                 result.message = "archive file could not be opened";
@@ -270,6 +286,16 @@ PasswordTestResult test_one_password(
                 return missing;
             }
 
+            if (raw_open_callback->volume_open_failed()) {
+                result.status = PasswordTestStatus::Error;
+                result.is_archive = true;
+                result.volume_open_failed = true;
+                result.missing_volume_name = raw_open_callback->failed_volume_name();
+                result.missing_volume_evidence = "open_volume_callback_open_failed";
+                result.message = "archive split volume could not be opened";
+                return result;
+            }
+
             if (hr != S_OK) {
 
                 last_hr = hr;
@@ -279,7 +305,10 @@ PasswordTestResult test_one_password(
             }
 
             any_opened = true;
+            result.is_archive = true;
             last_encryption_evidence = last_encryption_evidence || archive_has_encrypted_items(archive.get());
+            result.encrypted = result.encrypted || last_encryption_evidence;
+            result.password_required = result.password_required || last_encryption_evidence;
 
 
 
@@ -334,6 +363,10 @@ PasswordTestResult test_one_password(
             if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
                 result.status = PasswordTestStatus::WrongPassword;
+                result.is_archive = true;
+                result.encrypted = true;
+                result.password_required = true;
+                result.wrong_password = true;
 
                 result.message = "wrong password";
 
@@ -367,6 +400,10 @@ PasswordTestResult test_one_password(
         } else if (!any_opened && plan.uses_ranges() && encrypted_header_range_probe_candidate(plan.archive_type)) {
 
             result.status = PasswordTestStatus::WrongPassword;
+            result.is_archive = true;
+            result.encrypted = true;
+            result.password_required = true;
+            result.wrong_password = true;
 
             result.message = "wrong password";
 
@@ -386,6 +423,10 @@ PasswordTestResult test_one_password(
         } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
             result.status = PasswordTestStatus::WrongPassword;
+            result.is_archive = true;
+            result.encrypted = true;
+            result.password_required = true;
+            result.wrong_password = true;
 
             result.message = "wrong password";
 
@@ -502,6 +543,16 @@ PasswordTestResult test_one_password_reuse_stream(
                 raw_open_callback->missing_volume_name());
         }
 
+        if (raw_open_callback->volume_open_failed()) {
+            result.status = PasswordTestStatus::Error;
+            result.is_archive = true;
+            result.volume_open_failed = true;
+            result.missing_volume_name = raw_open_callback->failed_volume_name();
+            result.missing_volume_evidence = "open_volume_callback_open_failed";
+            result.message = "archive split volume could not be opened";
+            return result;
+        }
+
         if (hr != S_OK) {
 
             last_hr = hr;
@@ -511,7 +562,10 @@ PasswordTestResult test_one_password_reuse_stream(
         }
 
         any_opened = true;
+        result.is_archive = true;
         last_encryption_evidence = last_encryption_evidence || archive_has_encrypted_items(archive.get());
+        result.encrypted = result.encrypted || last_encryption_evidence;
+        result.password_required = result.password_required || last_encryption_evidence;
 
 
 
@@ -546,6 +600,10 @@ PasswordTestResult test_one_password_reuse_stream(
         if (looks_wrong_password(hr, last_op_res, last_encryption_evidence)) {
 
             result.status = PasswordTestStatus::WrongPassword;
+            result.is_archive = true;
+            result.encrypted = true;
+            result.password_required = true;
+            result.wrong_password = true;
 
             result.message = "wrong password";
 
@@ -592,6 +650,10 @@ PasswordTestResult test_one_password_reuse_stream(
     } else if (looks_wrong_password(last_hr, last_op_res, last_encryption_evidence)) {
 
         result.status = PasswordTestStatus::WrongPassword;
+        result.is_archive = true;
+        result.encrypted = true;
+        result.password_required = true;
+        result.wrong_password = true;
 
         result.message = "wrong password";
 

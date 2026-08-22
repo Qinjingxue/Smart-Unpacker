@@ -81,6 +81,10 @@ impl AnalysisBinaryView {
         result.set_item("central_directory_present", false)?;
         result.set_item("central_directory_walk_ok", false)?;
         result.set_item("central_directory_entries_checked", 0usize)?;
+        result.set_item("central_directory_encrypted_entries", 0usize)?;
+        result.set_item("password_required", false)?;
+        result.set_item("password_state", "unknown")?;
+        result.set_item("encryption_scan_complete", false)?;
         result.set_item("local_header_links_ok", false)?;
         result.set_item("local_header_links_checked", 0usize)?;
         result.set_item("content_integrity_warning", "")?;
@@ -242,6 +246,8 @@ impl AnalysisBinaryView {
             result.set_item("plausible", true)?;
             result.set_item("central_directory_walk_ok", true)?;
             result.set_item("local_header_links_ok", true)?;
+            result.set_item("encryption_scan_complete", true)?;
+            result.set_item("password_state", "not_required")?;
             return Ok(result.unbind());
         }
 
@@ -262,7 +268,7 @@ impl AnalysisBinaryView {
             return Ok(result.unbind());
         }
         result.set_item("central_directory_present", true)?;
-        let (entries_checked, cd_ok, links_checked, links_ok, error) = self
+        let (entries_checked, cd_ok, links_checked, links_ok, encrypted_entries, error) = self
             .walk_zip_central_directory(
                 archive_offset,
                 physical_central_offset,
@@ -271,9 +277,24 @@ impl AnalysisBinaryView {
                 max_cd_entries_to_walk,
             )?;
         result.set_item("central_directory_entries_checked", entries_checked)?;
+        result.set_item("central_directory_encrypted_entries", encrypted_entries)?;
         result.set_item("central_directory_walk_ok", cd_ok)?;
         result.set_item("local_header_links_checked", links_checked)?;
         result.set_item("local_header_links_ok", links_ok)?;
+        let encryption_scan_complete =
+            error.is_empty() && cd_ok && entries_checked == effective_total_entries as usize;
+        result.set_item("encryption_scan_complete", encryption_scan_complete)?;
+        result.set_item("password_required", encrypted_entries > 0)?;
+        result.set_item(
+            "password_state",
+            if encrypted_entries > 0 {
+                "required"
+            } else if encryption_scan_complete {
+                "not_required"
+            } else {
+                "unknown"
+            },
+        )?;
         if error.is_empty() {
             result.set_item("plausible", true)?;
             result.set_item(
@@ -382,6 +403,11 @@ impl AnalysisBinaryView {
         result.set_item("next_header_crc_ok", false)?;
         result.set_item("next_header_nid", 0u8)?;
         result.set_item("next_header_nid_valid", false)?;
+        result.set_item("password_required", false)?;
+        result.set_item("encrypted_header", false)?;
+        result.set_item("encrypted_payload", false)?;
+        result.set_item("password_state", "unknown")?;
+        result.set_item("encryption_scan_complete", false)?;
         result.set_item("evidence", PyList::empty(py))?;
 
         let header = match self.read_field_at_bytes(
@@ -479,6 +505,24 @@ impl AnalysisBinaryView {
             if crc_ok {
                 evidence.append("7z:next_header_crc")?;
                 if nid_valid {
+                    let encryption =
+                        crate::formats::seven_zip::seven_zip_encryption_facts_from_next_header(
+                            &next_header,
+                        );
+                    result.set_item("password_required", encryption.password_required)?;
+                    result.set_item("encrypted_header", encryption.encrypted_header)?;
+                    result.set_item("encrypted_payload", encryption.encrypted_payload)?;
+                    result.set_item(
+                        "password_state",
+                        if encryption.password_required {
+                            "required"
+                        } else if encryption.scan_complete {
+                            "not_required"
+                        } else {
+                            "unknown"
+                        },
+                    )?;
+                    result.set_item("encryption_scan_complete", encryption.scan_complete)?;
                     result.set_item("strong_accept", true)?;
                     evidence.append("7z:next_header_nid")?;
                 } else {

@@ -211,7 +211,7 @@ class PipelineTimingProbe:
             self._wrap(repair_scheduler, "generate_repair_candidates", "repair_candidates")
         self._wrap(output_scan, "scan_roots_from_outputs", "output_scan")
         self._wrap(output_scan, "take_scan_session", "output_take_scan_session")
-        self._wrap(extractor, "inspect", "health_password_preflight")
+        self._wrap(extractor, "inspect", "password_preflight")
         self._wrap(extractor, "extract", "extract")
         self._wrap(extractor, "close", "extractor_close")
         password_resolver = getattr(extractor, "password_resolver", None)
@@ -238,7 +238,6 @@ def timing_columns(recorder: TimingRecorder | None, pipeline_ms: float = 0.0) ->
             "execute_ready_ms": 0.0,
             "execute_all_wall_ms": 0.0,
             "preflight_ms": 0.0,
-            "health_ms": 0.0,
             "password_resolve_ms": 0.0,
             "password_native_test_ms": 0.0,
             "resource_ms": 0.0,
@@ -274,7 +273,7 @@ def timing_columns(recorder: TimingRecorder | None, pipeline_ms: float = 0.0) ->
         + recorder.ms("input_planning")
         + batch_execute_ms
         + repair_ms
-        + recorder.ms("health_password_preflight")
+        + recorder.ms("password_preflight")
         + recorder.ms("password_resolve")
         + recorder.ms("password_native_test_archive")
         + recorder.ms("password_native_try")
@@ -295,8 +294,7 @@ def timing_columns(recorder: TimingRecorder | None, pipeline_ms: float = 0.0) ->
         "repair_ms": repair_ms,
         "execute_ready_ms": 0.0,
         "execute_all_wall_ms": round(pipeline_ms, 2),
-        "preflight_ms": recorder.ms("health_password_preflight"),
-        "health_ms": 0.0,
+        "preflight_ms": recorder.ms("password_preflight"),
         "password_resolve_ms": recorder.ms("password_resolve"),
         "password_native_test_ms": round(
             recorder.ms("password_native_test_archive") + recorder.ms("password_native_try"),
@@ -788,7 +786,6 @@ def print_table(rows: list[dict]):
         "execute_ready_ms",
         "execute_all_wall_ms",
         "preflight_ms",
-        "health_ms",
         "password_resolve_ms",
         "password_native_test_ms",
         "resource_ms",

@@ -141,7 +141,7 @@ def test_native_password_attempts_use_dll_ranges_for_archive_input(tmp_path):
 
 
 @pytest.mark.parametrize("password", [None, PASSWORD])
-def test_native_wrapper_handles_7z_sfx_split_health_password_and_resources(tmp_path, password):
+def test_native_wrapper_handles_7z_sfx_split_probe_password_and_resources(tmp_path, password):
     require_7z()
     case = ArchiveFixtureFactory().create(
         tmp_path,
@@ -154,15 +154,15 @@ def test_native_wrapper_handles_7z_sfx_split_health_password_and_resources(tmp_p
     tester = get_native_password_tester()
     parts = _parts(case)
 
-    health = tester.check_archive_health(str(case.entry_path), part_paths=parts)
+    probe = tester.probe_archive(str(case.entry_path), part_paths=parts)
     if password:
-        assert health.is_encrypted
+        assert probe.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
         attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
         assert attempt.ok
         assert attempt.matched_index == 1
     else:
-        assert health.ok
+        assert probe.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
 
     analysis = tester.analyze_archive_resources(str(case.entry_path), password or "", part_paths=parts)
@@ -175,13 +175,13 @@ def test_native_wrapper_detects_missing_7z_sfx_split_tail(tmp_path):
     case = ArchiveFixtureFactory().create(tmp_path, "native_7z_sfx_missing_tail", "7z", split=True, sfx=True)
     _remove_last_data_part(case)
 
-    health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
+    probe = get_native_password_tester().probe_archive(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.is_missing_volume
+    assert probe.missing_volume
 
 
 @pytest.mark.parametrize("password", [None, PASSWORD])
-def test_native_wrapper_handles_zip_sfx_split_health_password_and_resources(tmp_path, password):
+def test_native_wrapper_handles_zip_sfx_split_probe_password_and_resources(tmp_path, password):
     require_7z()
     case = ArchiveFixtureFactory().create(
         tmp_path,
@@ -194,15 +194,15 @@ def test_native_wrapper_handles_zip_sfx_split_health_password_and_resources(tmp_
     tester = get_native_password_tester()
     parts = _parts(case)
 
-    health = tester.check_archive_health(str(case.entry_path), part_paths=parts)
+    probe = tester.probe_archive(str(case.entry_path), part_paths=parts)
     if password:
-        assert health.is_encrypted
+        assert probe.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
         attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
         assert attempt.ok
         assert attempt.matched_index == 1
     else:
-        assert health.ok
+        assert probe.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
 
     analysis = tester.analyze_archive_resources(str(case.entry_path), password or "", part_paths=parts)
@@ -210,17 +210,15 @@ def test_native_wrapper_handles_zip_sfx_split_health_password_and_resources(tmp_
     assert analysis.file_count >= 1
 
 
-def test_native_wrapper_does_not_guess_zip_sfx_tail_from_equal_part_sizes(tmp_path):
+def test_native_wrapper_detects_zip_sfx_missing_tail_from_eocd_requirement(tmp_path):
     require_7z()
     case = ArchiveFixtureFactory().create(tmp_path, "native_zip_sfx_missing_tail", "zip", split=True, sfx=True)
     _remove_last_data_part(case)
 
-    health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
+    probe = get_native_password_tester().probe_archive(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.ok
-    assert not health.is_missing_volume
-    assert not health.is_missing_volume_suspected
-    assert not health.missing_volume_evidence
+    assert probe.missing_volume
+    assert probe.missing_volume_evidence == "zip_eocd_unavailable"
 
 
 def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):
@@ -242,15 +240,16 @@ def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):
     parts[-1].write_bytes(b"\0" * parts[-1].stat().st_size)
 
     tester = get_native_password_tester()
-    health = tester.check_archive_health(str(case.entry_path), part_paths=_parts(case))
+    probe = tester.probe_archive(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.ok
+    assert probe.missing_volume
+    assert probe.missing_volume_evidence == "zip_eocd_unavailable"
     full_test = tester.test_archive(str(case.entry_path), part_paths=_parts(case))
     assert full_test.checksum_error or not full_test.ok
 
 
 @pytest.mark.parametrize("password", [None, PASSWORD])
-def test_native_wrapper_handles_rar_sfx_split_health_password_and_resources(tmp_path, password):
+def test_native_wrapper_handles_rar_sfx_split_probe_password_and_resources(tmp_path, password):
     require_7z()
     if not get_optional_rar_sfx():
         pytest.skip("RAR SFX generator is not configured")
@@ -265,15 +264,15 @@ def test_native_wrapper_handles_rar_sfx_split_health_password_and_resources(tmp_
     tester = get_native_password_tester()
     parts = _parts(case)
 
-    health = tester.check_archive_health(str(case.entry_path), part_paths=parts)
+    probe = tester.probe_archive(str(case.entry_path), part_paths=parts)
     if password:
-        assert health.is_encrypted
+        assert probe.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
         attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
         assert attempt.ok
         assert attempt.matched_index == 1
     else:
-        assert health.ok
+        assert probe.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
 
     analysis = tester.analyze_archive_resources(str(case.entry_path), password or "", part_paths=parts)
@@ -289,9 +288,9 @@ def test_native_wrapper_detects_missing_rar_sfx_split_tail(tmp_path):
     parts = sorted(path for path in case.archive_dir.iterdir() if path.is_file())
     parts[-1].unlink()
 
-    health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
+    probe = get_native_password_tester().probe_archive(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.is_missing_volume
+    assert probe.missing_volume
 
 
 @pytest.mark.parametrize(

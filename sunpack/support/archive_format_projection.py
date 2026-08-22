@@ -242,6 +242,17 @@ def _dedup_zip_structure(structure: dict[str, Any]) -> dict[str, Any]:
         value = structure.get(key)
         if isinstance(value, dict) and value:
             output[key] = dict(value)
+    # Keep the bounded encryption fact at the format projection boundary.  It
+    # is structural routing data, not runtime payload verification, and must
+    # remain available after the ZIP graph is normalized.
+    for key in (
+        "password_required",
+        "password_state",
+        "central_directory_encrypted_entries",
+        "encryption_scan_complete",
+    ):
+        if key in structure:
+            output[key] = structure[key]
     return output
 
 

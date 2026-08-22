@@ -8,7 +8,7 @@ It provides SunPack's in-process archive inspection ABI and the out-of-process e
 
 - archive probe and test
 - password array attempts
-- health and resource analysis
+- open-only archive probing and resource analysis
 - archive CRC/state manifest collection
 - extraction from files, volume sets, file ranges, concatenated ranges and patch-plan inputs
 
@@ -49,8 +49,7 @@ The DLL exports a narrow C ABI including:
 
 - `sup7z_try_passwords`
 - `sup7z_test_archive`
-- `sup7z_probe_archive`
-- `sup7z_check_archive_health`
+- `sup7z_run_operation` (open probe, test, and password attempts)
 - `sup7z_analyze_archive_resources`
 - archive manifest and operation entry points
 

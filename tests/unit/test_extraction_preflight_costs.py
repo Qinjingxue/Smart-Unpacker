@@ -62,13 +62,9 @@ def test_validated_encrypted_rar_skips_empty_password_resource_analysis(tmp_path
 
     ResourcePreflightInspector(precise_resource_min_size_mb=0).inspect(task)
 
-    health = task.fact_bag.get("resource.health")
     analysis = task.fact_bag.get("resource.analysis")
-    assert health["is_archive"] is True
-    assert health["is_encrypted"] is True
-    assert health["is_broken"] is False
     assert analysis["is_encrypted"] is True
-    assert analysis["message"] == "encrypted RAR structure requires password resolution"
+    assert analysis["message"] == "archive structure requires password resolution"
 
 
 def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damage(tmp_path):
@@ -76,7 +72,14 @@ def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damag
     archive.write_bytes(b"dummy")
     output = tmp_path / "out"
     task = ArchiveTask(FactBag(), 1, main_path=str(archive), all_parts=[str(archive)], detected_ext=".zip")
-    task.fact_bag.set("resource.health", {"is_archive": True, "is_encrypted": True})
+    task.fact_bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
+    })
     worker_result = {
         "type": "result",
         "status": "failed",

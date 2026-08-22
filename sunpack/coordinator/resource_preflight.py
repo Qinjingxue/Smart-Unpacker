@@ -4,11 +4,11 @@ from types import SimpleNamespace
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from sunpack.passwords import PasswordSession
-from sunpack.passwords.resolver import rar_structure_requires_password
+from sunpack.passwords.resolver import archive_structure_password_state, archive_structure_requires_password
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 from sunpack.support import archive_knowledge_projection as knowledge_view
-from sunpack.support.sevenzip_bridge import cached_analyze_archive_resources, cached_check_archive_health
+from sunpack.support.sevenzip_bridge import cached_analyze_archive_resources
 
 
 class ResourcePreflightInspector:
@@ -24,14 +24,14 @@ class ResourcePreflightInspector:
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
         archive_size = self._archive_size(task)
-        if rar_structure_requires_password(task.fact_bag):
-            # A valid encrypted RAR main header is enough to route password
-            # resolution, but not enough to inspect the payload without a
-            # password.  Do not ask the empty-password resource backend to
-            # turn that expected condition into a damage verdict.
+        if archive_structure_requires_password(task.fact_bag):
+            # A validated format structure is enough to route password
+            # resolution, but not enough to inspect encrypted payload data
+            # without a password.  Keep resource estimation independent of a
+            # second backend pass.
             return self.record_estimated_profile(
                 task,
-                reason="encrypted RAR structure requires password resolution",
+                reason="archive structure requires password resolution",
                 archive_size=archive_size,
             )
         existing_analysis = knowledge_view.resource_analysis(task)
@@ -74,13 +74,12 @@ class ResourcePreflightInspector:
         archive_size: int | None = None,
         profile_suffix: str = "estimated",
     ) -> ArchiveTask:
-        self._ensure_resource_health(task)
         archive_size = self._archive_size(task) if archive_size is None else archive_size
         archive_type = self._archive_type_for(task)
         analysis = {
             "status": 0,
             "is_archive": True,
-            "is_encrypted": bool(knowledge_view.resource_health(task).get("is_encrypted")),
+            "is_encrypted": archive_structure_password_state(task.fact_bag) == "required",
             "is_broken": False,
             "solid": False,
             "item_count": 0,
@@ -112,43 +111,6 @@ class ResourcePreflightInspector:
             reason="estimated single-task resource profile",
             profile_suffix="estimated|single",
         )
-
-    def _ensure_resource_health(self, task: ArchiveTask) -> None:
-        if rar_structure_requires_password(task.fact_bag):
-            existing = knowledge_view.resource_health(task)
-            health_payload = {
-                **existing,
-                "is_archive": True,
-                "is_encrypted": True,
-                "is_wrong_password": bool(existing.get("is_wrong_password", False)),
-                "is_broken": False,
-                "archive_type": "rar",
-                "checksum_error": False,
-            }
-            task.fact_bag.set("resource.health", health_payload)
-            self._write_resource_payload(task, health=health_payload)
-            return
-        if knowledge_view.resource_health(task):
-            return
-        if self._needs_offset_detection(task):
-            return
-        try:
-            part_paths = (task.all_parts if task.all_parts and len(task.all_parts) > 1 else None) or None
-            health = cached_check_archive_health(task.main_path, part_paths=part_paths)
-            if not health.is_archive:
-                return
-            health_payload = {
-                "is_archive": health.is_archive,
-                "is_encrypted": health.is_encrypted,
-                "is_broken": health.is_broken,
-                "is_wrong_password": health.is_wrong_password,
-                "archive_type": health.archive_type,
-                "checksum_error": False,
-            }
-            task.fact_bag.set("resource.health", health_payload)
-            self._write_resource_payload(task, health=health_payload)
-        except Exception:
-            pass
 
     def _precise_resource_analysis(self, task: ArchiveTask, archive_size: int) -> dict | None:
         if archive_size < self.precise_resource_min_size_bytes:
@@ -206,10 +168,19 @@ class ResourcePreflightInspector:
         return task
 
     def _archive_type_for(self, task: ArchiveTask) -> str:
-        health = knowledge_view.resource_health(task)
-        archive_type = str(health.get("archive_type") or "").strip().lower()
-        if archive_type and archive_type != "pe":
+        archive_type = str(knowledge_view.selected_format(task) or "").strip().lower().lstrip(".")
+        if archive_type in {"seven_zip", "7zip"}:
+            archive_type = "7z"
+        if archive_type and archive_type not in {"pe", "unknown"}:
             return archive_type
+        try:
+            state_format = str(task.archive_state().format_hint or "").strip().lower().lstrip(".")
+        except (AttributeError, TypeError, ValueError):
+            state_format = ""
+        if state_format in {"seven_zip", "7zip"}:
+            state_format = "7z"
+        if state_format and state_format not in {"pe", "unknown"}:
+            return state_format
         detected_ext = str(knowledge_view.get(task, "filesystem.detected_ext", "") or os.path.splitext(task.main_path)[1]).lower()
         return detected_ext.lstrip(".") or archive_type or "unknown"
 
@@ -237,15 +208,12 @@ class ResourcePreflightInspector:
         self,
         task: ArchiveTask,
         *,
-        health: dict | None = None,
         analysis: dict | None = None,
         tokens: dict | None = None,
         token_cost: int | None = None,
         profile_key: str = "",
     ) -> None:
         knowledge = ensure_knowledge(task)
-        if health:
-            write_payload(knowledge, "resource.health", dict(health), source_layer="resource", source_module="preflight")
         if analysis:
             write_payload(knowledge, "resource.analysis", dict(analysis), source_layer="resource", source_module="preflight")
         if tokens:

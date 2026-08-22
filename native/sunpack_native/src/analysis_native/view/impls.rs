@@ -30,11 +30,12 @@ impl AnalysisBinaryView {
         central_directory_size: u64,
         total_entries: usize,
         max_entries: usize,
-    ) -> PyResult<(usize, bool, usize, bool, &'static str)> {
+    ) -> PyResult<(usize, bool, usize, bool, usize, &'static str)> {
         let mut cursor = physical_central_offset;
         let end = physical_central_offset + central_directory_size;
         let limit = total_entries.min(max_entries);
         let mut links_checked = 0usize;
+        let mut encrypted_entries = 0usize;
         for index in 0..limit {
             if cursor + 46 > end {
                 return Ok((
@@ -42,6 +43,7 @@ impl AnalysisBinaryView {
                     false,
                     links_checked,
                     false,
+                    encrypted_entries,
                     "central_directory_entry_out_of_range",
                 ));
             }
@@ -52,8 +54,12 @@ impl AnalysisBinaryView {
                     false,
                     links_checked,
                     false,
+                    encrypted_entries,
                     "bad_central_directory_entry_signature",
                 ));
+            }
+            if u16_le(&header, 8) & 0x0001 != 0 {
+                encrypted_entries += 1;
             }
             let filename_len = u16_le(&header, 28) as u64;
             let extra_len = u16_le(&header, 30) as u64;
@@ -66,6 +72,7 @@ impl AnalysisBinaryView {
                     false,
                     links_checked,
                     false,
+                    encrypted_entries,
                     "central_directory_variable_fields_out_of_range",
                 ));
             }
@@ -77,6 +84,7 @@ impl AnalysisBinaryView {
                         true,
                         links_checked,
                         false,
+                        encrypted_entries,
                         "local_header_link_mismatch",
                     ));
                 }
@@ -84,7 +92,7 @@ impl AnalysisBinaryView {
             }
             cursor += entry_size;
         }
-        Ok((limit, true, links_checked, true, ""))
+        Ok((limit, true, links_checked, true, encrypted_entries, ""))
     }
 
     fn zip_content_integrity_warning(

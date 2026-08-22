@@ -5,7 +5,6 @@ from sunpack.support.global_cache_manager import clear_cache_namespace
 def _clear_native_7z_caches():
     clear_cache_namespace("native_7z_probe")
     clear_cache_namespace("native_7z_test")
-    clear_cache_namespace("native_7z_health")
     clear_cache_namespace("native_7z_resources")
     clear_cache_namespace("native_7z_crc_manifest")
 
@@ -18,7 +17,6 @@ class FakeTester:
         self.probe_calls = 0
         self.probe_inputs = []
         self.test_calls = 0
-        self.health_calls = 0
         self.resource_calls = 0
         self.crc_manifest_calls = 0
 
@@ -44,20 +42,6 @@ class FakeTester:
             command_ok=True,
             encrypted=False,
             checksum_error=False,
-            archive_type="zip",
-            message="ok",
-        )
-
-    def check_archive_health(self, archive_path: str, password: str = "", part_paths=None):
-        self.health_calls += 1
-        return native.NativeArchiveHealth(
-            status=native.STATUS_OK,
-            is_archive=True,
-            is_encrypted=False,
-            is_broken=False,
-            is_missing_volume=False,
-            is_wrong_password=False,
-            operation_result=0,
             archive_type="zip",
             message="ok",
         )
@@ -211,20 +195,6 @@ def test_empty_password_test_uses_native_test_status(tmp_path, monkeypatch):
     assert test.status == native.STATUS_OK
     assert fake.probe_calls == 0
     assert fake.test_calls == 1
-    _clear_native_7z_caches()
-
-
-def test_archive_health_cache_reuses_result_for_unchanged_file(tmp_path, monkeypatch):
-    fake = _install_fake_tester(monkeypatch)
-    archive = tmp_path / "sample.zip"
-    archive.write_bytes(b"PK")
-
-    first = native.cached_check_archive_health(str(archive))
-    second = native.cached_check_archive_health(str(archive))
-
-    assert first.ok
-    assert second.ok
-    assert fake.health_calls == 1
     _clear_native_7z_caches()
 
 

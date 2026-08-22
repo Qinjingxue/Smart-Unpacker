@@ -14,7 +14,7 @@ from sunpack.detection.pipeline.processors.modules.format_structure.multi_volume
     schemas={
         "7z.structure": {
             "type": "dict",
-            "description": "7z signature, version, start-header CRC, next-header range, CRC, and first-NID checks.",
+            "description": "7z signature, header CRC/range/NID checks, and bounded payload/header encryption state.",
         },
     },
 )

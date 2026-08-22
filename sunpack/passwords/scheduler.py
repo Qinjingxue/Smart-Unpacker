@@ -76,7 +76,11 @@ class PasswordScheduler:
     def run(self, job: PasswordJob) -> PasswordSearchResult:
         started_at = time.monotonic()
         self._emit_progress(job, PasswordProgressEvent(stage="started"))
-        fingerprint = job.fingerprint or build_archive_fingerprint(job.archive_path, job.part_paths)
+        fingerprint = job.fingerprint or build_archive_fingerprint(
+            job.archive_path,
+            job.part_paths,
+            archive_input=job.archive_input,
+        )
         cached_success = self.cache.get_success(fingerprint.key)
         if cached_success is not None:
             result = PasswordSearchResult(password=cached_success, status=PasswordSearchStatus.FOUND, attempts=0, stopped_reason="cache_hit")
@@ -157,7 +161,11 @@ class PasswordScheduler:
         """
         started_at = time.monotonic()
         self._emit_progress(job, PasswordProgressEvent(stage="started"))
-        fingerprint = job.fingerprint or build_archive_fingerprint(job.archive_path, job.part_paths)
+        fingerprint = job.fingerprint or build_archive_fingerprint(
+            job.archive_path,
+            job.part_paths,
+            archive_input=job.archive_input,
+        )
         cached_success = self.cache.get_success(fingerprint.key)
         if cached_success is not None:
             result = PasswordSearchResult(

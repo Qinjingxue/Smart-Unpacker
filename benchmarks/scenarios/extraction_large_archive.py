@@ -384,7 +384,7 @@ class RequestRuntimeProfiler:
         _wrap(output_scan, "_is_within_root", timings, "output_inventory_path_check")
         _wrap(output_scan, "take_scan_session", timings, "output_take_scan_session")
 
-        _wrap(extractor, "inspect", timings, "health_password_preflight")
+        _wrap(extractor, "inspect", timings, "password_preflight")
         _wrap(extractor, "extract", timings, "extract_total_legacy", phase_timer=phase)
         _wrap(extractor, "extract_asyncio", timings, "extract_total", phase_timer=phase)
         _wrap(extractor, "close", timings, "extractor_close")

@@ -375,6 +375,10 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         "central_directory_present": False,
         "central_directory_walk_ok": False,
         "central_directory_entries_checked": 0,
+        "central_directory_encrypted_entries": 0,
+        "password_required": False,
+        "password_state": "unknown",
+        "encryption_scan_complete": False,
         "local_header_links_ok": False,
         "local_header_links_checked": 0,
     })
@@ -481,6 +485,8 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
             "plausible": True,
             "central_directory_walk_ok": True,
             "local_header_links_ok": True,
+            "password_state": "not_required",
+            "encryption_scan_complete": True,
             "error": "",
             "evidence": ["zip:eocd"] + (["zip:zip64"] if zip64 is not None else []),
         })
@@ -489,17 +495,28 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         result["error"] = "bad_central_directory_signature"
         return result
     result["central_directory_present"] = True
-    entries, cd_ok, links, links_ok, error = _walk_zip_cd(
+    entries, cd_ok, links, links_ok, encrypted_entries, error = _walk_zip_cd(
         view, archive_offset, physical_cd, cd_size, total_entries,
         max_cd_entries_to_walk, spanned=spanned,
     )
     result.update({
         "central_directory_entries_checked": entries,
+        "central_directory_encrypted_entries": encrypted_entries,
         "central_directory_walk_ok": cd_ok,
         "local_header_links_checked": links,
         "local_header_links_ok": links_ok,
         "error": error,
     })
+    encryption_scan_complete = not error and cd_ok and entries == total_entries
+    result["password_required"] = encrypted_entries > 0
+    result["encryption_scan_complete"] = encryption_scan_complete
+    result["password_state"] = (
+        "required"
+        if encrypted_entries > 0
+        else "not_required"
+        if encryption_scan_complete
+        else "unknown"
+    )
     if not error:
         result["plausible"] = True
         result["evidence"] = ["zip:eocd", "zip:central_directory", "zip:central_directory_walk", "zip:local_header_links"]
@@ -515,10 +532,13 @@ def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_
     end = cd_offset + cd_size
     limit = min(total_entries, max_entries)
     links_checked = 0
+    encrypted_entries = 0
     for index in range(limit):
         header = view.read_at(cursor, 46)
         if len(header) < 46 or header[:4] != b"PK\x01\x02":
-            return index, False, links_checked, False, "bad_central_directory_entry_signature"
+            return index, False, links_checked, False, encrypted_entries, "bad_central_directory_entry_signature"
+        if _u16(header, 8) & 0x0001:
+            encrypted_entries += 1
         filename_len = _u16(header, 28)
         extra_len = _u16(header, 30)
         comment_len = _u16(header, 32)
@@ -526,11 +546,11 @@ def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_
         local_header_offset = _u32(header, 42)
         entry_size = 46 + filename_len + extra_len + comment_len
         if cursor + entry_size > end:
-            return index, False, links_checked, False, "central_directory_variable_fields_out_of_range"
+            return index, False, links_checked, False, encrypted_entries, "central_directory_variable_fields_out_of_range"
         extra = view.read_at(cursor + 46 + filename_len, extra_len)
         resolved = _resolve_zip64_central_fields(header, extra)
         if resolved is None:
-            return index + 1, True, links_checked, False, "zip64_extra_missing_or_invalid"
+            return index + 1, True, links_checked, False, encrypted_entries, "zip64_extra_missing_or_invalid"
         local_header_offset = resolved["local_header_offset"]
         disk_start = resolved["disk_start"]
         if spanned:
@@ -539,10 +559,10 @@ def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_
         else:
             local_logical = archive_offset + local_header_offset
         if local_logical is None or view.read_at(local_logical, 4) != b"PK\x03\x04":
-            return index + 1, True, links_checked, False, "local_header_link_mismatch"
+            return index + 1, True, links_checked, False, encrypted_entries, "local_header_link_mismatch"
         links_checked += 1
         cursor += entry_size
-    return limit, True, links_checked, True, ""
+    return limit, True, links_checked, True, encrypted_entries, ""
 
 
 def _read_zip64_tail(view, eocd_offset: int) -> dict | None:
@@ -660,6 +680,11 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
         "next_header_crc_ok": False,
         "next_header_nid": 0,
         "next_header_nid_valid": False,
+        "password_required": False,
+        "encrypted_header": False,
+        "encrypted_payload": False,
+        "password_state": "unknown",
+        "encryption_scan_complete": False,
     })
     header = view.read_at(start_offset, 32)
     if header[:6] != b"7z\xbc\xaf\x27\x1c":
@@ -701,6 +726,20 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
         if crc_ok:
             result["evidence"].append("7z:next_header_crc")
             if nid_valid:
+                aes_method = b"\x06\xf1\x07\x01"
+                encrypted = aes_method in next_header
+                scan_complete = nid != 0x17
+                result.update({
+                    "password_required": encrypted,
+                    "encrypted_header": encrypted and nid == 0x17,
+                    "encrypted_payload": encrypted and nid == 0x01,
+                    "password_state": (
+                        "required"
+                        if encrypted
+                        else "not_required" if scan_complete else "unknown"
+                    ),
+                    "encryption_scan_complete": scan_complete,
+                })
                 result["strong_accept"] = True
                 result["evidence"].append("7z:next_header_nid")
             else:

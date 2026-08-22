@@ -1,3 +1,4 @@
+import os
 from typing import List
 
 from sunpack.contracts.detection import FactBag
@@ -24,6 +25,17 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("candidate.carrier_path", carrier_path)
     bag.set("candidate.companion_paths", list(group.companion_paths or []))
     bag.set("candidate.cleanup_paths", cleanup_paths)
+    # A split SFX launcher is a companion to the real archive volumes, not
+    # part of the archive input.  Preserve that carrier identity before
+    # format prechecks run; the ordinary offset-zero format probe must be
+    # allowed to accept the data volumes without entering embedded scanning.
+    if (
+        group.companion_paths
+        and os.path.splitext(carrier_path)[1].casefold() == ".exe"
+        and os.path.normcase(os.path.abspath(carrier_path))
+        != os.path.normcase(os.path.abspath(group.head_path))
+    ):
+        bag.set("file.container_type", "pe")
     single_incomplete_volume = group.split_group_complete is False and len(group.split_volumes) == 1
     if group.split_volumes and not single_incomplete_volume:
         format_hint = _split_format_hint(

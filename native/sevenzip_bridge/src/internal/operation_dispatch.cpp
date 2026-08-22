@@ -56,13 +56,22 @@ ArchiveOperationResult from_password_result(const ArchiveOperationRequest& reque
     ArchiveOperationResult output;
     output.status = result.status;
     output.command_ok = result.status == PasswordTestStatus::Ok;
+    output.is_archive = result.is_archive;
     output.is_encrypted = result.status == PasswordTestStatus::WrongPassword;
-    output.is_broken = result.status == PasswordTestStatus::Damaged;
-    output.checksum_error = result.status == PasswordTestStatus::Damaged;
+    output.password_required = result.password_required;
+    output.is_encrypted = output.is_encrypted || result.encrypted;
+    output.is_broken = result.damaged || result.status == PasswordTestStatus::Damaged || result.missing_volume || result.missing_stub || result.volume_open_failed;
+    output.checksum_error = result.damaged || result.status == PasswordTestStatus::Damaged;
+    output.missing_volume = result.missing_volume;
+    output.missing_volume_suspected = result.missing_volume_suspected;
+    output.missing_stub = result.missing_stub;
+    output.volume_open_failed = result.volume_open_failed;
     output.matched_index = result.matched_index;
     output.attempts = result.attempts;
     output.archive_offset = result.archive_offset;
     output.archive_type = operation_archive_type(request, result);
+    output.missing_volume_name = result.missing_volume_name;
+    output.missing_volume_evidence = result.missing_volume_evidence;
     output.item_count = result.status == PasswordTestStatus::Ok ? 1 : 0;
     output.operation_result = result.operation_result;
     output.message = result.message;
@@ -110,6 +119,35 @@ PasswordTestResult run_single_test(const ArchiveOperationRequest& request) {
 }
 
 ArchiveOperationResult run_probe(const ArchiveOperationRequest& request) {
+    if (request.ranges.empty()) {
+        const auto open_probe = probe_archive_open_with_parts(
+            request.seven_zip_dll_path,
+            request.archive_path,
+            effective_parts(request),
+            L"");
+        ArchiveOperationResult output;
+        output.status = open_probe.status;
+        output.command_ok = open_probe.status == PasswordTestStatus::Ok;
+        output.is_archive = open_probe.is_archive;
+        output.is_encrypted = open_probe.encrypted;
+        output.password_required = open_probe.password_required;
+        output.is_broken = open_probe.damaged || open_probe.missing_volume || open_probe.missing_stub || open_probe.volume_open_failed;
+        output.checksum_error = open_probe.damaged;
+        output.missing_volume = open_probe.missing_volume;
+        output.missing_volume_suspected = open_probe.missing_volume_suspected;
+        output.missing_stub = open_probe.missing_stub;
+        output.volume_open_failed = open_probe.volume_open_failed;
+        output.archive_offset = open_probe.archive_offset;
+        output.archive_type = open_probe.archive_type.empty()
+            ? archive_type_for_path(request.archive_path)
+            : open_probe.archive_type;
+        output.missing_volume_name = open_probe.missing_volume_name;
+        output.missing_volume_evidence = open_probe.missing_volume_evidence;
+        output.item_count = open_probe.status == PasswordTestStatus::Ok ? 1 : 0;
+        output.operation_result = open_probe.operation_result;
+        output.message = open_probe.message;
+        return output;
+    }
     ArchiveOperationRequest probe_request = request;
     probe_request.password.clear();
     probe_request.passwords.clear();
@@ -125,6 +163,7 @@ ArchiveOperationResult run_probe(const ArchiveOperationRequest& request) {
         damaged_result ||
         is_archive_type(type);
     output.is_encrypted = encrypted_result;
+    output.password_required = result.password_required || encrypted_result;
     output.is_broken = damaged_result;
     output.checksum_error = damaged_result;
     output.item_count = result.status == PasswordTestStatus::Ok ? 1 : 0;
@@ -144,7 +183,7 @@ ArchiveOperationResult run_archive_operation(const ArchiveOperationRequest& requ
     if (request.seven_zip_dll_path.empty() || request.archive_path.empty()) {
         return invalid_request("missing required path");
     }
-    if (request.part_paths.size() > 1) {
+    if (request.part_paths.size() > 1 && request.operation != SUP7Z_OPERATION_PROBE) {
         if (request.canonical_names.size() != request.part_paths.size() || request.volume_numbers.size() != request.part_paths.size()) {
             return invalid_request("structured multi-volume input is required");
         }

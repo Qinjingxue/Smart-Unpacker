@@ -17,7 +17,7 @@ from sunpack.extraction.progress import has_recoverable_partial_outputs, write_e
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.passwords.internal.local_files import directory_password_context_from_task
-from sunpack.passwords.resolver import rar_structure_requires_password
+from sunpack.passwords.resolver import archive_structure_requires_password
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_input_projection import write_source_password_probe_input
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
@@ -570,10 +570,7 @@ class SingleArchiveExtractor:
 
     @staticmethod
     def _task_requires_password(task: ArchiveTask) -> bool:
-        health = knowledge_view.resource_health(task)
-        if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
-            return True
-        return rar_structure_requires_password(task.fact_bag)
+        return archive_structure_requires_password(task.fact_bag)
 
     def _password_store_has_candidates(self, directory_passwords: list[str]) -> bool:
         try:
@@ -875,7 +872,7 @@ class SingleArchiveExtractor:
             saved_archive_facts = {
                 key: value
                 for key, value in task.fact_bag.to_dict().items()
-                if key.startswith("archive.") or key == "resource.health"
+                if key.startswith("archive.")
             }
         segment_results: list[dict[str, Any]] = []
         embedded_results: list[tuple[dict[str, Any], ExtractionResult]] = []
@@ -1093,7 +1090,7 @@ class SingleArchiveExtractor:
     def _restore_archive_facts(task: ArchiveTask, saved: dict[str, Any]) -> None:
         current_keys = [
             key for key in task.fact_bag.to_dict()
-            if key.startswith("archive.") or key == "resource.health"
+            if key.startswith("archive.")
         ]
         for key in current_keys:
             task.fact_bag.unset(key)

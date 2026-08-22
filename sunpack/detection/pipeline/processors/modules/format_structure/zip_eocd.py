@@ -26,7 +26,7 @@ def inspect_zip_eocd_structure(
     schemas={
         "zip.eocd_structure": {
             "type": "dict",
-            "description": "ZIP EOCD and central directory structure check derived from the candidate file.",
+            "description": "ZIP EOCD/central-directory structure and bounded encryption state derived from the candidate file.",
         },
     },
 )

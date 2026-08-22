@@ -282,7 +282,6 @@ def _task_and_result(tmp_path):
     bag = FactBag()
     task = ArchiveTask(fact_bag=bag, score=10, key="sample-key", main_path=str(archive), all_parts=[str(archive)])
     knowledge = task.knowledge()
-    knowledge.set("resource.health", {"is_archive": True}, source_layer="test", source_module="fixture")
     knowledge.set("resource.analysis", {"file_count": 1, "total_unpacked_size": 5}, source_layer="test", source_module="fixture")
     task.set_knowledge(knowledge)
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])

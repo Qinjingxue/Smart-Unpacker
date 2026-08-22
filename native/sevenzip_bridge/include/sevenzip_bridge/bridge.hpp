@@ -23,11 +23,22 @@ enum class PasswordTestStatus {
 struct PasswordTestResult {
     PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
     bool backend_available = false;
+    bool is_archive = false;
+    bool encrypted = false;
+    bool password_required = false;
+    bool missing_volume = false;
+    bool missing_volume_suspected = false;
+    bool missing_stub = false;
+    bool volume_open_failed = false;
+    bool wrong_password = false;
+    bool damaged = false;
     int matched_index = -1;
     int attempts = 0;
     unsigned long long archive_offset = 0;
     int operation_result = 0;
     std::wstring archive_type;
+    std::wstring missing_volume_name;
+    std::string missing_volume_evidence;
     std::string message;
 };
 
@@ -344,46 +355,6 @@ SUP7Z_API int sup7z_test_archive_with_parts(
     int message_chars
 );
 
-SUP7Z_API int sup7z_probe_archive(
-    const wchar_t* seven_zip_dll_path,
-    const wchar_t* archive_path,
-    int* is_archive,
-    int* is_encrypted,
-    int* is_broken,
-    int* checksum_error,
-    unsigned long long* offset,
-    int* item_count,
-    wchar_t* archive_type,
-    int archive_type_chars,
-    wchar_t* message,
-    int message_chars
-);
-
-struct Sup7zArchiveHealth {
-    int status;
-    int is_archive;
-    int is_encrypted;
-    int is_broken;
-    int is_missing_volume;
-    int is_wrong_password;
-    int operation_result;
-    wchar_t archive_type[32];
-};
-
-struct Sup7zArchiveHealthV2 {
-    int status;
-    int is_archive;
-    int is_encrypted;
-    int is_broken;
-    int is_missing_volume;
-    int is_wrong_password;
-    int operation_result;
-    wchar_t archive_type[32];
-    int is_missing_volume_suspected;
-    wchar_t missing_volume_name[260];
-    wchar_t missing_volume_evidence[64];
-};
-
 struct Sup7zArchiveResourceAnalysis {
     int status;
     int is_archive;
@@ -443,44 +414,20 @@ struct Sup7zOperationResult {
     unsigned long long archive_offset;
     int item_count;
     int operation_result;
+    int password_required;
+    int missing_volume;
+    int missing_volume_suspected;
+    int missing_stub;
+    int volume_open_failed;
     wchar_t archive_type[64];
+    wchar_t missing_volume_name[260];
+    wchar_t missing_volume_evidence[64];
     wchar_t message[512];
 };
 
 SUP7Z_API int sup7z_run_operation(
     const Sup7zOperationRequest* request,
     Sup7zOperationResult* result
-);
-
-SUP7Z_API int sup7z_check_archive_health(
-    const wchar_t* seven_zip_dll_path,
-    const wchar_t* archive_path,
-    const wchar_t* password,
-    Sup7zArchiveHealth* health,
-    wchar_t* message,
-    int message_chars
-);
-
-SUP7Z_API int sup7z_check_archive_health_with_parts(
-    const wchar_t* seven_zip_dll_path,
-    const wchar_t* archive_path,
-    const wchar_t* const* part_paths,
-    int part_count,
-    const wchar_t* password,
-    Sup7zArchiveHealth* health,
-    wchar_t* message,
-    int message_chars
-);
-
-SUP7Z_API int sup7z_check_archive_health_with_parts_v2(
-    const wchar_t* seven_zip_dll_path,
-    const wchar_t* archive_path,
-    const wchar_t* const* part_paths,
-    int part_count,
-    const wchar_t* password,
-    Sup7zArchiveHealthV2* health,
-    wchar_t* message,
-    int message_chars
 );
 
 SUP7Z_API int sup7z_analyze_archive_resources(

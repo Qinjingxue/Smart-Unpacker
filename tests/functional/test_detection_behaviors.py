@@ -278,7 +278,7 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertEqual(bag.get("file.container_type"), "pe")
         self.assertEqual(bag.get("file.probe_offset"), 434176)
 
-    def test_runtime_executable_guard_precedes_internal_zip_identity(self):
+    def test_offset_zero_zip_identity_precedes_recursive_embedded_scan(self):
         bag = FactBag()
         bag.set("file.path", "application.exe")
         bag.set("candidate.entry_path", "application.exe")
@@ -305,9 +305,9 @@ class DetectionBehaviorTests(unittest.TestCase):
 
         decision = DetectionScheduler(config).evaluate_bag(bag)
 
-        self.assertFalse(decision.should_extract)
-        self.assertEqual(decision.deciding_rule, "embedded_payload_identity")
-        self.assertIn("par_packer", decision.stop_reason)
+        self.assertTrue(decision.should_extract)
+        self.assertEqual(decision.deciding_rule, "zip_structure_accept")
+        self.assertNotIn("par_packer", decision.stop_reason)
 
 
 if __name__ == "__main__":

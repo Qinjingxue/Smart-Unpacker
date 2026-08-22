@@ -307,6 +307,85 @@ fn parse_seven_zip_encoded_header_ast(
     })
 }
 
+pub(crate) struct SevenZipEncryptionFacts {
+    pub(crate) password_required: bool,
+    pub(crate) encrypted_header: bool,
+    pub(crate) encrypted_payload: bool,
+    pub(crate) scan_complete: bool,
+}
+
+pub(crate) fn seven_zip_encryption_facts_from_next_header(
+    raw: &[u8],
+) -> SevenZipEncryptionFacts {
+    let Some(&next_header_nid) = raw.first() else {
+        return SevenZipEncryptionFacts {
+            password_required: false,
+            encrypted_header: false,
+            encrypted_payload: false,
+            scan_complete: false,
+        };
+    };
+    let header = SevenZipHeader {
+        archive_end: raw.len(),
+        start_header: [0; 20],
+        next_header_start: 0,
+        next_header_offset: 0,
+        next_header_size: raw.len() as u64,
+        next_header_nid,
+        stored_start_crc: 0,
+        computed_start_crc: 0,
+        stored_next_header_crc: 0,
+        computed_next_header_crc: 0,
+        next_header_nid_valid: matches!(next_header_nid, SZ_HEADER | SZ_ENCODED_HEADER),
+    };
+    let ast = if next_header_nid == SZ_ENCODED_HEADER {
+        parse_seven_zip_encoded_header_ast(raw, &header)
+    } else if next_header_nid == SZ_HEADER {
+        parse_seven_zip_header_ast(raw, &header)
+    } else {
+        return SevenZipEncryptionFacts {
+            password_required: false,
+            encrypted_header: false,
+            encrypted_payload: false,
+            scan_complete: false,
+        };
+    };
+    let Ok(ast) = ast else {
+        return SevenZipEncryptionFacts {
+            password_required: false,
+            encrypted_header: false,
+            encrypted_payload: false,
+            scan_complete: false,
+        };
+    };
+    let encrypted = ast
+        .unpack_info
+        .as_ref()
+        .is_some_and(|unpack| {
+            unpack.folders.iter().any(|folder| {
+                folder
+                    .coders
+                    .iter()
+                    .any(|coder| coder.method_id.as_slice() == [0x06, 0xf1, 0x07, 0x01])
+            })
+        });
+    let encrypted_header = next_header_nid == SZ_ENCODED_HEADER && encrypted;
+    let encrypted_payload = next_header_nid == SZ_HEADER && encrypted;
+    // A plaintext EncodedHeader is only a wrapper around the packed metadata.
+    // For data-only encryption (`-p`, without `-mhe`) the AES coder lives in
+    // that packed metadata and cannot be inspected without the password.  It
+    // is therefore not a proof of an unencrypted archive.  Keep the state
+    // unknown so the password resolver can run its bounded verifier/final
+    // extraction confirmation instead of short-circuiting to empty password.
+    let scan_complete = next_header_nid != SZ_ENCODED_HEADER;
+    SevenZipEncryptionFacts {
+        password_required: encrypted_header || encrypted_payload,
+        encrypted_header,
+        encrypted_payload,
+        scan_complete: ast.diagnostics.is_empty() && scan_complete,
+    }
+}
+
 fn parse_seven_zip_streams_info(data: &[u8], pos: &mut usize) -> SevenZipStreamsInfoAst {
     let mut pack_info = None;
     let mut unpack_info = None;

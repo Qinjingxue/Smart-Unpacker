@@ -237,7 +237,6 @@ def test_verification_coverage_merge_does_not_let_weak_sources_veto_worker_manif
         output_dir=str(out_dir),
         password=None,
         fact_bag=task.fact_bag,
-        health={},
         analysis={"status": "damaged", "expected_names_source": "damaged_scan"},
         progress_manifest=None,
     )

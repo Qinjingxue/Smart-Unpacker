@@ -99,7 +99,7 @@ struct SevenZipPasswordStatus {
     message: Option<String>,
 }
 
-fn seven_zip_password_status(data: &[u8], _password: Option<&str>) -> SevenZipPasswordStatus {
+fn seven_zip_password_status(data: &[u8], password: Option<&str>) -> SevenZipPasswordStatus {
     if !data.starts_with(SEVEN_Z_MAGIC) {
         return SevenZipPasswordStatus {
             archive_readable: false,
@@ -109,12 +109,32 @@ fn seven_zip_password_status(data: &[u8], _password: Option<&str>) -> SevenZipPa
             message: None,
         };
     }
+    let Some(header) = parse_seven_zip_header(data, 0) else {
+        return SevenZipPasswordStatus {
+            archive_readable: false,
+            password_required: false,
+            password_rejected: false,
+            encrypted_header: false,
+            message: None,
+        };
+    };
+    let facts = seven_zip_encryption_facts_from_next_header(
+        data.get(header.next_header_start..header.archive_end)
+            .unwrap_or(&[]),
+    );
+    let password_rejected = facts.password_required && password.is_some();
     SevenZipPasswordStatus {
-        archive_readable: false,
-        password_required: false,
-        password_rejected: false,
-        encrypted_header: false,
-        message: None,
+        archive_readable: facts.scan_complete && !facts.password_required,
+        password_required: facts.password_required,
+        password_rejected,
+        encrypted_header: facts.encrypted_header,
+        message: facts.password_required.then(|| {
+            if password.is_some() {
+                "7z encrypted header or payload requires password verification".to_string()
+            } else {
+                "7z encrypted header or payload requires a password".to_string()
+            }
+        }),
     }
 }
 

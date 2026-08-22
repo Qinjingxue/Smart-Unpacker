@@ -162,12 +162,15 @@ def test_password_resolver_records_archive_password_in_session():
     assert session.get_resolved("archive-key") == "secret"
 
 
-def test_password_resolver_trusts_unencrypted_resource_health_without_retesting():
+def test_password_resolver_trusts_validated_unencrypted_structure_without_retesting():
     bag = FactBag()
-    bag.set("resource.health", {
-        "is_archive": True,
-        "is_encrypted": False,
-        "is_wrong_password": False,
+    bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 0,
+        "encryption_scan_complete": True,
+        "password_required": False,
     })
     tester = FakePasswordTester()
     session = PasswordSession()
@@ -183,12 +186,15 @@ def test_password_resolver_trusts_unencrypted_resource_health_without_retesting(
     assert result.archive_key == "archive-key"
 
 
-def test_password_resolver_trusts_encrypted_resource_health_without_empty_password_test():
+def test_password_resolver_trusts_validated_encrypted_structure_without_empty_password_test():
     bag = FactBag()
-    bag.set("resource.health", {
-        "is_archive": True,
-        "is_encrypted": True,
-        "is_wrong_password": False,
+    bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
     })
     tester = FakePasswordTester()
     session = PasswordSession()
@@ -222,12 +228,37 @@ def test_password_resolver_uses_validated_rar_structure_password_marker():
     assert tester.search_calls == 1
 
 
+def test_password_resolver_uses_validated_seven_zip_encryption_fact():
+    bag = FactBag()
+    bag.set("7z.structure", {
+        "plausible": True,
+        "strong_accept": True,
+        "next_header_crc_ok": True,
+        "next_header_nid_valid": True,
+        "password_required": True,
+        "encrypted_header": True,
+        "encryption_scan_complete": True,
+    })
+    tester = FakePasswordTester()
+    resolver = PasswordResolver(tester, PasswordSession())
+
+    result = resolver.resolve("sample.7z", fact_bag=bag, archive_key="archive-key")
+
+    assert result.password == "secret"
+    assert result.encrypted is True
+    assert tester.test_without_password_calls == 0
+    assert tester.search_calls == 1
+
+
 def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted_search():
     bag = FactBag()
-    bag.set("resource.health", {
-        "is_archive": True,
-        "is_encrypted": True,
-        "is_wrong_password": False,
+    bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
     })
     tester = FakeFailingPasswordTester()
     session = PasswordSession()
@@ -243,10 +274,13 @@ def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted
 
 def test_password_resolver_preserves_fast_damage_result_without_full_retest():
     bag = FactBag()
-    bag.set("resource.health", {
-        "is_archive": True,
-        "is_encrypted": True,
-        "is_wrong_password": False,
+    bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 1,
+        "encryption_scan_complete": True,
+        "password_required": True,
     })
     tester = FakeDamagedPasswordTester()
     session = PasswordSession()
@@ -321,6 +355,41 @@ def test_password_resolver_probes_empty_first_for_unknown_embedded_range():
 
     assert scheduler.planned == []
     assert result.candidate_passwords == ("", "wrong-password")
+
+
+def test_password_resolver_scopes_structure_facts_to_active_embedded_format():
+    tester = FakePasswordTester()
+    scheduler = QueuePasswordScheduler()
+    resolver = PasswordResolver(tester, PasswordSession(), scheduler)
+    bag = FactBag()
+    bag.set("zip.eocd_structure", {
+        "plausible": True,
+        "central_directory_present": True,
+        "central_directory_walk_ok": True,
+        "central_directory_encrypted_entries": 2,
+        "encryption_scan_complete": True,
+        "password_required": True,
+    })
+    bag.set("archive.knowledge", {
+        "source": {
+            "password_probe_input": {
+                "kind": "archive_input",
+                "entry_path": "carrier.bin",
+                "open_mode": "file_range",
+                "format_hint": "tar",
+                "parts": [{"path": "carrier.bin", "start": 100, "end": 200}],
+            },
+        },
+    })
+
+    result = resolver.resolve("carrier.bin", fact_bag=bag, archive_key="carrier#tar")
+
+    # The carrier's encrypted ZIP fact belongs to a different logical range;
+    # the active TAR segment remains unknown and must use empty-password-first
+    # extraction confirmation.
+    assert result.candidate_passwords == ("", "secret", "fallback")
+    assert result.candidate_evidence == "embedded_unknown_encryption"
+    assert scheduler.planned == []
 
 
 def test_password_resolver_preserves_candidate_evidence_across_batch_confirmation():

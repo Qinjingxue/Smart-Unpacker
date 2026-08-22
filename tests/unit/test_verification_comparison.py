@@ -122,7 +122,7 @@ def test_verification_tiebreak_prefers_better_content_integrity_when_completenes
     assert ranked[0][1].rank_vector["content_integrity_rank"] > ranked[1][1].rank_vector["content_integrity_rank"]
 
 
-def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_archive_health():
+def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_archive_integrity():
     incumbent = _attempt(
         "incumbent-output",
         status=ASSESSMENT_PARTIAL,

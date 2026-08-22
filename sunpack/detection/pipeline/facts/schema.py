@@ -159,8 +159,8 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.container_type": {
         "type": "str",
-        "producer": "rules.precheck.embedded_payload_identity",
-        "description": "Executable carrier type established by embedded-payload precheck.",
+        "producer": "relations.group_builder",
+        "description": "Executable carrier type established for a structurally attached SFX launcher.",
     },
     "file.probe_detected_archive": {
         "type": "bool",
@@ -205,7 +205,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     "zip.eocd_structure": {
         "type": "dict",
         "producer": "processors.zip_eocd_structure",
-        "description": "ZIP EOCD and central directory structure check derived from the candidate file.",
+        "description": "ZIP EOCD/central-directory structure and bounded encryption state derived from the candidate file.",
     },
     "relation.split_group_status": {
         "type": "str",
@@ -260,7 +260,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     "7z.structure": {
         "type": "dict",
         "producer": "processors.seven_zip_structure",
-        "description": "7z signature, version, start-header CRC, next-header range, CRC, and first-NID checks.",
+        "description": "7z signature, header CRC/range/NID checks, and bounded payload/header encryption state.",
     },
     "rar.structure": {
         "type": "dict",

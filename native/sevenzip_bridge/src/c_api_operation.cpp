@@ -27,7 +27,14 @@ void init_result(Sup7zOperationResult* result) {
     result->archive_offset = 0;
     result->item_count = 0;
     result->operation_result = 0;
+    result->password_required = 0;
+    result->missing_volume = 0;
+    result->missing_volume_suspected = 0;
+    result->missing_stub = 0;
+    result->volume_open_failed = 0;
     result->archive_type[0] = L'\0';
+    result->missing_volume_name[0] = L'\0';
+    result->missing_volume_evidence[0] = L'\0';
     result->message[0] = L'\0';
 }
 
@@ -105,7 +112,17 @@ void copy_result(const ArchiveOperationResult& source, Sup7zOperationResult* des
     destination->archive_offset = source.archive_offset;
     destination->item_count = source.item_count;
     destination->operation_result = source.operation_result;
+    destination->password_required = source.password_required ? 1 : 0;
+    destination->missing_volume = source.missing_volume ? 1 : 0;
+    destination->missing_volume_suspected = source.missing_volume_suspected ? 1 : 0;
+    destination->missing_stub = source.missing_stub ? 1 : 0;
+    destination->volume_open_failed = source.volume_open_failed ? 1 : 0;
     sunpack::sevenzip::capi::copy_wide(destination->archive_type, 64, source.archive_type);
+    sunpack::sevenzip::capi::copy_wide(destination->missing_volume_name, 260, source.missing_volume_name);
+    sunpack::sevenzip::capi::copy_wide(
+        destination->missing_volume_evidence,
+        64,
+        std::wstring(source.missing_volume_evidence.begin(), source.missing_volume_evidence.end()));
     sunpack::sevenzip::capi::copy_message(destination->message, 512, source.message);
 }
 

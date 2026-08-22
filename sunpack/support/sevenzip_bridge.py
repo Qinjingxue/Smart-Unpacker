@@ -57,26 +57,24 @@ class NativeArchiveProbe:
     item_count: int
     archive_type: str
     message: str
-
-
-@dataclass(frozen=True)
-class NativeArchiveHealth:
-    status: int
-    is_archive: bool
-    is_encrypted: bool
-    is_broken: bool
-    is_missing_volume: bool
-    is_wrong_password: bool
-    operation_result: int
-    archive_type: str
-    message: str
-    is_missing_volume_suspected: bool = False
+    password_required: bool = False
+    missing_volume: bool = False
+    missing_volume_suspected: bool = False
+    missing_stub: bool = False
+    volume_open_failed: bool = False
     missing_volume_name: str = ""
     missing_volume_evidence: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.status == STATUS_OK and self.is_archive and not self.is_broken and not self.is_missing_volume
+        return (
+            self.status == STATUS_OK
+            and self.is_archive
+            and not self.is_broken
+            and not self.missing_volume
+            and not self.missing_stub
+            and not self.volume_open_failed
+        )
 
 
 @dataclass(frozen=True)
@@ -118,35 +116,6 @@ class NativeArchiveCrcManifest:
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.is_archive and not self.damaged and not self.checksum_error
-
-
-class _Sup7zArchiveHealth(ctypes.Structure):
-    _fields_ = [
-        ("status", ctypes.c_int),
-        ("is_archive", ctypes.c_int),
-        ("is_encrypted", ctypes.c_int),
-        ("is_broken", ctypes.c_int),
-        ("is_missing_volume", ctypes.c_int),
-        ("is_wrong_password", ctypes.c_int),
-        ("operation_result", ctypes.c_int),
-        ("archive_type", ctypes.c_wchar * 32),
-    ]
-
-
-class _Sup7zArchiveHealthV2(ctypes.Structure):
-    _fields_ = [
-        ("status", ctypes.c_int),
-        ("is_archive", ctypes.c_int),
-        ("is_encrypted", ctypes.c_int),
-        ("is_broken", ctypes.c_int),
-        ("is_missing_volume", ctypes.c_int),
-        ("is_wrong_password", ctypes.c_int),
-        ("operation_result", ctypes.c_int),
-        ("archive_type", ctypes.c_wchar * 32),
-        ("is_missing_volume_suspected", ctypes.c_int),
-        ("missing_volume_name", ctypes.c_wchar * 260),
-        ("missing_volume_evidence", ctypes.c_wchar * 64),
-    ]
 
 
 class _Sup7zArchiveResourceAnalysis(ctypes.Structure):
@@ -214,7 +183,14 @@ class _Sup7zOperationResult(ctypes.Structure):
         ("archive_offset", ctypes.c_ulonglong),
         ("item_count", ctypes.c_int),
         ("operation_result", ctypes.c_int),
+        ("password_required", ctypes.c_int),
+        ("missing_volume", ctypes.c_int),
+        ("missing_volume_suspected", ctypes.c_int),
+        ("missing_stub", ctypes.c_int),
+        ("volume_open_failed", ctypes.c_int),
         ("archive_type", ctypes.c_wchar * 64),
+        ("missing_volume_name", ctypes.c_wchar * 260),
+        ("missing_volume_evidence", ctypes.c_wchar * 64),
         ("message", ctypes.c_wchar * 512),
     ]
 
@@ -479,20 +455,6 @@ class NativePasswordTester:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> NativeArchiveProbe:
-        if archive_input is None and part_paths and len(part_paths) > 1:
-            health = self.check_archive_health(archive_path, part_paths=part_paths)
-            return NativeArchiveProbe(
-                status=health.status,
-                is_archive=health.is_archive,
-                is_encrypted=health.is_encrypted,
-                is_broken=health.is_broken or health.is_missing_volume,
-                checksum_error=health.is_broken,
-                offset=0,
-                item_count=1 if health.ok else 0,
-                archive_type=health.archive_type,
-                message=health.message,
-            )
-
         result = self._run_operation(
             SUP7Z_OPERATION_PROBE,
             archive_path,
@@ -509,46 +471,14 @@ class NativePasswordTester:
             item_count=int(result.item_count),
             archive_type=result.archive_type,
             message=result.message,
+            password_required=bool(result.password_required),
+            missing_volume=bool(result.missing_volume),
+            missing_volume_suspected=bool(result.missing_volume_suspected),
+            missing_stub=bool(result.missing_stub),
+            volume_open_failed=bool(result.volume_open_failed),
+            missing_volume_name=str(result.missing_volume_name),
+            missing_volume_evidence=str(result.missing_volume_evidence),
         )
-
-    def check_archive_health(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveHealth:
-        library = self._load()
-
-        normalized_parts, part_array = self._part_array(archive_path, part_paths)
-        use_v2 = hasattr(library, "sup7z_check_archive_health_with_parts_v2")
-        health = _Sup7zArchiveHealthV2() if use_v2 else _Sup7zArchiveHealth()
-        message = ctypes.create_unicode_buffer(512)
-
-        health_function = (
-            library.sup7z_check_archive_health_with_parts_v2
-            if use_v2
-            else library.sup7z_check_archive_health_with_parts
-        )
-        status = health_function(
-            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
-            ctypes.c_wchar_p(str(archive_path)),
-            part_array,
-            ctypes.c_int(len(normalized_parts)),
-            ctypes.c_wchar_p(str(password or "")),
-            ctypes.byref(health),
-            message,
-            ctypes.c_int(len(message)),
-        )
-        return NativeArchiveHealth(
-            status=int(status),
-            is_archive=bool(health.is_archive),
-            is_encrypted=bool(health.is_encrypted),
-            is_broken=bool(health.is_broken),
-            is_missing_volume=bool(health.is_missing_volume),
-            is_missing_volume_suspected=bool(getattr(health, "is_missing_volume_suspected", False)),
-            is_wrong_password=bool(health.is_wrong_password),
-            operation_result=int(health.operation_result),
-            archive_type=str(health.archive_type),
-            missing_volume_name=str(getattr(health, "missing_volume_name", "")),
-            missing_volume_evidence=str(getattr(health, "missing_volume_evidence", "")),
-            message=message.value,
-        )
-
     def analyze_archive_resources(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveResourceAnalysis:
         library = self._load()
 
@@ -692,53 +622,6 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_test_archive_with_parts.restype = ctypes.c_int
-            library.sup7z_probe_archive.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_ulonglong),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_probe_archive.restype = ctypes.c_int
-            library.sup7z_check_archive_health.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(_Sup7zArchiveHealth),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_check_archive_health.restype = ctypes.c_int
-            library.sup7z_check_archive_health_with_parts.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_wchar_p),
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(_Sup7zArchiveHealth),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_check_archive_health_with_parts.restype = ctypes.c_int
-            if hasattr(library, "sup7z_check_archive_health_with_parts_v2"):
-                library.sup7z_check_archive_health_with_parts_v2.argtypes = [
-                    ctypes.c_wchar_p,
-                    ctypes.c_wchar_p,
-                    ctypes.POINTER(ctypes.c_wchar_p),
-                    ctypes.c_int,
-                    ctypes.c_wchar_p,
-                    ctypes.POINTER(_Sup7zArchiveHealthV2),
-                    ctypes.c_wchar_p,
-                    ctypes.c_int,
-                ]
-                library.sup7z_check_archive_health_with_parts_v2.restype = ctypes.c_int
             library.sup7z_analyze_archive_resources.argtypes = [
                 ctypes.c_wchar_p,
                 ctypes.c_wchar_p,
@@ -884,16 +767,6 @@ def cached_test_archive(
             if archive_input is not None
             else tester.test_archive(archive_path, password=password, part_paths=part_paths)
         ),
-    )
-
-
-def cached_check_archive_health(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveHealth:
-    tester = get_native_password_tester()
-    password = password or ""
-    return cached_value(
-        "native_7z_health",
-        _cache_key(tester, archive_path, part_paths) + (password,),
-        lambda: tester.check_archive_health(archive_path, password=password, part_paths=part_paths),
     )
 
 

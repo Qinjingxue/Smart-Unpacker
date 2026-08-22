@@ -12,16 +12,21 @@ using UInt32 = std::uint32_t;
 using UInt64 = std::uint64_t;
 using Int32 = std::int32_t;
 
-struct HealthProbeResult {
+struct ArchiveOpenProbeResult {
     PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
     bool backend_available = false;
     bool is_archive = false;
     bool encrypted = false;
+    bool password_required = false;
     bool damaged = false;
     bool missing_volume = false;
     bool missing_volume_suspected = false;
+    bool missing_stub = false;
+    bool volume_open_failed = false;
     bool wrong_password = false;
     Int32 operation_result = 0;
+    UInt64 archive_offset = 0;
+    std::wstring archive_type;
     std::wstring missing_volume_name;
     std::string missing_volume_evidence;
     std::string message;
@@ -64,7 +69,7 @@ struct CrcManifestResult {
     std::string message;
 };
 
-HealthProbeResult check_archive_health_with_parts(
+ArchiveOpenProbeResult probe_archive_open_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,

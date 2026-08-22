@@ -41,6 +41,9 @@ def test_seven_zip_detection_reads_next_header_from_later_volume(tmp_path):
     assert result["plausible"] is True
     assert result["strong_accept"] is True
     assert result["next_header_semantic_ok"] is True
+    assert result["password_required"] is False
+    assert result["password_state"] == "not_required"
+    assert result["encryption_scan_complete"] is True
 
 
 def test_seven_zip_detection_preserves_magic_for_truncated_logical_volume(tmp_path):
@@ -107,3 +110,26 @@ def test_zip_detection_finds_directory_and_eocd_in_later_volume(tmp_path):
     assert result["plausible"] is True
     assert result["central_directory_walk_ok"] is True
     assert result["local_header_links_ok"] is True
+    assert result["password_required"] is False
+    assert result["password_state"] == "not_required"
+    assert result["encryption_scan_complete"] is True
+
+
+def test_zip_detection_emits_password_required_for_encrypted_central_entry(tmp_path):
+    name = b"a"
+    local = struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 1, 0, 0, 0, 0, 0, 0, 1, 0) + name
+    central = struct.pack(
+        "<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 1, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 0,
+    ) + name
+    eocd = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 1, 1, len(central), len(local), 0)
+    part = tmp_path / "encrypted.zip"
+    part.write_bytes(local + central + eocd)
+
+    result = process_zip_eocd_structure(_context([part], "", "zip.eocd_structure"))
+
+    assert result["plausible"] is True
+    assert result["central_directory_encrypted_entries"] == 1
+    assert result["password_required"] is True
+    assert result["password_state"] == "required"
+    assert result["encryption_scan_complete"] is True

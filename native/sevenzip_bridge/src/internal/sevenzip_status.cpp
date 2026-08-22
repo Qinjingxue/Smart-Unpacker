@@ -30,7 +30,7 @@ bool looks_damaged(Int32 op_res) {
 
 
 
-bool looks_damaged_health_result(const std::wstring& password, Int32 op_res) {
+bool looks_damaged_probe_result(const std::wstring& password, Int32 op_res) {
 
     return looks_damaged(op_res) || (password.empty() && (op_res == kOpDataError || op_res == kOpCrcError));
 

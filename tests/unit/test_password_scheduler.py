@@ -91,6 +91,31 @@ def test_password_scheduler_skips_negative_cache_and_reuses_success(tmp_path):
     assert verifier.batches == [["bad"], ["secret"]]
 
 
+def test_password_fingerprint_separates_embedded_ranges(tmp_path):
+    archive = tmp_path / "carrier.bin"
+    archive.write_bytes(b"carrier")
+    first = build_archive_fingerprint(
+        str(archive),
+        [str(archive)],
+        archive_input={
+            "open_mode": "file_range",
+            "format_hint": "zip",
+            "parts": [{"path": str(archive), "start": 100, "end": 200}],
+        },
+    )
+    second = build_archive_fingerprint(
+        str(archive),
+        [str(archive)],
+        archive_input={
+            "open_mode": "file_range",
+            "format_hint": "zip",
+            "parts": [{"path": str(archive), "start": 300, "end": 400}],
+        },
+    )
+
+    assert first.key != second.key
+
+
 def test_password_attempt_cache_bounds_successes_and_negative_attempts():
     cache = PasswordAttemptCache()
 

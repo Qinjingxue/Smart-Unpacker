@@ -10,25 +10,169 @@ from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchResult,
 from sunpack.passwords.session import PasswordSession
 
 
-def rar_structure_requires_password(fact_bag: FactBag | None) -> bool:
-    """Return whether the validated RAR structure requires header decryption.
+def _selected_structure_format(fact_bag: FactBag | None) -> str:
+    """Return the format namespace belonging to the active logical input.
 
-    The detector deliberately records this on ``rar.structure`` instead of
-    asking the extraction backend to classify an encrypted header with an
-    empty password.  Keep this predicate small and shared so preflight,
-    extraction, and password resolution use the same structural signal.
+    A carrier task can retain structural facts for several archives found in
+    the same byte stream.  Once extraction switches to one embedded range,
+    those carrier facts must not participate in that range's password
+    decision.  The archive input descriptor is the authoritative scope for
+    this lookup; an empty hint deliberately keeps the historical all-format
+    behavior for ordinary carrier tasks.
     """
     if fact_bag is None:
-        return False
-    structure = fact_bag.get("rar.structure")
-    if not isinstance(structure, dict):
-        knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
-        structure = knowledge.get("format.rar.structure")
-    if not isinstance(structure, dict):
-        return False
-    return bool(
-        structure.get("strong_accept")
-        and (structure.get("password_required") or structure.get("header_encrypted"))
+        return ""
+    knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+    values = (
+        knowledge.get("source.password_probe_input.format_hint"),
+        knowledge.get("source.input.format_hint"),
+        knowledge.get("inspection.summary.format"),
+        fact_bag.get("archive.format_hint"),
+    )
+    hint = next((str(value or "").strip().lower().lstrip(".") for value in values if str(value or "").strip()), "")
+    if hint in {"zip", "jar", "docx", "xlsx", "apk"}:
+        return "zip"
+    if hint in {"7z", "sevenzip", "seven_zip"}:
+        return "7z"
+    if hint in {"rar", "rar4", "rar5"}:
+        return "rar"
+    if hint == "tar":
+        return "tar"
+    if hint in {
+        "gz", "gzip", "tgz", "tar.gz",
+        "bz2", "bzip2", "tbz", "tbz2", "tar.bz2",
+        "xz", "txz", "tar.xz",
+        "zst", "zstd", "tzst", "tar.zst",
+    }:
+        return "compression"
+    return ""
+
+
+def _structure_facts(fact_bag: FactBag | None) -> list[tuple[str, dict]]:
+    if fact_bag is None:
+        return []
+    knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+    selected_format = _selected_structure_format(fact_bag)
+    candidates = (
+        ("rar", ("rar.structure", "format.rar.structure")),
+        ("zip", ("zip.eocd_structure", "zip.structure", "format.zip.structure")),
+        ("7z", ("7z.structure", "seven_zip.structure", "format.7z.structure")),
+        ("tar", ("tar.header_structure", "format.tar.structure")),
+        ("compression", ("compression.stream_structure", "format.compression.structure")),
+    )
+    output: list[tuple[str, dict]] = []
+    for fmt, paths in candidates:
+        if selected_format and fmt != selected_format:
+            continue
+        seen: set[int] = set()
+        for path in paths:
+            value = fact_bag.get(path)
+            if not isinstance(value, dict):
+                if path == "rar.structure":
+                    knowledge_path = "format.rar.structure"
+                elif path in {"zip.eocd_structure", "zip.structure"}:
+                    knowledge_path = "format.zip.structure"
+                elif path in {"7z.structure", "seven_zip.structure"}:
+                    knowledge_path = "format.7z.structure"
+                else:
+                    knowledge_path = path
+                value = knowledge.get(knowledge_path)
+            if isinstance(value, dict) and id(value) not in seen:
+                output.append((fmt, value))
+                seen.add(id(value))
+    return output
+
+
+def _validated_format_password_state(fmt: str, structure: dict) -> str:
+    explicit = str(structure.get("password_state") or "").strip().lower()
+    if explicit in {"required", "not_required"}:
+        return explicit
+
+    password_required = bool(structure.get("password_required"))
+    if fmt == "rar":
+        if structure.get("strong_accept") and password_required:
+            return "required"
+        if (
+            structure.get("strong_accept")
+            and structure.get("header_crc_ok")
+            and "password_required" in structure
+            and not password_required
+            and not structure.get("header_encrypted")
+        ):
+            return "not_required"
+        return "unknown"
+
+    if fmt == "zip":
+        encrypted_entries = structure.get("central_directory_encrypted_entries")
+        try:
+            encrypted_entries = int(encrypted_entries or 0)
+        except (TypeError, ValueError):
+            encrypted_entries = 0
+        structurally_valid = bool(
+            structure.get("plausible")
+            and structure.get("central_directory_present")
+            and structure.get("central_directory_walk_ok")
+        )
+        if password_required and structurally_valid and encrypted_entries > 0:
+            return "required"
+        if (
+            not password_required
+            and structure.get("encryption_scan_complete")
+            and structurally_valid
+        ):
+            return "not_required"
+        return "unknown"
+
+    if fmt == "7z":
+        structurally_valid = bool(
+            structure.get("strong_accept")
+            or (
+                structure.get("next_header_crc_ok")
+                and structure.get("next_header_nid_valid")
+            )
+        )
+        if password_required and structurally_valid and structure.get("encryption_scan_complete", True):
+            return "required"
+        if (
+            not password_required
+            and structure.get("encryption_scan_complete")
+            and structurally_valid
+        ):
+            return "not_required"
+    if fmt == "tar":
+        # TAR has no archive-level password mechanism.  A valid header is
+        # sufficient to prevent a user password list from being sent to the
+        # generic archive backend.
+        if structure.get("plausible") and structure.get("entry_walk_ok"):
+            return "not_required"
+        return "unknown"
+    if fmt == "compression":
+        # gzip/bzip2/xz/zstd stream containers likewise do not carry archive
+        # passwords; the stream validator is the relevant structural proof.
+        if structure.get("plausible"):
+            return "not_required"
+    return "unknown"
+
+
+def archive_structure_password_state(fact_bag: FactBag | None) -> str:
+    """Return the bounded structural password fact without running extraction."""
+    states = [_validated_format_password_state(fmt, value) for fmt, value in _structure_facts(fact_bag)]
+    if "required" in states:
+        return "required"
+    if "not_required" in states:
+        return "not_required"
+    return "unknown"
+
+
+def archive_structure_requires_password(fact_bag: FactBag | None) -> bool:
+    return archive_structure_password_state(fact_bag) == "required"
+
+
+def rar_structure_requires_password(fact_bag: FactBag | None) -> bool:
+    """Compatibility name for callers that specifically route RAR facts."""
+    return any(
+        fmt == "rar" and _validated_format_password_state(fmt, structure) == "required"
+        for fmt, structure in _structure_facts(fact_bag)
     )
 
 
@@ -84,7 +228,12 @@ class PasswordResolver:
                 encrypted=True,
             )
 
-        fingerprint = build_archive_fingerprint(archive_path, part_paths)
+        archive_input = self._archive_input_for_password_probe(fact_bag) or {}
+        fingerprint = build_archive_fingerprint(
+            archive_path,
+            part_paths,
+            archive_input=archive_input,
+        )
 
         directory_passwords = list(directory_passwords or [])
         candidates = self.password_tester.password_store.candidates(directory_passwords=directory_passwords)
@@ -101,7 +250,6 @@ class PasswordResolver:
             # password instead of performing a complete preflight test pass.
             return self._confirmation_resolution(archive_key, "", fingerprint.key, fact_bag)
 
-        archive_input = self._archive_input_for_password_probe(fact_bag) or {}
         embedded_unknown = (
             not self._facts_require_password(fact_bag)
             and str(archive_input.get("open_mode") or archive_input.get("kind") or "")
@@ -283,35 +431,11 @@ class PasswordResolver:
 
     @staticmethod
     def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
-        health = PasswordResolver._resource_health(fact_bag)
-        return bool(
-            isinstance(health, dict)
-            and health.get("is_archive")
-            and not health.get("is_encrypted")
-            and not health.get("is_wrong_password")
-        )
+        return archive_structure_password_state(fact_bag) == "not_required"
 
     @staticmethod
     def _facts_require_password(fact_bag: FactBag | None) -> bool:
-        health = PasswordResolver._resource_health(fact_bag)
-        return bool(isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")))
-
-    @staticmethod
-    def _resource_health(fact_bag: FactBag | None) -> dict:
-        if fact_bag is None:
-            return {}
-        direct = fact_bag.get("resource.health")
-        if isinstance(direct, dict):
-            health = dict(direct)
-        else:
-            health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health")
-            health = dict(health) if isinstance(health, dict) else {}
-        if rar_structure_requires_password(fact_bag):
-            health["is_archive"] = True
-            health["is_encrypted"] = True
-            health.setdefault("is_wrong_password", False)
-            health.setdefault("archive_type", "rar")
-        return health
+        return archive_structure_requires_password(fact_bag)
 
     @staticmethod
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:

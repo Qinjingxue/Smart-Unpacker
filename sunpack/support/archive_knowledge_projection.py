@@ -200,10 +200,6 @@ def archive_authentication(task: Any) -> dict[str, Any]:
     return _cached_projection(knowledge, "archive_authentication", lambda: _archive_authentication_uncached(knowledge))
 
 
-def resource_health(task: Any) -> dict[str, Any]:
-    return _dict(get(task, "resource.health", {}))
-
-
 def resource_analysis(task: Any) -> dict[str, Any]:
     return _dict(get(task, "resource.analysis", {}))
 
@@ -289,13 +285,25 @@ def _format_runtime_facts_uncached(knowledge: ArchiveKnowledge, format_name: str
 
 
 def _archive_authentication_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
-    structure = _dict(knowledge.get("format.7z.structure", {}))
     extraction_failure = _dict(knowledge.get("extraction.failure", {}))
-    password_present = bool(knowledge.get("archive.password")) or _truthy(structure.get("password_present"))
-    password_required = _truthy(structure.get("password_required"))
-    password_rejected = _truthy(structure.get("password_rejected"))
-    encrypted_header_present = _truthy(structure.get("encrypted_header_present")) or _truthy(structure.get("encrypted_header"))
-    encrypted_payload_present = _truthy(structure.get("encrypted_payload_present")) or _truthy(structure.get("encrypted_payload"))
+    structures = [
+        _dict(knowledge.get("format.7z.structure", {})),
+        _dict(knowledge.get("format.zip.structure", {})),
+        _dict(knowledge.get("format.rar.structure", {})),
+    ]
+    password_present = bool(knowledge.get("archive.password")) or any(
+        _truthy(item.get("password_present")) for item in structures
+    )
+    password_required = any(_truthy(item.get("password_required")) for item in structures)
+    password_rejected = any(_truthy(item.get("password_rejected")) for item in structures)
+    encrypted_header_present = any(
+        _truthy(item.get("encrypted_header_present")) or _truthy(item.get("encrypted_header"))
+        for item in structures
+    )
+    encrypted_payload_present = any(
+        _truthy(item.get("encrypted_payload_present")) or _truthy(item.get("encrypted_payload"))
+        for item in structures
+    )
     raw_wrong_password = _truthy(extraction_failure.get("wrong_password")) or str(extraction_failure.get("native_status") or "").lower() == "wrong_password"
     authentication_blocking = bool((password_required and not password_present) or password_rejected)
     return {
