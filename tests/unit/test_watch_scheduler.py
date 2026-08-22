@@ -16,8 +16,10 @@ import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
+from sunpack.filesystem.watcher.group_models import WatchGroupState
 from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
 from sunpack.filesystem.watcher.scanner import WatchCandidate
+from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
 from sunpack.support.path_keys import path_key
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
@@ -134,6 +136,52 @@ class FakeObserver:
     def join(self, timeout=None):
         type(self).join_timeouts.append(timeout)
         return None
+
+
+def test_watch_scheduler_prunes_missing_state_before_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watch_root = tmp_path / "watch"
+    watch_root.mkdir()
+    state_path = tmp_path / ".sunpack_watch" / "state.json"
+    stale_path = tmp_path / "gone.zip"
+
+    persisted = WatchStateStore(str(state_path))
+    persisted.mark(
+        str(stale_path),
+        1,
+        1.0,
+        status="failed_password",
+        failure_payload={"blockers": ["password"]},
+    )
+    persisted.groups["gone"] = WatchGroupState(
+        group_id="gone",
+        directory=str(tmp_path),
+        logical_name="gone",
+        split_family="7z",
+        head_path=str(stale_path),
+        input_paths=[str(stale_path)],
+        owned_paths=[str(stale_path)],
+    )
+    persisted.save()
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=".",
+        state_path=str(state_path),
+        quiet_seconds=0,
+        initial_scan=False,
+    )
+
+    watcher._start_blocking()
+    try:
+        assert not watcher.state.entries
+        assert not watcher.state.groups
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        assert payload["entries"] == {}
+        assert payload["groups"] == {}
+    finally:
+        watcher._stop_blocking()
 
 
 class FakeSummary:

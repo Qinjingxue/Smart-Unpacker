@@ -1,9 +1,26 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier, Lock
 
 import sunpack.filesystem.watcher.state as watch_state_module
+from sunpack.filesystem.watcher.group_models import WatchGroupState
 from sunpack.filesystem.watcher.state import WatchStateStore
+
+
+def _group_state(tmp_path, name, paths, *, head_path=None, status="done"):
+    normalized = [str(path.resolve()) for path in paths]
+    selected_head = (paths[0] if head_path is None and paths else head_path)
+    return WatchGroupState(
+        group_id=f"group-{name}",
+        directory=str(tmp_path.resolve()),
+        logical_name=name,
+        split_family="7z",
+        head_path=str(Path(selected_head).resolve()) if selected_head else "",
+        input_paths=normalized,
+        owned_paths=normalized,
+        status=status,
+    )
 
 
 def test_independent_state_stores_use_unique_atomic_writers(tmp_path, monkeypatch):
@@ -108,3 +125,89 @@ def test_active_work_persists_force_cause_for_restart(tmp_path):
     [pending] = WatchStateStore(str(state_path)).pending_work_items()
     assert pending.path == str(archive.resolve())
     assert pending.force is True
+
+
+def test_prune_missing_records_removes_stale_entries_and_groups(tmp_path):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    present = tmp_path / "present.zip"
+    partial_present = tmp_path / "partial.7z.001"
+    missing = tmp_path / "missing.zip"
+    present.write_bytes(b"present")
+    partial_present.write_bytes(b"partial")
+
+    state.mark(
+        str(present),
+        present.stat().st_size,
+        present.stat().st_mtime,
+        status="failed_password",
+        failure_payload={"blockers": ["password"]},
+    )
+    state.mark(
+        str(missing),
+        1,
+        1.0,
+        status="failed_password",
+        failure_payload={"blockers": ["password"]},
+    )
+    state.groups["present"] = _group_state(tmp_path, "present", [present])
+    state.groups["missing"] = _group_state(tmp_path, "missing", [missing])
+    state.groups["partial"] = _group_state(tmp_path, "partial", [partial_present, missing])
+
+    removed_entries, removed_groups = state.prune_missing_records()
+
+    assert (removed_entries, removed_groups) == (1, 2)
+    assert state.latest_entry_for_path(str(present)) is not None
+    assert state.latest_entry_for_path(str(missing)) is None
+    assert set(state.groups) == {"present"}
+
+
+def test_prune_missing_records_keeps_group_with_missing_expected_volume(tmp_path):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    first = tmp_path / "split.7z.001"
+    third = tmp_path / "split.7z.003"
+    first.write_bytes(b"first")
+    third.write_bytes(b"third")
+    group = _group_state(tmp_path, "split", [first, third], status="waiting")
+    group.missing_indices = [2]
+    state.groups[group.group_id] = group
+    missing_head_member = tmp_path / "head-missing.7z.002"
+    missing_head_member.write_bytes(b"member")
+    missing_head_group = _group_state(
+        tmp_path,
+        "head-missing",
+        [missing_head_member],
+        head_path="",
+        status="waiting",
+    )
+    missing_head_group.missing_indices = [1]
+    state.groups[missing_head_group.group_id] = missing_head_group
+
+    removed_entries, removed_groups = state.prune_missing_records()
+
+    assert (removed_entries, removed_groups) == (0, 0)
+    assert state.group_state(group.group_id) is not None
+    assert state.group_state(missing_head_group.group_id) is not None
+
+
+def test_prune_missing_records_retains_records_when_presence_is_unknown(tmp_path, monkeypatch):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    archive = tmp_path / "protected.zip"
+    archive.write_bytes(b"archive")
+    state.mark(
+        str(archive),
+        archive.stat().st_size,
+        archive.stat().st_mtime,
+        status="failed_password",
+        failure_payload={"blockers": ["password"]},
+    )
+    original_stat = watch_state_module.os.stat
+
+    def blocked_stat(path, *args, **kwargs):
+        if str(path).casefold() == str(archive).casefold():
+            raise PermissionError("temporary access failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(watch_state_module.os, "stat", blocked_stat)
+
+    assert state.prune_missing_records() == (0, 0)
+    assert state.latest_entry_for_path(str(archive)) is not None

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import traceback
 from datetime import datetime, timezone
 
+from sunpack.filesystem.watcher.log import append_jsonl_record
 from sunpack.support.resources import get_resource_path
 from sunpack.support.runtime_cwd import runtime_working_directory
 
@@ -77,7 +77,6 @@ def _write_bootstrap_error(exc: BaseException) -> None:
             "error": str(exc),
             "traceback": traceback.format_exc(),
         }
-        with (state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        append_jsonl_record(state_dir / "events.jsonl", payload)
     except Exception:
         pass

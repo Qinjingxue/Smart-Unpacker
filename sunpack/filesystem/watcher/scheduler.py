@@ -270,6 +270,13 @@ class WatchScheduler:
             return
         self._ensure_directory_password_files()
         self._recover_probe_workspaces()
+        removed_entries, removed_groups = self.state.prune_missing_records()
+        if removed_entries or removed_groups:
+            self.log.write(
+                "state_pruned_on_start",
+                entries=removed_entries,
+                groups=removed_groups,
+            )
         handler = _WatchEventHandler(self)
         scheduled_paths: set[str] = set()
         for root in self.watch_roots:

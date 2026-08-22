@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import errno
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -232,6 +234,41 @@ class WatchStateStore:
         if changed:
             self.save()
 
+    def prune_missing_records(self) -> tuple[int, int]:
+        """Remove state records whose recorded filesystem paths are gone.
+
+        ``entries`` describe one concrete input file, so a missing entry path
+        makes the record stale.  A group can legitimately describe an
+        incomplete split archive: paths listed in ``missing_indices`` are
+        expected to be absent and are not stored as owned paths.  Therefore a
+        group is stale when one of its already-recorded physical paths is
+        definitely gone, not merely because the group is incomplete.
+
+        Filesystem errors other than a definite missing path are treated as
+        unknown and retain the record.  This keeps a transient permission or
+        volume error from destroying retry state during startup.
+        """
+        removed_entries = 0
+        removed_groups = 0
+
+        for key, entry in list(self.entries.items()):
+            if _recorded_file_presence(entry.path) is False:
+                self.entries.pop(key, None)
+                removed_entries += 1
+
+        for group_id, group in list(self.groups.items()):
+            recorded_paths = _group_recorded_paths(group)
+            if not recorded_paths or any(
+                _recorded_file_presence(path) is False
+                for path in recorded_paths
+            ):
+                self.groups.pop(group_id, None)
+                removed_groups += 1
+
+        if removed_entries or removed_groups:
+            self.save()
+        return removed_entries, removed_groups
+
     def mark_password_source_changed(self, signature: str | None = None) -> int:
         if signature is not None:
             self.password_source_signature = signature
@@ -432,6 +469,39 @@ class WatchStateStore:
 
 def _path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
+
+
+def _recorded_file_presence(path: str) -> bool | None:
+    """Return ``True``/``False`` for known file presence, ``None`` if unknown."""
+
+    if not str(path or "").strip():
+        return False
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR} or getattr(exc, "winerror", None) in {2, 3}:
+            return False
+        return None
+
+
+def _group_recorded_paths(group: WatchGroupState) -> list[str]:
+    """Return the concrete paths currently represented by a persisted group."""
+
+    raw_paths: list[object] = [getattr(group, "head_path", "")]
+    for field_name in ("input_paths", "owned_paths"):
+        value = getattr(group, field_name, ())
+        if isinstance(value, str):
+            raw_paths.append(value)
+        elif value:
+            raw_paths.extend(value)
+
+    result: dict[str, str] = {}
+    for value in raw_paths:
+        path = str(value or "").strip()
+        if not path:
+            continue
+        result.setdefault(_path_key(path), os.path.abspath(path))
+    return list(result.values())
 
 
 def _path_matches(path: str, expected: str, *, recursive: bool) -> bool:

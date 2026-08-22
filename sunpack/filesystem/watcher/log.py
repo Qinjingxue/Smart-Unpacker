@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -8,9 +9,67 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_EVENTS_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_EVENTS_BACKUP_COUNT = 1
+
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+
+
+def append_jsonl_record(
+    path: str | Path,
+    record: dict[str, Any],
+    *,
+    max_bytes: int = DEFAULT_EVENTS_MAX_BYTES,
+    backup_count: int = DEFAULT_EVENTS_BACKUP_COUNT,
+) -> None:
+    """Append one JSONL record, rotating the file before it exceeds its limit."""
+    target = Path(path)
+    encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    limit = max(1, int(max_bytes))
+    backups = max(1, int(backup_count))
+    lock = _path_lock(target)
+    with lock:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current_size = target.stat().st_size
+        except FileNotFoundError:
+            current_size = 0
+        if current_size > 0 and current_size + len(encoded) > limit:
+            _rotate_jsonl(target, backups)
+        with target.open("ab") as handle:
+            handle.write(encoded)
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+def _rotate_jsonl(path: Path, backup_count: int) -> None:
+    for index in range(backup_count, 0, -1):
+        source = path if index == 1 else path.with_name(f"{path.name}.{index - 1}")
+        destination = path.with_name(f"{path.name}.{index}")
+        if source.exists():
+            os.replace(source, destination)
+
+
 class WatchLogStore:
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path: str,
+        *,
+        max_bytes: int = DEFAULT_EVENTS_MAX_BYTES,
+        backup_count: int = DEFAULT_EVENTS_BACKUP_COUNT,
+    ):
         self.path = Path(path)
+        self.max_bytes = max(1, int(max_bytes))
+        self.backup_count = max(1, int(backup_count))
         self._throttle_lock = threading.Lock()
         self._last_throttled_write: dict[tuple[str, str], float] = {}
 
@@ -22,9 +81,12 @@ class WatchLogStore:
             **payload,
         }
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            append_jsonl_record(
+                self.path,
+                record,
+                max_bytes=self.max_bytes,
+                backup_count=self.backup_count,
+            )
         except Exception:
             return
 
