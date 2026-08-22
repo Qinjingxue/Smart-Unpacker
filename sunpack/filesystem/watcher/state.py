@@ -227,6 +227,17 @@ class WatchStateStore:
     def latest_entry_for_path(self, path: str) -> WatchStateEntry | None:
         return self.entries.get(_path_key(path))
 
+    def advance_entry_observation(self, candidate) -> bool:
+        entry = self.entries.get(_path_key(candidate.path))
+        if entry is None:
+            return False
+        if entry.file_id != str(candidate.file_id or "") or entry.size != int(candidate.size):
+            return False
+        entry.mtime = float(candidate.mtime)
+        entry.change_usn = int(candidate.change_usn)
+        self.save()
+        return True
+
     def clear_entries(self, paths: Iterable[str]) -> None:
         changed = False
         for path in paths:

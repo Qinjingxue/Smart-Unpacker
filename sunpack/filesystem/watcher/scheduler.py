@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -74,6 +75,12 @@ USN_CONTENT_REASON_MASK = (
     | USN_REASON_DATA_TRUNCATION
 )
 RESTORED_MTIME_MINIMUM_BACKSTEP_SECONDS = 2.0
+
+
+class _CandidateChangeKind(Enum):
+    UNCHANGED = auto()
+    METADATA_ONLY = auto()
+    CONTENT_CHANGED = auto()
 
 
 @dataclass
@@ -190,6 +197,7 @@ class WatchScheduler:
         self._pending: dict[str, WatchCandidate] = {}
         self._inflight_requests: list[_ActivePipelineRequest] = []
         self._active_states: dict[str, _ActiveCandidateState] = {}
+        self._latest_observations: dict[str, WatchCandidate] = {}
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
         self._observer = Observer()
@@ -601,7 +609,9 @@ class WatchScheduler:
             return
         lookup_path = os.path.abspath(path)
         with self._lock:
-            previous_hint = self._pending.get(lookup_path) or self._pending.get(path)
+            previous_hint = self._candidate_baseline_locked(lookup_path)
+        if previous_hint is None:
+            previous_hint = _candidate_from_state_entry(self.state.latest_entry_for_path(lookup_path))
         candidate = _candidate_for_event_path(
             path,
             since_usn=previous_hint.change_usn if previous_hint is not None else 0,
@@ -617,23 +627,25 @@ class WatchScheduler:
             return
         now = time.time()
         with self._lock:
+            previous = self._candidate_baseline_locked(candidate.path) or previous_hint
+            change_kind = _candidate_change_kind(previous, candidate)
+            if not force and change_kind == _CandidateChangeKind.UNCHANGED:
+                return
+            if not force and change_kind == _CandidateChangeKind.METADATA_ONLY:
+                self._accept_metadata_observation_locked(candidate, now)
+                return
             state = self._active_states.get(candidate.path)
             if state is not None:
                 state.force = state.force or force
-                previous = self._pending.get(candidate.path)
-                changed = previous is None or _candidate_observation_changed(previous, candidate)
                 self._pending[candidate.path] = candidate
-                if not changed:
-                    return
-                content_changed = previous is None or _candidate_content_changed(previous, candidate)
+                self._latest_observations[candidate.path] = candidate
                 quiet_seconds = self._observe_candidate_activity(
                     candidate,
                     now,
-                    content_changed=content_changed,
+                    content_changed=True,
                 )
-                if content_changed:
-                    state.last_event_at = now
-                    state.quiet_seconds = quiet_seconds
+                state.last_event_at = now
+                state.quiet_seconds = quiet_seconds
                 state.generation += 1
                 state.filter_revision = self._filter_revision
                 state.filtered_size = candidate.size
@@ -646,6 +658,13 @@ class WatchScheduler:
         became_active = False
         active_quiet_seconds = self.cold_start_seconds
         with self._lock:
+            previous = self._candidate_baseline_locked(candidate.path)
+            change_kind = _candidate_change_kind(previous, candidate)
+            if not force and change_kind == _CandidateChangeKind.UNCHANGED:
+                return
+            if not force and change_kind == _CandidateChangeKind.METADATA_ONLY:
+                self._accept_metadata_observation_locked(candidate, now)
+                return
             state = self._active_states.get(candidate.path)
             if state is None:
                 retry_is_unchanged = (
@@ -658,6 +677,7 @@ class WatchScheduler:
                     else self._observe_candidate_activity(candidate, now)
                 )
                 self._pending[candidate.path] = candidate
+                self._latest_observations[candidate.path] = candidate
                 became_active = True
                 self._active_states[candidate.path] = _ActiveCandidateState(
                     last_event_at=now,
@@ -669,23 +689,19 @@ class WatchScheduler:
                 )
             else:
                 state.force = state.force or force
-                previous = self._pending.get(candidate.path)
-                changed = previous is None or _candidate_observation_changed(previous, candidate)
                 self._pending[candidate.path] = candidate
-                if changed:
-                    content_changed = previous is None or _candidate_content_changed(previous, candidate)
-                    active_quiet_seconds = self._observe_candidate_activity(
-                        candidate,
-                        now,
-                        content_changed=content_changed,
-                    )
-                    if content_changed:
-                        state.last_event_at = now
-                        state.quiet_seconds = active_quiet_seconds
-                    state.generation += 1
-                    state.filter_revision = self._filter_revision
-                    state.filtered_size = candidate.size
-                    state.filtered_mtime = candidate.mtime
+                self._latest_observations[candidate.path] = candidate
+                active_quiet_seconds = self._observe_candidate_activity(
+                    candidate,
+                    now,
+                    content_changed=True,
+                )
+                state.last_event_at = now
+                state.quiet_seconds = active_quiet_seconds
+                state.generation += 1
+                state.filter_revision = self._filter_revision
+                state.filtered_size = candidate.size
+                state.filtered_mtime = candidate.mtime
         if became_active:
             self.state.queue_active(candidate, force=force)
             self.log.write(
@@ -768,6 +784,13 @@ class WatchScheduler:
             ]
             for candidate_path in tracker_paths:
                 self._quiet_trackers.pop(candidate_path, None)
+            observation_paths = [
+                candidate_path
+                for candidate_path in self._latest_observations
+                if _paths_match(candidate_path, normalized, recursive=recursive)
+            ]
+            for candidate_path in observation_paths:
+                self._latest_observations.pop(candidate_path, None)
         forgotten = self.state.forget_path(normalized, recursive=recursive)
         self.log.write(
             "candidate_departed",
@@ -882,6 +905,7 @@ class WatchScheduler:
             if state is None or state.generation != generation:
                 return
             self._pending[path] = candidate
+            self._latest_observations[path] = candidate
             state.last_event_at = now
             learned_quiet_seconds = self._observe_candidate_activity(
                 candidate,
@@ -906,11 +930,32 @@ class WatchScheduler:
             if state is None or state.generation != generation:
                 return False
             self._pending[path] = candidate
+            self._latest_observations[path] = candidate
             self._observe_candidate_activity(candidate, time.time(), content_changed=False)
             state.filter_revision = self._filter_revision
             state.filtered_size = candidate.size
             state.filtered_mtime = candidate.mtime
             return True
+
+    def _candidate_baseline_locked(self, path: str) -> WatchCandidate | None:
+        normalized = os.path.abspath(path)
+        return (
+            self._pending.get(normalized)
+            or self._pending.get(path)
+            or self._latest_observations.get(normalized)
+            or self._latest_observations.get(path)
+        )
+
+    def _accept_metadata_observation_locked(self, candidate: WatchCandidate, now: float) -> None:
+        self._latest_observations[candidate.path] = candidate
+        self.state.advance_entry_observation(candidate)
+        state = self._active_states.get(candidate.path)
+        if state is not None:
+            self._pending[candidate.path] = candidate
+            state.filter_revision = self._filter_revision
+            state.filtered_size = candidate.size
+            state.filtered_mtime = candidate.mtime
+        self._observe_candidate_activity(candidate, now, content_changed=False)
 
     def _defer_group_member(
         self,
@@ -1704,20 +1749,45 @@ def _candidate_matches_password_failure(candidate: WatchCandidate, entry: WatchS
     )
 
 
-def _candidate_content_changed(previous: WatchCandidate, current: WatchCandidate) -> bool:
+def _candidate_change_kind(
+    previous: WatchCandidate | None,
+    current: WatchCandidate,
+) -> _CandidateChangeKind:
+    if previous is None:
+        return _CandidateChangeKind.CONTENT_CHANGED
+    if not _candidate_observation_changed(previous, current):
+        return _CandidateChangeKind.UNCHANGED
     if previous.file_id != current.file_id or previous.size != current.size:
-        return True
+        return _CandidateChangeKind.CONTENT_CHANGED
     if previous.change_usn == current.change_usn:
-        return False
+        return _CandidateChangeKind.METADATA_ONLY
     if current.change_reasons_known:
-        return bool(current.change_reasons_without_close & USN_CONTENT_REASON_MASK)
+        if current.change_reasons_without_close & USN_CONTENT_REASON_MASK:
+            return _CandidateChangeKind.CONTENT_CHANGED
+        return _CandidateChangeKind.METADATA_ONLY
     # Explorer and downloaders commonly restore the source/server timestamp as
     # their final metadata operation. If volume-journal access is unavailable,
     # optimistically ignore that one event; later same-size overwrites still
     # change the USN and take the conservative content-change path below.
     if current.mtime < previous.mtime - RESTORED_MTIME_MINIMUM_BACKSTEP_SECONDS:
-        return False
-    return previous.mtime != current.mtime or previous.change_usn != current.change_usn
+        return _CandidateChangeKind.METADATA_ONLY
+    return _CandidateChangeKind.CONTENT_CHANGED
+
+
+def _candidate_content_changed(previous: WatchCandidate, current: WatchCandidate) -> bool:
+    return _candidate_change_kind(previous, current) == _CandidateChangeKind.CONTENT_CHANGED
+
+
+def _candidate_from_state_entry(entry: WatchStateEntry | None) -> WatchCandidate | None:
+    if entry is None:
+        return None
+    return WatchCandidate(
+        path=entry.path,
+        size=entry.size,
+        mtime=entry.mtime,
+        file_id=entry.file_id,
+        change_usn=entry.change_usn,
+    )
 
 
 def _file_entry_from_watch_candidate(candidate: WatchCandidate) -> FileEntry:

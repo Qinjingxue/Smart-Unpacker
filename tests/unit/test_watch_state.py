@@ -98,6 +98,40 @@ def test_only_retry_blocking_failures_are_kept_as_entries(tmp_path):
     assert state.latest_entry_for_path(str(archive)) is None
 
 
+def test_metadata_observation_advances_retry_entry_without_changing_failure(tmp_path):
+    state_path = tmp_path / "state.json"
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"archive")
+    state = WatchStateStore(str(state_path))
+    state.mark(
+        str(archive),
+        archive.stat().st_size,
+        100.0,
+        file_id="file",
+        change_usn=10,
+        status="failed_password",
+        error="password",
+        failure_payload={"kind": "wrong_password", "blockers": ["password"]},
+    )
+    candidate = type("Candidate", (), {
+        "path": str(archive),
+        "size": archive.stat().st_size,
+        "mtime": 50.0,
+        "file_id": "file",
+        "change_usn": 11,
+    })()
+
+    assert state.advance_entry_observation(candidate)
+
+    entry = WatchStateStore(str(state_path)).latest_entry_for_path(str(archive))
+    assert entry is not None
+    assert entry.mtime == 50.0
+    assert entry.change_usn == 11
+    assert entry.status == "failed_password"
+    assert entry.last_error == "password"
+    assert entry.attempt_count == 1
+
+
 def test_previous_state_schema_is_intentionally_not_loaded(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"version": 5, "entries": {"legacy": {"status": "done"}}}), encoding="utf-8")

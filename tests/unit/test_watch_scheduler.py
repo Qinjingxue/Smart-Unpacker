@@ -59,6 +59,10 @@ def test_usn_data_reason_detects_same_size_in_place_content_change():
     )
 
     assert scheduler_module._candidate_content_changed(previous, current)
+    assert (
+        scheduler_module._candidate_change_kind(previous, current)
+        == scheduler_module._CandidateChangeKind.CONTENT_CHANGED
+    )
 
 
 def test_usn_metadata_reason_does_not_count_as_content_change():
@@ -74,6 +78,10 @@ def test_usn_metadata_reason_does_not_count_as_content_change():
     )
 
     assert not scheduler_module._candidate_content_changed(previous, current)
+    assert (
+        scheduler_module._candidate_change_kind(previous, current)
+        == scheduler_module._CandidateChangeKind.METADATA_ONLY
+    )
 
 
 def test_usn_close_accumulated_data_reason_does_not_restart_content_quiet_window():
@@ -90,6 +98,10 @@ def test_usn_close_accumulated_data_reason_does_not_restart_content_quiet_window
     )
 
     assert not scheduler_module._candidate_content_changed(previous, current)
+    assert (
+        scheduler_module._candidate_change_kind(previous, current)
+        == scheduler_module._CandidateChangeKind.METADATA_ONLY
+    )
 
 
 def test_unavailable_journal_treats_large_backward_mtime_restore_as_metadata_only():
@@ -104,6 +116,15 @@ def test_unavailable_journal_keeps_same_stat_usn_change_conservative():
     current = WatchCandidate("sample.zip", 100, 100.0, "file", 101)
 
     assert scheduler_module._candidate_content_changed(previous, current)
+
+
+def test_identical_observation_is_unchanged():
+    candidate = WatchCandidate("sample.zip", 100, 100.0, "file", 100)
+
+    assert (
+        scheduler_module._candidate_change_kind(candidate, candidate)
+        == scheduler_module._CandidateChangeKind.UNCHANGED
+    )
 
 
 _TEST_LOOP = asyncio.new_event_loop()
@@ -793,6 +814,147 @@ def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, mon
     assert attempts == 2
 
 
+def test_metadata_event_during_and_after_processing_does_not_start_new_epoch(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    engine = _DeferredPipelineEngine()
+    wakeups = []
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=engine,
+        wake_callback=lambda: wakeups.append("wake"),
+    )
+    watcher.enqueue(str(archive), event_type="created")
+    assert _await(watcher.run_once()).processed == 0
+    assert len(engine.handles) == 1
+
+    baseline = watcher._latest_observations[str(archive)]
+    tracker = watcher._quiet_trackers[str(archive)]
+    model_before = (
+        tracker.last_content_event_at,
+        tracker.intervals,
+        tracker.quiet_seconds,
+    )
+    wakeups_before = len(wakeups)
+    metadata = WatchCandidate(
+        str(archive),
+        baseline.size,
+        baseline.mtime - 60.0,
+        baseline.file_id,
+        max(1, baseline.change_usn + 1),
+        change_reasons=0x00008000,
+        change_reasons_without_close=0,
+        change_reasons_known=True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_for_event_path",
+        lambda _path, *, since_usn=0: metadata,
+    )
+
+    watcher.enqueue(str(archive), event_type="modified")
+
+    assert watcher.pending_count == 0
+    assert watcher._latest_observations[str(archive)] == metadata
+    assert len(wakeups) == wakeups_before
+    assert (
+        tracker.last_content_event_at,
+        tracker.intervals,
+        tracker.quiet_seconds,
+    ) == model_before
+    assert tracker.last_mtime == metadata.mtime
+    assert tracker.last_change_usn == metadata.change_usn
+
+    engine.handles[0].complete_no_tasks()
+    assert _await(watcher.run_once()).processed == 1
+    metadata_after = WatchCandidate(
+        str(archive),
+        metadata.size,
+        metadata.mtime - 1.0,
+        metadata.file_id,
+        metadata.change_usn + 1,
+        change_reasons=0x00008000,
+        change_reasons_without_close=0,
+        change_reasons_known=True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_for_event_path",
+        lambda _path, *, since_usn=0: metadata_after,
+    )
+    watcher.enqueue(str(archive), event_type="modified")
+    assert watcher.pending_count == 0
+    assert watcher._latest_observations[str(archive)] == metadata_after
+    assert _await(watcher.run_once()).processed == 0
+
+
+def test_content_event_during_processing_still_starts_new_epoch_from_latest_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    engine = _DeferredPipelineEngine()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=engine,
+    )
+    watcher.enqueue(str(archive), event_type="created")
+    assert _await(watcher.run_once()).processed == 0
+
+    baseline = watcher._latest_observations[str(archive)]
+    metadata = WatchCandidate(
+        str(archive),
+        baseline.size,
+        baseline.mtime - 60.0,
+        baseline.file_id,
+        max(1, baseline.change_usn + 1),
+        change_reasons=0x00008000,
+        change_reasons_without_close=0,
+        change_reasons_known=True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_for_event_path",
+        lambda _path, *, since_usn=0: metadata,
+    )
+    watcher.enqueue(str(archive), event_type="modified")
+    assert watcher.pending_count == 0
+
+    content = WatchCandidate(
+        str(archive),
+        metadata.size,
+        metadata.mtime,
+        metadata.file_id,
+        metadata.change_usn + 1,
+        change_reasons=scheduler_module.USN_REASON_DATA_OVERWRITE,
+        change_reasons_without_close=scheduler_module.USN_REASON_DATA_OVERWRITE,
+        change_reasons_known=True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_for_event_path",
+        lambda _path, *, since_usn=0: content,
+    )
+
+    watcher.enqueue(str(archive), event_type="modified")
+
+    assert watcher.pending_count == 1
+    assert watcher._latest_observations[str(archive)] == content
+    engine.handles[0].complete_no_tasks()
+    assert _await(watcher.run_once()).processed == 1
+    assert len(engine.handles) == 2
+
+
 def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monkeypatch):
     FakeObserver.started_count = 0
     FakeObserver.stopped_count = 0
@@ -1368,6 +1530,64 @@ def test_watch_scheduler_timestamp_restore_does_not_reset_content_quiet_window(t
     assert _await(watcher.run_once()).processed == 0
 
 
+def test_pending_metadata_event_advances_snapshot_without_generation_or_wakeup(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    wakeups = []
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=10,
+        initial_scan=False,
+        wake_callback=lambda: wakeups.append("wake"),
+    )
+    watcher.enqueue(str(archive), event_type="created")
+    baseline = watcher._pending[str(archive)]
+    state = watcher._active_states[str(archive)]
+    tracker = watcher._quiet_trackers[str(archive)]
+    generation = state.generation
+    last_event_at = state.last_event_at
+    model_before = (
+        tracker.last_content_event_at,
+        tracker.intervals,
+        tracker.quiet_seconds,
+    )
+    wakeups_before = len(wakeups)
+    metadata = WatchCandidate(
+        str(archive),
+        baseline.size,
+        baseline.mtime - 60.0,
+        baseline.file_id,
+        max(1, baseline.change_usn + 1),
+        change_reasons=0x00008000,
+        change_reasons_without_close=0,
+        change_reasons_known=True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_for_event_path",
+        lambda _path, *, since_usn=0: metadata,
+    )
+
+    watcher.enqueue(str(archive), event_type="modified")
+
+    assert watcher._pending[str(archive)] == metadata
+    assert watcher._latest_observations[str(archive)] == metadata
+    assert state.generation == generation
+    assert state.last_event_at == last_event_at
+    assert len(wakeups) == wakeups_before
+    assert (
+        tracker.last_content_event_at,
+        tracker.intervals,
+        tracker.quiet_seconds,
+    ) == model_before
+    assert tracker.last_mtime == metadata.mtime
+    assert tracker.last_change_usn == metadata.change_usn
+
+
 def test_watch_scheduler_growth_resets_the_common_quiet_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     now = [2000002000.0]
@@ -1433,7 +1653,7 @@ def test_watch_scheduler_does_not_log_duplicate_pending_candidate(tmp_path, monk
     assert log_text.count('"event":"candidate_active"') == 1
 
 
-def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_path, monkeypatch):
+def test_watch_scheduler_ignores_unchanged_event_after_no_tasks_result(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     class NoTasksRunner:
@@ -1465,7 +1685,7 @@ def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_
 
     assert result.processed == 1
     assert result.succeeded == 0
-    assert unchanged.processed == 1
+    assert unchanged.processed == 0
     assert watcher.pending_count == 0
     assert not watcher.state.entries
     log_text = (tmp_path / ".sunpack_watch" / "events.jsonl").read_text(encoding="utf-8")
@@ -1531,7 +1751,9 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     assert captured["paths"] == [str(archive_path.resolve())]
     assert not watcher.state.entries
     assert not watcher.state.pending_work_items()
-def test_watch_scheduler_reprocesses_each_new_event_after_output_is_deleted(tmp_path, monkeypatch):
+
+
+def test_watch_scheduler_does_not_reprocess_unchanged_input_when_output_is_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive_path = tmp_path / "sample.zip"
     output_dir = tmp_path / "sample"
@@ -1562,14 +1784,14 @@ def test_watch_scheduler_reprocesses_each_new_event_after_output_is_deleted(tmp_
     assert len(runs) == 1
 
     watcher.enqueue(str(archive_path), event_type="modified")
-    assert _await(watcher.run_once()).succeeded == 1
-    assert len(runs) == 2
+    assert _await(watcher.run_once()).succeeded == 0
+    assert len(runs) == 1
 
     output_dir.rmdir()
     watcher.enqueue(str(archive_path), event_type="modified")
 
-    assert _await(watcher.run_once()).succeeded == 1
-    assert len(runs) == 3
+    assert _await(watcher.run_once()).succeeded == 0
+    assert len(runs) == 1
 
 
 def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_back(tmp_path, monkeypatch):
@@ -1824,7 +2046,7 @@ def test_watch_scheduler_initial_scan_ignores_nested_archives(tmp_path, monkeypa
     _await(watcher.stop())
 
 
-def test_watch_scheduler_retries_terminal_failure_for_each_new_event(tmp_path, monkeypatch):
+def test_watch_scheduler_does_not_retry_terminal_failure_for_unchanged_event(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     class FailingRunner:
@@ -1861,10 +2083,10 @@ def test_watch_scheduler_retries_terminal_failure_for_each_new_event(tmp_path, m
     unchanged = _await(watcher.run_once())
 
     assert result.failed == 1
-    assert unchanged.processed == 1
+    assert unchanged.processed == 0
     assert watcher.pending_count == 0
     assert not watcher.state.entries
-    assert [event[0] for event in notifications.events] == ["submitted", "failed", "submitted", "failed"]
+    assert [event[0] for event in notifications.events] == ["submitted", "failed"]
 
 
 def test_nested_password_failure_notifies_but_keeps_password_blocker(tmp_path, monkeypatch):
