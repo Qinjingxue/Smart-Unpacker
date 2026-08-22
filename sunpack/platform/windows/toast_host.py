@@ -36,11 +36,13 @@ class ToastHostManager:
         self,
         *,
         host_path: str | None = None,
+        diagnostic_log_path: str | None = None,
         update_interval_ms: int = 50,
         logger=None,
         launcher: Callable = launch_unelevated,
     ):
         self._host_path = str(host_path) if host_path else None
+        self._diagnostic_log_path = str(diagnostic_log_path) if diagnostic_log_path else None
         self._update_interval = max(0.01, min(1.0, int(update_interval_ms) / 1000.0))
         self._logger = logger
         self._launcher = launcher
@@ -77,11 +79,10 @@ class ToastHostManager:
             if self._stopping:
                 return
             self._snapshot = snapshot
-            self._snapshot_expires_at = (
-                time.monotonic() + snapshot.ttl_ms / 1000.0
-                if snapshot.ttl_ms > 0
-                else 0.0
-            )
+            # The native host owns the visible TTL and starts it only after
+            # ToastNotifier.Show succeeds. This deadline merely bounds how
+            # long a delivered terminal snapshot is retained for reconnects.
+            self._snapshot_expires_at = 0.0
             self._revision += 1
             self._condition.notify()
 
@@ -128,10 +129,7 @@ class ToastHostManager:
                         continue
 
                 with self._condition:
-                    if self._snapshot_expires_at and time.monotonic() >= self._snapshot_expires_at:
-                        self._snapshot = None
-                        self._snapshot_expires_at = 0.0
-                        self._revision += 1
+                    self._forget_expired_snapshot_locked(time.monotonic())
                     snapshot = self._snapshot
                     revision = self._revision
                     stopping = self._stopping
@@ -156,7 +154,9 @@ class ToastHostManager:
                             else:
                                 self._send_snapshot(snapshot)
                             sent_revision = revision
-                            if not terminal:
+                            if terminal:
+                                self._retain_terminal_after_send(snapshot, revision)
+                            else:
                                 next_progress_send = now + self._update_interval
                         except ValueError as exc:
                             self._log("toast_snapshot_rejected", error=str(exc))
@@ -203,16 +203,19 @@ class ToastHostManager:
         host_path = os.path.abspath(host_path)
         if not os.path.isfile(host_path):
             raise FileNotFoundError(host_path)
+        arguments = [
+            host_path,
+            "--pipe",
+            self._pipe_name,
+            "--session",
+            self._session,
+            "--parent-pid",
+            str(os.getpid()),
+        ]
+        if self._diagnostic_log_path:
+            arguments.extend(("--diagnostic-log", os.path.abspath(self._diagnostic_log_path)))
         self._process = self._launcher(
-            [
-                host_path,
-                "--pipe",
-                self._pipe_name,
-                "--session",
-                self._session,
-                "--parent-pid",
-                str(os.getpid()),
-            ],
+            arguments,
             cwd=str(Path(host_path).parent),
         )
         deadline = time.monotonic() + 5.0
@@ -231,6 +234,18 @@ class ToastHostManager:
 
     def _send_snapshot(self, snapshot: ToastSnapshot) -> None:
         self._write(encode_snapshot(snapshot, self._next_sequence()))
+
+    def _retain_terminal_after_send(self, snapshot: ToastSnapshot, revision: int) -> None:
+        if snapshot.ttl_ms <= 0:
+            return
+        with self._condition:
+            if revision == self._revision and snapshot is self._snapshot:
+                self._snapshot_expires_at = time.monotonic() + snapshot.ttl_ms / 1000.0
+
+    def _forget_expired_snapshot_locked(self, now: float) -> None:
+        if self._snapshot_expires_at and now >= self._snapshot_expires_at:
+            self._snapshot = None
+            self._snapshot_expires_at = 0.0
 
     def _send(self, message_type: ToastMessageType) -> None:
         self._write(encode_frame(message_type, b"", self._next_sequence()))

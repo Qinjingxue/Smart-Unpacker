@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
@@ -27,9 +28,10 @@ async def run_watch_service(*, tray_enabled: bool = True, once: bool = False) ->
         worker["windows_process_mode"] = "background"
         return PipelineEngine(engine_config)
 
-    def toast_manager_factory(config: dict, _state_dir: str, logger) -> ToastHostManager:
+    def toast_manager_factory(config: dict, state_dir: str, logger) -> ToastHostManager:
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
         return ToastHostManager(
+            diagnostic_log_path=str(Path(state_dir) / "toast_host_events.jsonl"),
             update_interval_ms=int(watch_config.get("toast_update_interval_ms", 50)),
             logger=logger,
         )

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
@@ -24,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -31,11 +33,14 @@ namespace {
 using winrt::Windows::Data::Xml::Dom::XmlDocument;
 using winrt::Windows::UI::Notifications::NotificationData;
 using winrt::Windows::UI::Notifications::NotificationUpdateResult;
+using winrt::Windows::UI::Notifications::ToastDismissalReason;
+using winrt::Windows::UI::Notifications::ToastDismissedEventArgs;
 using winrt::Windows::UI::Notifications::ToastNotification;
 using winrt::Windows::UI::Notifications::ToastNotificationManager;
 
 constexpr wchar_t kAppId[] = L"SunPack.Watch.Toast";
-constexpr wchar_t kToastTag[] = L"watch";
+constexpr wchar_t kProgressToastTag[] = L"watch-progress";
+constexpr wchar_t kFinalToastTag[] = L"watch-final";
 constexpr wchar_t kToastGroup[] = L"SunPack";
 constexpr wchar_t kClsidText[] = L"{C5A6B4E9-3184-44E2-9F15-6A71804F7A36}";
 constexpr CLSID kToastActivatorClsid = {
@@ -357,6 +362,78 @@ std::string utf16_to_utf8(std::wstring_view value) {
         winrt::throw_last_error();
     }
     return result;
+}
+
+std::string_view dismissal_reason_name(ToastDismissalReason reason) noexcept {
+    switch (reason) {
+    case ToastDismissalReason::TimedOut:
+        return "TimedOut";
+    case ToastDismissalReason::UserCanceled:
+        return "UserCanceled";
+    case ToastDismissalReason::ApplicationHidden:
+        return "ApplicationHidden";
+    default:
+        return "Unknown";
+    }
+}
+
+void append_dismissal_event(
+    const std::wstring& log_path,
+    std::string_view kind,
+    ToastDismissalReason reason
+) noexcept {
+    if (log_path.empty()) return;
+    HANDLE file = CreateFileW(
+        log_path.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (file == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        file = CreateFileW(
+            log_path.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
+        if (file == INVALID_HANDLE_VALUE) return;
+    }
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    char timestamp[32]{};
+    const int timestamp_length = std::snprintf(
+        timestamp,
+        sizeof(timestamp),
+        "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+        now.wYear,
+        now.wMonth,
+        now.wDay,
+        now.wHour,
+        now.wMinute,
+        now.wSecond,
+        now.wMilliseconds
+    );
+    std::string line = "{\"time\":\"";
+    if (timestamp_length > 0) {
+        line.append(timestamp, static_cast<std::size_t>(timestamp_length));
+    }
+    line += "\",\"event\":\"toast_dismissed\",\"kind\":\"";
+    line += kind;
+    line += "\",\"reason\":\"";
+    line += dismissal_reason_name(reason);
+    line += "\"}\r\n";
+    DWORD written = 0;
+    WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    CloseHandle(file);
 }
 
 std::wstring hex_encode(std::wstring_view value) {
@@ -734,8 +811,10 @@ std::wstring action_arguments(const Action& action) {
 
 class ToastPresenter {
 public:
-    explicit ToastPresenter(HANDLE expiry_timer)
-        : notifier_(ToastNotificationManager::CreateToastNotifier(kAppId)), expiry_timer_(expiry_timer) {}
+    ToastPresenter(HANDLE expiry_timer, std::wstring diagnostic_log_path)
+        : notifier_(ToastNotificationManager::CreateToastNotifier(kAppId)),
+          expiry_timer_(expiry_timer),
+          diagnostic_log_path_(std::move(diagnostic_log_path)) {}
 
     ~ToastPresenter() {
         clear();
@@ -759,14 +838,31 @@ public:
 
     void clear() noexcept {
         cancel_expiry();
-        try {
-            ToastNotificationManager::History().Remove(kToastTag, kToastGroup, kAppId);
-        } catch (...) {
-        }
+        remove(kProgressToastTag);
+        remove(kFinalToastTag);
         progress_shown_ = false;
     }
 
 private:
+    void remove(std::wstring_view tag) noexcept {
+        try {
+            ToastNotificationManager::History().Remove(tag, kToastGroup, kAppId);
+        } catch (...) {
+        }
+    }
+
+    void observe_dismissal(const ToastNotification& toast, std::string_view kind) {
+        if (diagnostic_log_path_.empty()) return;
+        const auto log_path = diagnostic_log_path_;
+        const std::string kind_name(kind);
+        toast.Dismissed([log_path, kind_name](
+            const ToastNotification&,
+            const ToastDismissedEventArgs& args
+        ) noexcept {
+            append_dismissal_event(log_path, kind_name, args.Reason());
+        });
+    }
+
     void show_progress(const Snapshot& snapshot, std::uint64_t sequence) {
         NotificationData data;
         const auto values = data.Values();
@@ -782,24 +878,28 @@ private:
         }
         data.SequenceNumber(static_cast<std::uint32_t>(sequence & 0xffffffff));
         if (progress_shown_) {
-            const auto updated = notifier_.Update(data, kToastTag, kToastGroup);
+            const auto updated = notifier_.Update(data, kProgressToastTag, kToastGroup);
             if (updated == NotificationUpdateResult::Succeeded) {
                 return;
             }
         }
+        remove(kFinalToastTag);
         XmlDocument document;
         document.LoadXml(
             LR"(<toast duration="long" launch="noop"><visual><binding template="ToastGeneric"><text>{title}</text><text>{body}</text><progress title="{progressTitle}" value="{progressValue}" valueStringOverride="{progressValueString}" status="{progressStatus}"/></binding></visual></toast>)"
         );
         ToastNotification toast(document);
-        toast.Tag(kToastTag);
+        toast.Tag(kProgressToastTag);
         toast.Group(kToastGroup);
         toast.Data(data);
+        observe_dismissal(toast, "progress");
         notifier_.Show(toast);
         progress_shown_ = true;
     }
 
     void show_final(const Snapshot& snapshot) {
+        remove(kProgressToastTag);
+        progress_shown_ = false;
         std::wstring xml = L"<toast duration=\"long\" launch=\"noop\"><visual><binding template=\"ToastGeneric\"><text>";
         xml += xml_escape(snapshot.title);
         xml += L"</text>";
@@ -822,10 +922,10 @@ private:
         XmlDocument document;
         document.LoadXml(xml);
         ToastNotification toast(document);
-        toast.Tag(kToastTag);
+        toast.Tag(kFinalToastTag);
         toast.Group(kToastGroup);
+        observe_dismissal(toast, "final");
         notifier_.Show(toast);
-        progress_shown_ = false;
     }
 
     void cancel_expiry() noexcept {
@@ -834,6 +934,7 @@ private:
 
     winrt::Windows::UI::Notifications::ToastNotifier notifier_{nullptr};
     HANDLE expiry_timer_{};
+    std::wstring diagnostic_log_path_;
     bool progress_shown_{};
 };
 
@@ -918,7 +1019,12 @@ HANDLE connect_server_pipe(const std::wstring& name, HANDLE parent) {
     return pipe;
 }
 
-int run_host(const std::wstring& pipe_name, const std::wstring& session, DWORD parent_pid) {
+int run_host(
+    const std::wstring& pipe_name,
+    const std::wstring& session,
+    DWORD parent_pid,
+    const std::wstring& diagnostic_log_path
+) {
     if (!is_ordinary_integrity()) {
         return ERROR_ELEVATION_REQUIRED;
     }
@@ -984,7 +1090,7 @@ int run_host(const std::wstring& pipe_name, const std::wstring& session, DWORD p
                 if (!presenter) {
                     winrt::init_apartment(winrt::apartment_type::multi_threaded);
                     toast_apartment_initialized = true;
-                    presenter = std::make_unique<ToastPresenter>(expiry_timer);
+                    presenter = std::make_unique<ToastPresenter>(expiry_timer, diagnostic_log_path);
                 }
                 presenter->show(parse_snapshot(frame->payload), frame->sequence);
                 break;
@@ -1051,11 +1157,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         const auto pipe = argument_value(argc, argv, L"--pipe");
         const auto session = argument_value(argc, argv, L"--session");
+        const auto diagnostic_log = argument_value(argc, argv, L"--diagnostic-log");
         const DWORD parent_pid = parse_process_id(argument_value(argc, argv, L"--parent-pid"));
         if (!pipe || !session || session->size() < 16 || parent_pid == 0) {
             return ERROR_INVALID_PARAMETER;
         }
-        return run_host(*pipe, *session, parent_pid);
+        return run_host(*pipe, *session, parent_pid, diagnostic_log.value_or(L""));
     } catch (const winrt::hresult_error& error) {
         return static_cast<int>(error.code().value & 0x7fffffff);
     } catch (...) {
