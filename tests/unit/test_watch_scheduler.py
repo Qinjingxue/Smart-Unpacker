@@ -1968,6 +1968,8 @@ def test_password_retry_preserves_quiet_when_failed_archive_changed(tmp_path, mo
             "watch": {
                 "clipboard_monitor_enabled": False,
                 "password_retry_debounce_seconds": 0,
+                "cold_start_seconds": 1.0,
+                "quiet_min_seconds": 1.25,
             }
         },
         [str(tmp_path)],
@@ -2518,7 +2520,11 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
     archive_path.write_bytes(b"0")
     os.utime(archive_path, (clock.value, clock.value))
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
+        {"watch": {
+            "clipboard_monitor_enabled": False,
+            "cold_start_seconds": 1.0,
+            "quiet_min_seconds": 1.25,
+        }},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
@@ -2538,7 +2544,7 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
     events.run_after(0.02, processed=1)
 
 
-def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch):
+def test_watch_scheduler_default_cold_start_is_zero_seconds(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     clock = WatchClock(2000035000.0)
     clock.install(monkeypatch)
@@ -2555,9 +2561,8 @@ def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch)
     events = WatchEvents(watcher, clock)
     events.emit(archive_path)
 
-    assert watcher._active_states[str(archive_path)].quiet_seconds == 1.0
-    events.run_after(0.99, processed=0)
-    events.run_after(0.02, processed=1)
+    assert watcher._active_states[str(archive_path)].quiet_seconds == 0.0
+    events.run_after(0.0, processed=1)
 
 
 def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp_path, monkeypatch):
@@ -2568,7 +2573,11 @@ def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp
     archive_path.write_bytes(b"first")
     os.utime(archive_path, (clock.value, clock.value))
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
+        {"watch": {
+            "clipboard_monitor_enabled": False,
+            "cold_start_seconds": 1.0,
+            "quiet_min_seconds": 1.25,
+        }},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
