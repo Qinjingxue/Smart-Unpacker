@@ -28,17 +28,31 @@ impl AnalysisMultiVolumeView {
         Ok(Self {
             path: paths[0].clone(),
             reader,
+            closed: false,
         })
     }
 
     #[getter]
     fn size(&self) -> PyResult<u64> {
+        self.ensure_open()?;
         Ok(self.reader.len())
     }
 
     #[getter]
     fn path(&self) -> PyResult<String> {
         Ok(self.path.clone())
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.closed
+    }
+
+    fn close(&mut self) {
+        if !self.closed {
+            self.reader = ManagedReader::closed();
+            self.closed = true;
+        }
     }
 
     fn read_at<'py>(
@@ -73,11 +87,13 @@ impl AnalysisMultiVolumeView {
         AnalysisBinaryView {
             path: self.path.clone(),
             reader: self.reader.clone(),
+            closed: self.closed,
         }
         .probe_rar(py, start_offset, max_blocks_to_walk)
     }
 
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.ensure_open()?;
         let stats = self.reader.stats()?;
         let dict = PyDict::new(py);
         dict.set_item("read_bytes", stats.read_bytes)?;

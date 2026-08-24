@@ -694,7 +694,7 @@ def test_probe_promotion_retries_winerror_5_until_success(tmp_path, monkeypatch)
 
     assert promoted == [str(watch_root / "sample")]
     assert len(replace_attempts) == 3
-    assert sleeps == [0.5, 0.5]
+    assert sleeps == [0.02, 0.04]
     assert (watch_root / "sample" / "payload.bin").is_file()
 
 
@@ -733,7 +733,7 @@ def test_probe_promotion_does_not_retry_other_errors(tmp_path, monkeypatch):
     assert sleeps == []
 
 
-def test_probe_promotion_stops_after_100_winerror_5_retries(tmp_path, monkeypatch):
+def test_probe_promotion_stops_after_bounded_winerror_5_retries(tmp_path, monkeypatch):
     watch_root = tmp_path / "downloads"
     watch_root.mkdir()
     watcher = WatchScheduler(
@@ -771,8 +771,10 @@ def test_probe_promotion_stops_after_100_winerror_5_retries(tmp_path, monkeypatc
     else:
         raise AssertionError("expected retries to stop at the configured limit")
 
-    assert len(attempts) == 101
-    assert sleeps == [0.5] * 100
+    assert len(attempts) == scheduler_module.PROBE_PROMOTION_MAX_RETRIES + 1
+    assert len(sleeps) == scheduler_module.PROBE_PROMOTION_MAX_RETRIES
+    assert sleeps == sorted(sleeps)
+    assert sleeps[-1] == scheduler_module.PROBE_PROMOTION_MAX_RETRY_SECONDS
 
 
 def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, monkeypatch):
@@ -953,6 +955,8 @@ def test_content_event_during_processing_still_starts_new_epoch_from_latest_meta
     engine.handles[0].complete_no_tasks()
     assert _await(watcher.run_once()).processed == 1
     assert len(engine.handles) == 2
+    engine.handles[1].complete_no_tasks()
+    assert _await(watcher.run_once()).processed == 1
 
 
 def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monkeypatch):

@@ -10,6 +10,7 @@ from typing import Any, Callable
 from sunpack.config.cli_settings import load_cli_language_from_config
 from sunpack.i18n import I18nContext
 from sunpack.support.runtime_cwd import runtime_working_directory
+from sunpack.support.resource_lifecycle import open_service_file
 from sunpack.support.runtime_identity import (
     require_runtime_id,
     runtime_id,
@@ -287,7 +288,7 @@ def _open_pipe(name: str) -> _PipeConnection | None:
 
 def _read_state() -> tuple[str, bytes] | None:
     try:
-        with open(state_path(), "r", encoding="ascii") as stream:
+        with open_service_file(state_path(), "r", encoding="ascii") as stream:
             pipe, token_hex = stream.read().splitlines()[:2]
         token = bytes.fromhex(token_hex)
     except (FileNotFoundError, OSError, ValueError):
@@ -860,7 +861,7 @@ def _write_state(name: str, token: bytes) -> None:
     path = state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = f"{path}.{os.getpid()}.tmp"
-    with open(temporary, "w", encoding="ascii", newline="\n") as stream:
+    with open_service_file(temporary, "w", encoding="ascii", newline="\n") as stream:
         stream.write(f"{name}\n{token.hex()}\n")
     os.replace(temporary, path)
 
@@ -868,7 +869,7 @@ def _write_state(name: str, token: bytes) -> None:
 def _remove_state_if_owned(name: str, token: bytes) -> bool:
     path = state_path()
     try:
-        with open(path, "r", encoding="ascii") as stream:
+        with open_service_file(path, "r", encoding="ascii") as stream:
             state_name, token_hex = stream.read().splitlines()[:2]
         if state_name != name or bytes.fromhex(token_hex) != token:
             return False
@@ -883,7 +884,7 @@ def _acquire_server_lock():
 
     path = state_path() + ".lock"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    stream = open(path, "a+b")
+    stream = open_service_file(path, "a+b")
     if stream.tell() == 0:
         stream.write(b"0")
         stream.flush()

@@ -134,14 +134,14 @@ struct TarPrefixRepair {
 }
 
 enum CandidateEncoder {
-    Gzip(GzEncoder<File>),
-    Bzip2(BzEncoder<File>),
-    Xz(XzEncoder<File>),
-    Zstd(ZstdEncoder<'static, File>),
+    Gzip(GzEncoder<TrackedFile>),
+    Bzip2(BzEncoder<TrackedFile>),
+    Xz(XzEncoder<TrackedFile>),
+    Zstd(ZstdEncoder<'static, TrackedFile>),
 }
 
 impl CandidateEncoder {
-    fn new(format: StreamFormat, file: File) -> io::Result<Self> {
+    fn new(format: StreamFormat, file: TrackedFile) -> io::Result<Self> {
         match format {
             StreamFormat::Gzip => Ok(Self::Gzip(GzEncoder::new(file, GzipCompression::default()))),
             StreamFormat::Bzip2 => Ok(Self::Bzip2(BzEncoder::new(
@@ -162,7 +162,7 @@ impl CandidateEncoder {
         }
     }
 
-    fn finish(self) -> io::Result<File> {
+    fn finish(self) -> io::Result<TrackedFile> {
         match self {
             Self::Gzip(encoder) => encoder.finish(),
             Self::Bzip2(encoder) => encoder.finish(),

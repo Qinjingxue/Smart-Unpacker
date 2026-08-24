@@ -131,6 +131,7 @@ impl IocpSlot {
 struct IocpHandles {
     file: Handle,
     port: Handle,
+    _resource: crate::io::resource_lifecycle::NativeResourceGuard,
 }
 
 // Windows kernel handles are process-wide synchronization objects. The
@@ -162,6 +163,10 @@ fn last_error() -> io::Error {
 }
 
 fn open_handles(path: &Path) -> io::Result<IocpHandles> {
+    let resource = crate::io::resource_lifecycle::NativeResourceGuard::register(
+        "iocp_file_handle",
+        [path.to_path_buf()],
+    )?;
     let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
     wide.push(0);
     let file = unsafe {
@@ -198,7 +203,11 @@ fn open_handles(path: &Path) -> io::Result<IocpHandles> {
         return Err(error);
     }
 
-    Ok(IocpHandles { file, port })
+    Ok(IocpHandles {
+        file,
+        port,
+        _resource: resource,
+    })
 }
 
 fn configure_slot(

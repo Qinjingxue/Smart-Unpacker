@@ -11,6 +11,7 @@ from sunpack.repair.model.diagnosis import DIAGNOSIS_GNN_SCORE_SEMANTICS, DIAGNO
 from sunpack.repair.model.diagnosis.model import build_diagnosis_gnn_model
 from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
 from sunpack.repair.model.diagnosis.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
+from sunpack.support.resource_lifecycle import read_task_text
 
 
 class DiagnosisGNNModel:
@@ -263,4 +264,4 @@ def _resolve_device(device: str, torch_module) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return json.loads(read_task_text(path, encoding="utf-8")) if path.is_file() else {}

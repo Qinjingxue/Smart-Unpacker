@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 
@@ -9,7 +10,16 @@ from sunpack.support.archive_sessions import (
     get_archive_session,
     release_archive_sessions_under,
 )
-from sunpack_native import NativeArchiveSession, reader_cache_stats
+from sunpack.analysis.view import MultiVolumeBinaryView, SharedBinaryView
+from sunpack.support.resource_lifecycle import TaskResourceScope, promotion_barrier
+from sunpack_native import (
+    NativeArchiveSession,
+    native_begin_promotion,
+    native_end_promotion,
+    native_resource_snapshot,
+    reader_cache_stats,
+    release_reader_resources_under,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +112,119 @@ def test_release_boundary_allows_windows_pipeline_directory_promotion(tmp_path):
     release_archive_sessions_under(os.fspath(source))
     os.replace(source, target)
     assert (target / "payload.bin").read_bytes() == b"payload"
+
+
+def test_release_boundary_closes_retained_session_and_analysis_view(tmp_path):
+    source = tmp_path / "work"
+    target = tmp_path / "promoted"
+    source.mkdir()
+    path = source / "payload.bin"
+    path.write_bytes(b"payload")
+    session = get_archive_session(os.fspath(path))
+    view = SharedBinaryView(os.fspath(path))
+    assert view.read_at(0, 7) == b"payload"
+
+    with promotion_barrier((source,), cache_releasers=(release_archive_sessions_under,)):
+        assert session.closed
+        assert view.closed
+        os.replace(source, target)
+
+    assert (target / "payload.bin").read_bytes() == b"payload"
+    with pytest.raises((OSError, RuntimeError), match="closed"):
+        session.read_at(0, 1)
+    with pytest.raises(RuntimeError, match="closed"):
+        view.read_at(0, 1)
+
+
+def test_multi_volume_view_registers_and_releases_every_member(tmp_path):
+    source = tmp_path / "volumes"
+    target = tmp_path / "promoted"
+    source.mkdir()
+    first = source / "archive.zip.001"
+    second = source / "archive.zip.002"
+    first.write_bytes(b"abc")
+    second.write_bytes(b"def")
+    view = MultiVolumeBinaryView((first, second))
+    assert view.read_at(1, 4) == b"bcde"
+
+    with promotion_barrier((source,), cache_releasers=(release_archive_sessions_under,)):
+        assert view.closed
+        os.replace(source, target)
+
+    assert (target / first.name).read_bytes() == b"abc"
+    assert (target / second.name).read_bytes() == b"def"
+    with pytest.raises(RuntimeError, match="closed"):
+        view.read_at(0, 1)
+
+
+def test_shared_session_cache_waits_for_all_task_borrowers(tmp_path):
+    path = tmp_path / "shared.bin"
+    path.write_bytes(b"payload")
+    first_scope = TaskResourceScope("first-borrower", files=(path,))
+    second_scope = TaskResourceScope("second-borrower", files=(path,))
+    with first_scope.activate():
+        first = get_archive_session(os.fspath(path))
+    with second_scope.activate():
+        second = get_archive_session(os.fspath(path))
+    assert first is second
+    released = threading.Event()
+
+    def release() -> None:
+        release_archive_sessions_under(os.fspath(tmp_path))
+        released.set()
+
+    worker = threading.Thread(target=release)
+    worker.start()
+    assert not released.wait(0.05)
+    first_scope.close()
+    assert not released.wait(0.05)
+    second_scope.close()
+    worker.join(1.0)
+
+    assert released.is_set()
+    assert first.closed
+
+
+def test_native_registry_reports_reader_until_object_and_pool_are_released(tmp_path):
+    path = tmp_path / "native-registry.bin"
+    path.write_bytes(b"payload")
+    session = NativeArchiveSession(os.fspath(path))
+
+    snapshot = [dict(item) for item in native_resource_snapshot([os.fspath(tmp_path)])]
+    assert any(item["kind"] == "reader_file" for item in snapshot)
+
+    session.close()
+    release_archive_sessions_under(os.fspath(tmp_path))
+
+    assert list(native_resource_snapshot([os.fspath(tmp_path)])) == []
+
+
+def test_reader_pool_release_closes_file_behind_retained_native_view(tmp_path):
+    path = tmp_path / "retained-native-view.bin"
+    path.write_bytes(b"payload")
+    session = NativeArchiveSession(os.fspath(path))
+    view = session.analysis_view()
+    assert bytes(view.read_at(0, 7)) == b"payload"
+
+    session.close()
+    report = dict(release_reader_resources_under(os.fspath(tmp_path)))
+
+    assert report["handles"] == 1
+    assert list(native_resource_snapshot([os.fspath(tmp_path)])) == []
+    with pytest.raises((OSError, RuntimeError), match="resource closed"):
+        view.read_at(0, 1)
+
+
+def test_native_promotion_gate_rejects_new_overlapping_file_handles(tmp_path):
+    path = tmp_path / "native-gated.bin"
+    path.write_bytes(b"payload")
+    token = native_begin_promotion([os.fspath(tmp_path)])
+    try:
+        with pytest.raises((BlockingIOError, OSError), match="blocked by promotion"):
+            NativeArchiveSession(os.fspath(path))
+    finally:
+        native_end_promotion(token)
+
+    session = NativeArchiveSession(os.fspath(path))
+    assert bytes(session.read_at(0, 7)) == b"payload"
+    session.close()

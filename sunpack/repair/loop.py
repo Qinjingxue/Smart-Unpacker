@@ -19,6 +19,7 @@ from sunpack.repair.result import RepairResult
 from sunpack.repair.knowledge import write_repair_loop_state, write_repair_loop_update, write_repair_stop
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import archive_state_to_bytes
+from sunpack.support.resource_lifecycle import open_task_file
 
 
 LOGGER = logging.getLogger(__name__)
@@ -777,7 +778,7 @@ def _hash_path(h: Any, path: str) -> None:
     try:
         item = Path(text)
         h.update(str(item.stat().st_size).encode("ascii"))
-        with item.open("rb") as handle:
+        with open_task_file(item, "rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 h.update(chunk)
     except OSError:
@@ -795,7 +796,7 @@ def _hash_range(h: Any, path: str, start: int, end: int | None) -> None:
         item = Path(text)
         size = item.stat().st_size
         stop = size if end is None else min(size, max(start, int(end)))
-        with item.open("rb") as handle:
+        with open_task_file(item, "rb") as handle:
             handle.seek(start)
             remaining = max(0, stop - start)
             while remaining:

@@ -16,17 +16,34 @@ impl AnalysisBinaryView {
                 max_concurrent_reads,
             },
         )?;
-        Ok(Self { path, reader })
+        Ok(Self {
+            path,
+            reader,
+            closed: false,
+        })
     }
 
     #[getter]
     fn size(&self) -> PyResult<u64> {
+        self.ensure_open()?;
         Ok(self.reader.len())
     }
 
     #[getter]
     fn path(&self) -> PyResult<String> {
         Ok(self.path.clone())
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.closed
+    }
+
+    fn close(&mut self) {
+        if !self.closed {
+            self.reader = ManagedReader::closed();
+            self.closed = true;
+        }
     }
 
     fn read_at<'py>(
@@ -48,6 +65,7 @@ impl AnalysisBinaryView {
     }
 
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.ensure_open()?;
         let stats = self.reader.stats()?;
         let dict = PyDict::new(py);
         dict.set_item("read_bytes", stats.read_bytes)?;

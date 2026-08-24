@@ -10,6 +10,7 @@ from typing import Any
 from sunpack.repair.config import repair_system_mode
 from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.support.resources import candidate_resource_roots, find_resource_path
+from sunpack.support.resource_lifecycle import open_service_file, read_task_text
 
 
 MODEL_MANIFEST_NAME = "models/manifest.json"
@@ -194,12 +195,12 @@ def _load_asset(asset: ModelAsset, *, device: str) -> Any:
 def _read_json(path: Path | None) -> dict[str, Any]:
     if path is None or not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(read_task_text(path, encoding="utf-8"))
 
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with open_service_file(path, "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()

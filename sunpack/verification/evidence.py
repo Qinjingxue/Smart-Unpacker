@@ -10,6 +10,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.resource_lifecycle import read_task_text
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, An
     if not manifest_path:
         return None
     try:
-        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        payload = json.loads(read_task_text(Path(manifest_path), encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None

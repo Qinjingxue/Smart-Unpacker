@@ -196,7 +196,13 @@ class AsyncWorkBroker:
             raise RuntimeError("AsyncWorkBroker is closed")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[T] = loop.create_future()
-        request_key = str(request_id or file_id or "default")
+        if request_id:
+            request_key = str(request_id)
+        else:
+            from sunpack.support.resource_lifecycle import current_task_resource_scope
+
+            scope = current_task_resource_scope()
+            request_key = str(scope.task_id if scope is not None else file_id or "default")
         self._sequence += 1
         item = _WorkItem(
             context=WorkContext(
@@ -343,7 +349,26 @@ class AsyncWorkBroker:
         item.token.raise_if_cancelled()
         marker = CURRENT_WORK.set(item.context)
         try:
-            return item.operation()
+            from sunpack.support.resource_lifecycle import ResourceKind, task_resource_scope
+
+            scope = task_resource_scope(item.context.request_id)
+            if scope is None:
+                return item.operation()
+            with scope.operation():
+                operation_lease = None
+                file_id = str(item.context.file_id or "")
+                if file_id and (os.path.isabs(file_id) or os.path.exists(file_id)):
+                    operation_lease = scope.register(
+                        item,
+                        (file_id,),
+                        lambda: None,
+                        kind=ResourceKind.FILE_OPERATION,
+                    )
+                try:
+                    return item.operation()
+                finally:
+                    if operation_lease is not None:
+                        operation_lease.close()
         finally:
             CURRENT_WORK.reset(marker)
 

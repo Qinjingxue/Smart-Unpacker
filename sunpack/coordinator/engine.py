@@ -33,6 +33,7 @@ from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.archive_sessions import release_archive_sessions_under
+from sunpack.support.resource_lifecycle import TaskResourceScope, promotion_barrier
 from sunpack.detection.options import DetectionOptions
 from sunpack.coordinator.async_work import AsyncWorkBroker, CancellationToken, map_bounded
 
@@ -184,31 +185,39 @@ class PipelineEngine:
             progress_callback=progress_callback,
         )
         cancellation = CancellationToken()
+        resource_scope = TaskResourceScope(
+            submission.request_id,
+            files=(target.path for target in submission.targets),
+        )
         task = asyncio.current_task()
         if task is not None:
             self._active_requests[submission.request_id] = task
-        try:
-            target_paths = [target.path for target in submission.targets]
-            while not self._path_leases.try_acquire(submission.request_id, target_paths):
-                cancellation.raise_if_cancelled()
-                await asyncio.sleep(0.01)
-            runtime = self._request_runtime_factory(
-                self._services,
-                submission,
-                self.detection_options,
-                self._path_leases,
-            )
-            response = await runtime.execute_async(self._broker, cancellation)
-            self._remember_recent_passwords(response.recent_passwords)
-            committer = output_committer or DirectOutputCommitter(self._broker, stdout=stdout)
-            return await committer.commit(submission.config, response)
-        except asyncio.CancelledError:
-            cancellation.cancel()
-            raise
-        finally:
-            self._services.output_reservations.release(submission.request_id)
-            self._path_leases.release(submission.request_id)
-            self._active_requests.pop(submission.request_id, None)
+        with resource_scope.activate():
+            try:
+                target_paths = [target.path for target in submission.targets]
+                while not self._path_leases.try_acquire(submission.request_id, target_paths):
+                    cancellation.raise_if_cancelled()
+                    await asyncio.sleep(0.01)
+                runtime = self._request_runtime_factory(
+                    self._services,
+                    submission,
+                    self.detection_options,
+                    self._path_leases,
+                )
+                response = await runtime.execute_async(self._broker, cancellation)
+                self._remember_recent_passwords(response.recent_passwords)
+                committer = output_committer or DirectOutputCommitter(self._broker, stdout=stdout)
+                return await committer.commit(submission.config, response)
+            except asyncio.CancelledError:
+                cancellation.cancel()
+                raise
+            finally:
+                try:
+                    await resource_scope.aclose()
+                finally:
+                    self._services.output_reservations.release(submission.request_id)
+                    self._path_leases.release(submission.request_id)
+                    self._active_requests.pop(submission.request_id, None)
 
     async def clear_runtime_caches(self) -> dict:
         """Clear process-wide runtime caches only while this engine is idle."""
@@ -722,13 +731,21 @@ def _finalize_response(
     flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
     shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
     flatten_enabled = config.get("post_extract", {}).get("flatten_single_directory", True)
-    if flatten_enabled:
-        for target in flatten_targets:
-            release_archive_sessions_under(target)
-    PostProcessActions(config, stdout=stdout).apply(
-        archives_to_clean=archives_to_clean,
-        flatten_targets=flatten_targets,
-    )
+    mutation_roots = [*flatten_targets, *(path for family in archives_to_clean for path in family)]
+    if mutation_roots:
+        with promotion_barrier(
+            mutation_roots,
+            cache_releasers=(release_archive_sessions_under,),
+        ):
+            PostProcessActions(config, stdout=stdout).apply(
+                archives_to_clean=archives_to_clean,
+                flatten_targets=flatten_targets,
+            )
+    else:
+        PostProcessActions(config, stdout=stdout).apply(
+            archives_to_clean=archives_to_clean,
+            flatten_targets=flatten_targets,
+        )
     notify_shell_directories_updated(shell_refresh_paths)
 
 

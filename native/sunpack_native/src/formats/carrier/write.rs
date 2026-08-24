@@ -2,7 +2,10 @@ fn write_slice_candidate(bytes: &[u8], output: &Path) -> std::io::Result<u64> {
     ensure_parent(output)?;
     let temp = temp_path(output);
     let result = (|| -> std::io::Result<u64> {
-        let mut file = File::create(&temp)?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "carrier_repair_output",
+        )?;
         file.write_all(bytes)?;
         file.flush()?;
         Ok(bytes.len() as u64)

@@ -7,7 +7,11 @@ fn write_recompressed_stream(
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<u64, String> {
-        let file = File::create(&temp).map_err(|err| err.to_string())?;
+        let file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "stream_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         let mut encoder = CandidateEncoder::new(format, file).map_err(|err| err.to_string())?;
         encoder.write_all(data).map_err(|err| err.to_string())?;
         let mut file = encoder.finish().map_err(|err| err.to_string())?;

@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from sunpack.contracts.failures import FailureKind, PASSWORD_FAILURE_KINDS
 from sunpack.i18n import I18nContext
+from sunpack.support.resource_lifecycle import task_glob, write_task_text
 from sunpack.platform.windows.toast_protocol import (
     ToastAction,
     ToastActionKind,
@@ -129,7 +130,7 @@ class WatchFailureReportStore:
                 )
                 lines.append(self.i18n.t("toast.report.details", details=details))
             lines.append("")
-        temporary.write_text("\n".join(lines), encoding="utf-8")
+        write_task_text(temporary, "\n".join(lines), encoding="utf-8")
         os.replace(temporary, path)
         self._trim()
         return str(path)
@@ -137,7 +138,7 @@ class WatchFailureReportStore:
     def _trim(self) -> None:
         try:
             files = sorted(
-                (item for item in self.directory.glob("failed-*.txt") if item.is_file()),
+                (item for item in task_glob(self.directory, "failed-*.txt") if item.is_file()),
                 key=lambda item: item.stat().st_mtime,
                 reverse=True,
             )

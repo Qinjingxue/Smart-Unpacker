@@ -1,6 +1,7 @@
+use crate::io::resource_lifecycle::TrackedFile;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -55,9 +56,9 @@ pub(crate) fn repair_copy_range_to_file(
     ensure_parent(output)?;
     let temp = temp_path(output);
     let result = (|| -> PyResult<()> {
-        let mut source = File::open(source_path)?;
+        let mut source = TrackedFile::open(source_path, "repair_source")?;
         source.seek(SeekFrom::Start(start))?;
-        let mut target = File::create(&temp)?;
+        let mut target = TrackedFile::create(&temp, "repair_output")?;
         copy_limited(
             &mut source,
             &mut target,
@@ -80,9 +81,9 @@ pub(crate) fn repair_concat_ranges_to_file(
     ensure_parent(output)?;
     let temp = temp_path(output);
     let result = (|| -> PyResult<()> {
-        let mut target = File::create(&temp)?;
+        let mut target = TrackedFile::create(&temp, "repair_output")?;
         for range in parsed {
-            let mut source = File::open(&range.path)?;
+            let mut source = TrackedFile::open(&range.path, "repair_source")?;
             source.seek(SeekFrom::Start(range.start))?;
             copy_limited(
                 &mut source,
@@ -109,7 +110,7 @@ pub(crate) fn repair_patch_file(
     let temp = temp_path(output);
     let result = (|| -> PyResult<()> {
         fs::copy(source_path, &temp)?;
-        let mut target = File::options().read(true).write(true).open(&temp)?;
+        let mut target = TrackedFile::open_read_write(&temp, "repair_output")?;
         for patch in &parsed {
             target.seek(SeekFrom::Start(patch.offset))?;
             target.write_all(&patch.data)?;
@@ -135,7 +136,7 @@ struct PatchSpec {
 }
 
 fn read_file_range(path: &str, start: u64, end: Option<u64>) -> PyResult<Vec<u8>> {
-    let mut file = File::open(path)?;
+    let mut file = TrackedFile::open(path, "repair_source")?;
     file.seek(SeekFrom::Start(start))?;
     let mut output = Vec::new();
     match end {
@@ -155,7 +156,11 @@ fn read_file_range(path: &str, start: u64, end: Option<u64>) -> PyResult<Vec<u8>
     Ok(output)
 }
 
-fn copy_limited(source: &mut File, target: &mut File, limit: Option<u64>) -> PyResult<u64> {
+fn copy_limited(
+    source: &mut TrackedFile,
+    target: &mut TrackedFile,
+    limit: Option<u64>,
+) -> PyResult<u64> {
     let mut copied = 0u64;
     let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
     loop {
@@ -229,7 +234,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> PyResult<()> {
     ensure_parent(path)?;
     let temp = temp_path(path);
     let result = (|| -> PyResult<()> {
-        let mut file = File::create(&temp)?;
+        let mut file = TrackedFile::create(&temp, "repair_output")?;
         file.write_all(data)?;
         file.flush()?;
         Ok(())

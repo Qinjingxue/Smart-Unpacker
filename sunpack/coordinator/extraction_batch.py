@@ -39,6 +39,7 @@ from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.support.output_cleanup import OutputCleanupEvent
 from sunpack.coordinator.async_work import map_unbounded
+from sunpack.support.resource_lifecycle import open_task_file, read_task_text, write_task_text
 
 
 def _advance_batch_state(state, sent, *, first: bool):
@@ -1811,7 +1812,7 @@ def _write_repair_candidate_jsonl(task: ArchiveTask, outcome: BatchExtractionOut
     target = target_dir / "repair_candidates.jsonl"
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        with target.open("w", encoding="utf-8") as handle:
+        with open_task_file(target, "w", encoding="utf-8") as handle:
             for record in _repair_candidate_jsonl_records(task, outcome, entries):
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str))
                 handle.write("\n")
@@ -2186,7 +2187,7 @@ def _write_recovery_report(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         pretty = _json_pretty_reports(config)
-        target.write_text(_json_text(payload, pretty=pretty), encoding="utf-8")
+        write_task_text(target, _json_text(payload, pretty=pretty), encoding="utf-8")
         _annotate_progress_manifest(outcome.result.progress_manifest, payload, manifest=manifest, pretty=pretty)
         return str(target)
     except OSError:
@@ -2248,7 +2249,7 @@ def _annotate_progress_manifest(
             item["recovery_status"] = "kept_complete" if status == "complete" else "kept_partial_or_unverified"
             item["user_action"] = _user_action_for_file_status(status)
     try:
-        path.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
+        write_task_text(path, _json_text(manifest, pretty=pretty), encoding="utf-8")
     except OSError:
         return
 
@@ -2327,7 +2328,7 @@ def _read_manifest(manifest_path: str) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_task_text(path, encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}

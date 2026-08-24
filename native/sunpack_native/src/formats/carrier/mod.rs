@@ -1,7 +1,7 @@
 use flate2::read::GzDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 

@@ -10,6 +10,7 @@ from sunpack.repair.model.policy import POLICY_TRANSFORMER_SEMANTICS
 from sunpack.repair.model.policy.model import build_repair_policy_transformer
 from sunpack.repair.model.policy.schema import PolicyGraphTrainingSample, PolicyWorldTrainingSample
 from sunpack.repair.model.policy.tensorize import WORLD_BASE_TARGET_DIM, WORLD_DIAGNOSIS_TARGET_DIM, tensorize_sample, tensorize_world_sample
+from sunpack.support.resource_lifecycle import read_task_text
 
 
 class RepairPolicyTransformerModel:
@@ -189,4 +190,4 @@ def _resolve_device(device: str, torch_module) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return json.loads(read_task_text(path, encoding="utf-8")) if path.is_file() else {}

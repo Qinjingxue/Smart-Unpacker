@@ -137,7 +137,11 @@ fn write_tar_repair_candidate(
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<u64, String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "tar_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         let end = repair
             .truncate_at
             .map(|value| value as usize)

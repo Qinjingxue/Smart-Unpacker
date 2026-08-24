@@ -11,6 +11,7 @@ from sunpack.repair.pipeline.modules._native_candidates import candidates_from_n
 from sunpack.repair.pipeline.modules._native_validation import validate_with_native_probe
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
+from sunpack.support.resource_lifecycle import open_task_file
 
 from sunpack_native import archive_carrier_crop_recovery as _native_archive_carrier_crop_recovery
 
@@ -272,7 +273,7 @@ def _truncate_if_longer(path: str, output_bytes: int) -> None:
     try:
         if not candidate.is_file() or candidate.stat().st_size <= output_bytes:
             return
-        with candidate.open("r+b") as handle:
+        with open_task_file(candidate, "r+b") as handle:
             handle.truncate(output_bytes)
     except OSError:
         return

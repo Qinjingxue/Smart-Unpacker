@@ -13,6 +13,8 @@ from sunpack.support.output_cleanup import (
     OutputCleanupResult,
     OutputRole,
 )
+from sunpack.support.archive_sessions import release_archive_sessions_under
+from sunpack.support.resource_lifecycle import promotion_barrier
 
 
 def shelve_outcome_if_needed(outcome: Any | None, out_dir: str) -> None:
@@ -25,14 +27,18 @@ def shelve_outcome_if_needed(outcome: Any | None, out_dir: str) -> None:
     attempt_id = str(getattr(outcome, "attempt_id", "") or "")
     suffix = (attempt_id or _outcome_storage_id(outcome))[:12]
     held = target.with_name(f"{target.name}.incumbent_{suffix}")
-    cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_scoped_path(
-        str(held),
-        event=OutputCleanupEvent.INCUMBENT_REPLACE,
-        role=OutputRole.INCUMBENT,
-        workspace_root=str(held.parent),
-    )
-    _require_cleanup_ready(cleanup)
-    shutil.move(str(current), str(held))
+    with promotion_barrier(
+        (current, held),
+        cache_releasers=(release_archive_sessions_under,),
+    ):
+        cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_scoped_path(
+            str(held),
+            event=OutputCleanupEvent.INCUMBENT_REPLACE,
+            role=OutputRole.INCUMBENT,
+            workspace_root=str(held.parent),
+        )
+        _require_cleanup_ready(cleanup)
+        shutil.move(str(current), str(held))
     retarget_result_output(outcome.result, str(current), str(held))
 
 
@@ -43,13 +49,17 @@ def promote_recovery_outcome(outcome: Any, out_dir: str) -> None:
         return
     if not current.exists():
         return
-    cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
-        str(target),
-        event=OutputCleanupEvent.PROMOTE_REPLACE_TARGET,
-        planned_output_dir=str(target),
-    )
-    _require_cleanup_ready(cleanup)
-    shutil.move(str(current), str(target))
+    with promotion_barrier(
+        (current, target),
+        cache_releasers=(release_archive_sessions_under,),
+    ):
+        cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
+            str(target),
+            event=OutputCleanupEvent.PROMOTE_REPLACE_TARGET,
+            planned_output_dir=str(target),
+        )
+        _require_cleanup_ready(cleanup)
+        shutil.move(str(current), str(target))
     retarget_result_output(outcome.result, str(current), str(target))
 
 
@@ -70,13 +80,17 @@ def promote_beam_output(result: ExtractionResult, temp_dir: str, out_dir: str) -
     if os.path.abspath(temp_dir) != os.path.abspath(out_dir):
         if not os.path.exists(temp_dir):
             return result
-        cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
-            out_dir,
-            event=OutputCleanupEvent.PROMOTE_REPLACE_TARGET,
-            planned_output_dir=out_dir,
-        )
-        _require_cleanup_ready(cleanup)
-        shutil.move(temp_dir, out_dir)
+        with promotion_barrier(
+            (temp_dir, out_dir),
+            cache_releasers=(release_archive_sessions_under,),
+        ):
+            cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
+                out_dir,
+                event=OutputCleanupEvent.PROMOTE_REPLACE_TARGET,
+                planned_output_dir=out_dir,
+            )
+            _require_cleanup_ready(cleanup)
+            shutil.move(temp_dir, out_dir)
     result.out_dir = out_dir
     if isinstance(result.output_inventory_payload, dict):
         result.output_inventory_payload = {

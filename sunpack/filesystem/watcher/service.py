@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import json
 import os
-import tempfile
 import threading
 import time
 from copy import deepcopy
@@ -21,6 +20,11 @@ from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.filesystem.watcher.toast import WatchToastCoordinator
 from sunpack.support.resources import get_resource_path
+from sunpack.support.resource_lifecycle import (
+    named_task_temporary_file,
+    read_task_text,
+    write_task_text,
+)
 
 
 SERVICE_STATE = "state.json"
@@ -97,7 +101,7 @@ def request_initial_scan(config: dict, roots: list[str]) -> Path | None:
     with _watch_roots_mutex():
         merged_roots = list(requested_roots)
         try:
-            previous = json.loads(request_path.read_text(encoding="utf-8"))
+            previous = json.loads(read_task_text(request_path, encoding="utf-8"))
         except (FileNotFoundError, OSError, TypeError, ValueError):
             previous = None
         if isinstance(previous, dict):
@@ -112,7 +116,7 @@ def request_initial_scan(config: dict, roots: list[str]) -> Path | None:
         payload = {"requested_at": time.time(), "roots": merged_roots}
         temp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
+            with named_task_temporary_file(
                 mode="w",
                 encoding="utf-8",
                 dir=request_path.parent,
@@ -136,7 +140,7 @@ def consume_initial_scan_request(config: dict) -> list[str] | None:
     request_path = initial_scan_request_path(config)
     with _watch_roots_mutex():
         try:
-            payload = json.loads(request_path.read_text(encoding="utf-8"))
+            payload = json.loads(read_task_text(request_path, encoding="utf-8"))
         except (FileNotFoundError, OSError, TypeError, ValueError):
             payload = None
         try:
@@ -177,7 +181,7 @@ def watch_roots_path() -> Path:
 def read_watch_roots(path: Path | None = None) -> list[str]:
     roots_path = path or watch_roots_path()
     try:
-        lines = roots_path.read_text(encoding="utf-8").splitlines()
+        lines = read_task_text(roots_path, encoding="utf-8").splitlines()
     except FileNotFoundError:
         return []
     except OSError:
@@ -215,7 +219,7 @@ def _write_watch_roots_unlocked(roots: list[str], roots_path: Path) -> Path:
         seen.add(key)
     roots_path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(f"{root}\n" for root in normalized_roots)
-    roots_path.write_text(text, encoding="utf-8")
+    write_task_text(roots_path, text, encoding="utf-8")
     return roots_path
 
 

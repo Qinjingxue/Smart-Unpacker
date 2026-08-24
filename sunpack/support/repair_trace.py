@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.support.json_values import canonical_digest, jsonable_value
+from sunpack.support.resource_lifecycle import open_task_file
 
 
 _LOCK = threading.Lock()
@@ -57,7 +58,7 @@ def _write_jsonl(path: str, event: str, payload: dict[str, Any] | None = None) -
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(_jsonable(record), ensure_ascii=False, sort_keys=True)
         with _LOCK:
-            with trace_path.open("a", encoding="utf-8") as handle:
+            with open_task_file(trace_path, "a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.write("\n")
     except Exception:

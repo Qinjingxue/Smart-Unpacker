@@ -60,6 +60,18 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(io::reader::reader_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(io::reader::clear_reader_resources, m)?)?;
     m.add_function(wrap_pyfunction!(
+        io::resource_lifecycle::native_resource_snapshot,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        io::resource_lifecycle::native_begin_promotion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        io::resource_lifecycle::native_end_promotion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         formats::seven_zip::seven_zip_runtime_cache_stats,
         m
     )?)?;
@@ -69,6 +81,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         io::reader::release_reader_handles_under,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        io::reader::release_reader_resources_under,
         m
     )?)?;
     m.add_class::<analysis_native::AnalysisBinaryView>()?;

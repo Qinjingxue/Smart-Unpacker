@@ -58,14 +58,25 @@ from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
 from sunpack.support.collections import dedupe_normalized_paths
 from sunpack.support.archive_sessions import release_archive_sessions_under
+from sunpack.support.resource_lifecycle import (
+    ResourceKind,
+    audit_open_files,
+    lifecycle_registration,
+    open_service_file,
+    promotion_barrier,
+    register_service_resource,
+    resource_snapshot,
+    task_scandir,
+)
 from sunpack.coordinator.engine import IdentityOutputCommitter, MappedOutputCommitter
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 
-PROBE_PROMOTION_RETRY_SECONDS = 0.5
-PROBE_PROMOTION_MAX_RETRIES = 100
+PROBE_PROMOTION_RETRY_SECONDS = 0.02
+PROBE_PROMOTION_MAX_RETRY_SECONDS = 0.5
+PROBE_PROMOTION_MAX_RETRIES = 12
 USN_REASON_DATA_OVERWRITE = 0x00000001
 USN_REASON_DATA_EXTEND = 0x00000002
 USN_REASON_DATA_TRUNCATION = 0x00000004
@@ -201,6 +212,7 @@ class WatchScheduler:
         self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
         self._observer = Observer()
+        self._observer_resource = None
         self._started = False
         self._run_wakeup = threading.Event()
         self._wake_callback = wake_callback
@@ -295,7 +307,20 @@ class WatchScheduler:
         builtin_password_dir_key = os.path.normcase(os.path.abspath(builtin_password_dir))
         if os.path.isdir(builtin_password_dir) and builtin_password_dir_key not in scheduled_paths:
             self._observer.schedule(handler, builtin_password_dir, recursive=False)
-        self._observer.start()
+        with lifecycle_registration(self.watch_roots):
+            self._observer.start()
+            try:
+                self._observer_resource = register_service_resource(
+                    self._observer,
+                    self.watch_roots,
+                    self._release_observer,
+                    kind=ResourceKind.DIRECTORY_WATCH,
+                    registration_held=True,
+                    promotion_blocking=False,
+                )
+            except BaseException:
+                self._release_observer()
+                raise
         self._clipboard_monitor.start()
         self._started = True
         for pending in self.state.pending_work_items():
@@ -328,7 +353,7 @@ class WatchScheduler:
             if not is_directory_password_file(str(password_file), self.config):
                 continue
             try:
-                password_file.open("x", encoding="utf-8").close()
+                open_service_file(password_file, "x", encoding="utf-8").close()
             except FileExistsError:
                 pass
 
@@ -343,12 +368,19 @@ class WatchScheduler:
     def _stop_blocking(self):
         if not self._started:
             return
-        self._observer.stop()
-        self._observer.join(timeout=self.observer_stop_timeout_seconds)
+        if self._observer_resource is not None:
+            self._observer_resource.close()
+            self._observer_resource = None
+        else:
+            self._release_observer()
         self._clipboard_monitor.stop()
         with self._lock:
             self._cache_cleanup_deadline = None
         self._started = False
+
+    def _release_observer(self) -> None:
+        self._observer.stop()
+        self._observer.join(timeout=self.observer_stop_timeout_seconds)
 
     async def run_forever(self):
         await self.start()
@@ -1480,7 +1512,11 @@ class WatchScheduler:
         probe_root = self._probe_root_for(path)
         os.makedirs(probe_root, exist_ok=True)
         owner_dir = os.path.join(probe_root, identity)
-        shutil.rmtree(owner_dir, ignore_errors=True)
+        with promotion_barrier(
+            (owner_dir,),
+            cache_releasers=(release_archive_sessions_under,),
+        ):
+            shutil.rmtree(owner_dir, ignore_errors=True)
         workspace = os.path.join(owner_dir, "work")
         os.makedirs(workspace, exist_ok=True)
         return workspace
@@ -1488,7 +1524,11 @@ class WatchScheduler:
     def _cleanup_probe_workspace(self, workspace: str) -> None:
         owner_dir = os.path.dirname(os.path.abspath(workspace))
         probe_root = os.path.dirname(owner_dir)
-        shutil.rmtree(owner_dir, ignore_errors=True)
+        with promotion_barrier(
+            (owner_dir,),
+            cache_releasers=(release_archive_sessions_under,),
+        ):
+            shutil.rmtree(owner_dir, ignore_errors=True)
         os.makedirs(probe_root, exist_ok=True)
 
     async def _promote_probe_outputs(
@@ -1509,6 +1549,7 @@ class WatchScheduler:
         ]
         promoted: list[str] = []
         path_map: dict[str, str] = {}
+        plans: list[tuple[str, str]] = []
         for index, source in enumerate(sources):
             if index < len(predicted_final_dirs):
                 target = predicted_final_dirs[index]
@@ -1516,26 +1557,40 @@ class WatchScheduler:
                 target = os.path.join(os.path.dirname(predicted_final_dirs[0]), os.path.basename(source))
             target = _next_nonexisting_path(target)
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            release_archive_sessions_under(source)
-            try:
-                await self._retry_probe_promotion_on_access_denied(
-                    lambda: os.replace(source, target),
-                    source,
-                    target,
-                )
-            except OSError as exc:
-                if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
-                    raise
-                await self._retry_probe_promotion_on_access_denied(
-                    lambda: shutil.move(source, target),
-                    source,
-                    target,
-                )
-            promoted.append(target)
-            path_map[source] = target
-            for reported in reported_sources:
-                if reported != source and _is_relative_to(reported, source):
-                    path_map[reported] = os.path.join(target, os.path.relpath(reported, source))
+            plans.append((source, target))
+        promotion_roots = [*sources, *(target for _source, target in plans)]
+        with promotion_barrier(
+            promotion_roots,
+            cache_releasers=(release_archive_sessions_under,),
+        ) as barrier_report:
+            for source, target in plans:
+                try:
+                    await self._retry_probe_promotion_on_access_denied(
+                        lambda source=source, target=target: os.replace(source, target),
+                        source,
+                        target,
+                    )
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
+                        raise
+                    await self._retry_probe_promotion_on_access_denied(
+                        lambda source=source, target=target: shutil.move(source, target),
+                        source,
+                        target,
+                    )
+                promoted.append(target)
+                path_map[source] = target
+                for reported in reported_sources:
+                    if reported != source and _is_relative_to(reported, source):
+                        path_map[reported] = os.path.join(target, os.path.relpath(reported, source))
+        self.log.write(
+            "probe_promotion_barrier",
+            roots=list(barrier_report.roots),
+            released_resources=barrier_report.released_resources,
+            gate_wait_seconds=barrier_report.gate_wait_seconds,
+            cleanup_seconds=barrier_report.cleanup_seconds,
+            barrier_seconds=barrier_report.barrier_seconds,
+        )
         await self.pipeline_engine.work_broker.run(
             "watch_cleanup",
             workspace,
@@ -1564,6 +1619,14 @@ class WatchScheduler:
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 5:
                     raise
+                if retries == 0:
+                    self.log.write(
+                        "probe_promotion_access_denied_audit",
+                        source=source,
+                        target=target,
+                        resources=list(resource_snapshot((source,))),
+                        open_files=list(audit_open_files((source,))),
+                    )
                 if retries >= PROBE_PROMOTION_MAX_RETRIES:
                     raise
                 retries += 1
@@ -1575,10 +1638,16 @@ class WatchScheduler:
                     target=target,
                     retry=retries,
                     max_retries=PROBE_PROMOTION_MAX_RETRIES,
-                    retry_seconds=PROBE_PROMOTION_RETRY_SECONDS,
+                    retry_seconds=min(
+                        PROBE_PROMOTION_RETRY_SECONDS * (2 ** max(0, retries - 1)),
+                        PROBE_PROMOTION_MAX_RETRY_SECONDS,
+                    ),
                     error=str(exc),
                 )
-                await asyncio.sleep(PROBE_PROMOTION_RETRY_SECONDS)
+                await asyncio.sleep(min(
+                    PROBE_PROMOTION_RETRY_SECONDS * (2 ** max(0, retries - 1)),
+                    PROBE_PROMOTION_MAX_RETRY_SECONDS,
+                ))
 
     def _is_under_watched_root(self, path: str) -> bool:
         normalized = os.path.normcase(os.path.abspath(path))
@@ -1828,17 +1897,22 @@ def _is_under_any_root(path: str, roots: list[str]) -> bool:
 
 def _clear_directory_contents(path: str) -> None:
     try:
-        entries = list(os.scandir(path))
+        with task_scandir(path) as iterator:
+            entries = list(iterator)
     except OSError:
         return
-    for entry in entries:
-        try:
-            if entry.is_dir(follow_symlinks=False):
-                shutil.rmtree(entry.path, ignore_errors=True)
-            else:
-                os.unlink(entry.path)
-        except OSError:
-            continue
+    with promotion_barrier(
+        (path,),
+        cache_releasers=(release_archive_sessions_under,),
+    ):
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                else:
+                    os.unlink(entry.path)
+            except OSError:
+                continue
 
 
 def _target_result_for_path(summary, path: str):

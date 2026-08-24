@@ -8,7 +8,11 @@ fn write_candidate_zip(
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<WriteStats, String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "zip_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         let mut central_directory = Vec::new();
         let mut verified_entries = 0usize;
         let mut descriptor_entries = 0usize;

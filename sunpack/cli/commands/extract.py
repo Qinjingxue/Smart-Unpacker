@@ -1,5 +1,7 @@
 import json
 
+from sunpack.support.resource_lifecycle import open_task_file
+
 from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
@@ -246,7 +248,7 @@ def _read_recovery_report(path: str) -> dict:
     if not path:
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open_task_file(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return {}

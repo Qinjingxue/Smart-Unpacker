@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from sunpack.support.resource_lifecycle import open_service_file, read_task_text, write_task_text
+
 from sunpack.passwords.internal.lists import dedupe_passwords, read_password_file
 from sunpack.support.resources import find_resource_path, get_resource_path
 
@@ -34,7 +36,7 @@ def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 
     if not builtin_path.exists():
         _ensure_builtin_password_file(builtin_path)
     try:
-        original = builtin_path.read_text(encoding="utf-8")
+        original = read_task_text(builtin_path, encoding="utf-8")
     except Exception:
         original = ""
     existing = _read_watch_clipboard_block(original)
@@ -46,7 +48,7 @@ def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 
     try:
         builtin_path.parent.mkdir(parents=True, exist_ok=True)
         temp = builtin_path.with_name(f".{builtin_path.name}.tmp")
-        temp.write_text(updated, encoding="utf-8")
+        write_task_text(temp, updated, encoding="utf-8")
         temp.replace(builtin_path)
         return True
     except Exception:
@@ -56,7 +58,7 @@ def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 
 def _ensure_builtin_password_file(path: Path) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
+        with open_service_file(path, "w", encoding="utf-8") as handle:
             handle.write("# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。\n")
             for password in DEFAULT_BUILTIN_PASSWORDS:
                 handle.write(password + "\n")

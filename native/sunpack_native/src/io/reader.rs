@@ -1,14 +1,15 @@
 use crate::io::read_fault::{FieldLocation, ReadFault};
+use crate::io::resource_lifecycle::TrackedFile;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{File, Metadata};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::SystemTime;
 
 #[cfg(test)]
@@ -163,6 +164,10 @@ impl ManagedReader {
                 uncached_read_bytes: AtomicU64::new(0),
             }),
         }
+    }
+
+    pub(crate) fn closed() -> Self {
+        Self::new(Arc::new(ClosedSource), ReaderConfig::default())
     }
 
     pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -457,8 +462,21 @@ impl ManagedReader {
 pub(crate) struct NativeArchiveSession {
     path: String,
     reader: ManagedReader,
+    closed: bool,
     seven_zip_password_probe:
         OnceLock<Option<Arc<crate::formats::seven_zip::SevenZipPasswordProbe>>>,
+}
+
+impl NativeArchiveSession {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.closed {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "native archive session is closed",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[pymethods]
@@ -469,6 +487,7 @@ impl NativeArchiveSession {
         Ok(Self {
             path,
             reader,
+            closed: false,
             seven_zip_password_probe: OnceLock::new(),
         })
     }
@@ -479,8 +498,21 @@ impl NativeArchiveSession {
     }
 
     #[getter]
-    fn size(&self) -> u64 {
-        self.reader.len()
+    fn size(&self) -> PyResult<u64> {
+        self.ensure_open()?;
+        Ok(self.reader.len())
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.closed
+    }
+
+    fn close(&mut self) {
+        if !self.closed {
+            self.reader = ManagedReader::closed();
+            self.closed = true;
+        }
     }
 
     fn read_at<'py>(
@@ -489,11 +521,13 @@ impl NativeArchiveSession {
         offset: u64,
         len: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        self.ensure_open()?;
         let data = self.reader.read_at(offset, len)?;
         Ok(PyBytes::new(py, &data))
     }
 
     fn prefetch(&self, ranges: Vec<(u64, usize)>) -> PyResult<()> {
+        self.ensure_open()?;
         self.reader.prefetch(&ranges)?;
         Ok(())
     }
@@ -504,18 +538,25 @@ impl NativeArchiveSession {
         cache_bytes: usize,
         max_read_bytes: Option<u64>,
         max_concurrent_reads: usize,
-    ) -> crate::analysis_native::AnalysisBinaryView {
-        crate::analysis_native::AnalysisBinaryView {
+    ) -> PyResult<crate::analysis_native::AnalysisBinaryView> {
+        if self.closed {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "native archive session is closed",
+            ));
+        }
+        Ok(crate::analysis_native::AnalysisBinaryView {
             path: self.path.clone(),
             reader: self.reader.with_config(ReaderConfig {
                 cache_bytes,
                 max_read_bytes,
                 max_concurrent_reads,
             }),
-        }
+            closed: false,
+        })
     }
 
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.ensure_open()?;
         let stats = self.reader.stats()?;
         let dict = PyDict::new(py);
         dict.set_item("read_bytes", stats.read_bytes)?;
@@ -528,6 +569,7 @@ impl NativeArchiveSession {
         py: Python<'_>,
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
         crate::password::zip::zip_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
@@ -536,6 +578,7 @@ impl NativeArchiveSession {
         py: Python<'_>,
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
         crate::password::seven_zip::seven_zip_fast_verify_passwords_with_probe_cache(
             py,
             &self.reader,
@@ -549,6 +592,7 @@ impl NativeArchiveSession {
         py: Python<'_>,
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
         crate::password::rar::rar_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
@@ -560,6 +604,7 @@ impl NativeArchiveSession {
         iocp_buffers: usize,
         iocp_workers: usize,
     ) -> PyResult<Py<PyDict>> {
+        self.ensure_open()?;
         crate::scan::embedded::scan_embedded_archives_with_reader(
             py,
             &self.reader,
@@ -661,6 +706,18 @@ struct BytesSource {
     data: Arc<[u8]>,
 }
 
+struct ClosedSource;
+
+impl ByteSource for ClosedSource {
+    fn len(&self) -> u64 {
+        0
+    }
+
+    fn read_at(&self, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
+        Err(io::Error::other("resource closed"))
+    }
+}
+
 impl ByteSource for BytesSource {
     fn len(&self) -> u64 {
         self.data.len() as u64
@@ -685,8 +742,42 @@ struct FileIdentity {
 
 struct FileSource {
     identity: FileIdentity,
-    file: File,
+    file: RwLock<Option<TrackedFile>>,
+    closed: AtomicBool,
     block_loads: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
+}
+
+impl FileSource {
+    fn ensure_open(&self) -> io::Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(io::Error::other("resource closed"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn with_file<T>(&self, operation: impl FnOnce(&File) -> io::Result<T>) -> io::Result<T> {
+        let file = self
+            .file
+            .read()
+            .map_err(|_| io::Error::other("reader file lock poisoned"))?;
+        let file = file
+            .as_ref()
+            .ok_or_else(|| io::Error::other("resource closed"))?;
+        operation(file)
+    }
+
+    fn close(&self) -> io::Result<bool> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        let mut file = self
+            .file
+            .write()
+            .map_err(|_| io::Error::other("reader file lock poisoned"))?;
+        let closed = file.take().is_some();
+        Ok(closed)
+    }
 }
 
 impl ByteSource for FileSource {
@@ -700,12 +791,14 @@ impl ByteSource for FileSource {
     }
 
     fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.ensure_open()?;
         if offset >= self.len() || len == 0 {
             return Ok(Vec::new());
         }
         let len = len.min((self.len() - offset) as usize);
         if len > MAX_CACHEABLE_READ_BYTES {
-            let data = read_file_at(&self.file, offset, len, &manager().metrics)?;
+            let data =
+                self.with_file(|file| read_file_at(file, offset, len, &manager().metrics))?;
             manager()
                 .metrics
                 .logical_bytes
@@ -734,6 +827,7 @@ impl ByteSource for FileSource {
     }
 
     fn read_into_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+        self.ensure_open()?;
         if offset >= self.len() || buffer.is_empty() {
             return Ok(0);
         }
@@ -743,7 +837,7 @@ impl ByteSource for FileSource {
                 .metrics
                 .physical_reads
                 .fetch_add(1, Ordering::Relaxed);
-            let count = positional_read(&self.file, &mut buffer[..len], offset)?;
+            let count = self.with_file(|file| positional_read(file, &mut buffer[..len], offset))?;
             manager()
                 .metrics
                 .physical_bytes
@@ -778,6 +872,7 @@ impl ByteSource for FileSource {
     }
 
     fn read_slices_at(&self, offset: u64, len: usize) -> io::Result<Vec<CachedSlice>> {
+        self.ensure_open()?;
         if offset >= self.len() || len == 0 {
             return Ok(Vec::new());
         }
@@ -816,6 +911,7 @@ impl ByteSource for FileSource {
     }
 
     fn prefetch(&self, ranges: &[(u64, usize)]) -> io::Result<()> {
+        self.ensure_open()?;
         let mut blocks = BTreeSet::new();
         for &(offset, len) in ranges {
             if offset >= self.len() || len == 0 {
@@ -833,11 +929,12 @@ impl ByteSource for FileSource {
     }
 
     fn read_direct_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.ensure_open()?;
         if offset >= self.len() || len == 0 {
             return Ok(Vec::new());
         }
         let len = len.min((self.len() - offset) as usize);
-        let data = read_file_at(&self.file, offset, len, &manager().metrics)?;
+        let data = self.with_file(|file| read_file_at(file, offset, len, &manager().metrics))?;
         manager()
             .metrics
             .logical_bytes
@@ -846,11 +943,12 @@ impl ByteSource for FileSource {
     }
 
     fn read_direct_into_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+        self.ensure_open()?;
         if offset >= self.len() || buffer.is_empty() {
             return Ok(0);
         }
         let len = buffer.len().min((self.len() - offset) as usize);
-        let count = positional_read(&self.file, &mut buffer[..len], offset)?;
+        let count = self.with_file(|file| positional_read(file, &mut buffer[..len], offset))?;
         manager()
             .metrics
             .physical_reads
@@ -865,7 +963,6 @@ impl ByteSource for FileSource {
             .fetch_add(count as u64, Ordering::Relaxed);
         Ok(count)
     }
-
 }
 
 struct Volume {
@@ -1099,10 +1196,86 @@ impl ReaderManager {
             .lock()
             .map_err(|_| io::Error::other("reader manager handle lock poisoned"))?;
         let removed_handles = handles.entries.len();
-        handles.entries.clear();
+        let sources = handles
+            .entries
+            .drain()
+            .map(|(_identity, entry)| entry.source)
+            .collect::<Vec<_>>();
         handles.by_path.clear();
         handles.order.clear();
+        drop(handles);
+        for source in sources {
+            source.close()?;
+        }
         Ok((removed_handles, removed_entries, removed_bytes))
+    }
+
+    fn release_resources_under(&self, root: &Path) -> io::Result<(usize, usize, usize)> {
+        let mut removed_entries = 0usize;
+        let mut removed_bytes = 0usize;
+        for shard in &self.cache_shards {
+            let mut shard = shard
+                .lock()
+                .map_err(|_| io::Error::other("shared reader cache shard poisoned"))?;
+            let keys = shard
+                .entries
+                .keys()
+                .filter(|key| key.identity.path.starts_with(root))
+                .cloned()
+                .collect::<HashSet<_>>();
+            for key in &keys {
+                if let Some(value) = shard.entries.remove(key) {
+                    removed_entries += 1;
+                    removed_bytes += value.len();
+                }
+            }
+            shard.hot_order.retain(|key| !keys.contains(key));
+            shard.general_order.retain(|key| !keys.contains(key));
+            shard.hot_size = shard
+                .hot_order
+                .iter()
+                .filter_map(|key| shard.entries.get(key))
+                .map(|value| value.len())
+                .sum();
+            shard.general_size = shard
+                .general_order
+                .iter()
+                .filter_map(|key| shard.entries.get(key))
+                .map(|value| value.len())
+                .sum();
+        }
+        let removed_handles = self.release_handles_under(root)?;
+        Ok((removed_handles, removed_entries, removed_bytes))
+    }
+
+    fn release_handles_under(&self, root: &Path) -> io::Result<usize> {
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| io::Error::other("reader manager handle lock poisoned"))?;
+        let identities = handles
+            .entries
+            .keys()
+            .filter(|identity| identity.path.starts_with(root))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut sources = Vec::with_capacity(identities.len());
+        for identity in &identities {
+            if let Some(entry) = handles.entries.remove(identity) {
+                sources.push(entry.source);
+            }
+            if handles.by_path.get(&identity.path) == Some(identity) {
+                handles.by_path.remove(&identity.path);
+            }
+        }
+        handles
+            .order
+            .retain(|(identity, _generation)| !identities.contains(identity));
+        drop(handles);
+        for source in sources {
+            source.close()?;
+        }
+        Ok(identities.len())
     }
 
     fn open_file(&self, path: &Path) -> io::Result<Arc<FileSource>> {
@@ -1137,7 +1310,8 @@ impl ReaderManager {
         }
         let source = Arc::new(FileSource {
             identity: identity.clone(),
-            file,
+            file: RwLock::new(Some(file)),
+            closed: AtomicBool::new(false),
             block_loads: Mutex::new(HashMap::new()),
         });
         handles.insert(identity, Arc::clone(&source));
@@ -1177,7 +1351,8 @@ impl ReaderManager {
         self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
         let offset = index * BLOCK_SIZE as u64;
         let len = BLOCK_SIZE.min(source.len().saturating_sub(offset) as usize);
-        let data: Arc<[u8]> = Arc::from(read_file_at(&source.file, offset, len, &self.metrics)?);
+        let data: Arc<[u8]> =
+            Arc::from(source.with_file(|file| read_file_at(file, offset, len, &self.metrics))?);
         let data = self.insert_block(key, data, tier)?;
         drop(_load);
         if let Ok(mut loads) = source.block_loads.lock() {
@@ -1222,7 +1397,8 @@ impl ReaderManager {
             let offset = start * BLOCK_SIZE as u64;
             let requested = ((end - start + 1) * BLOCK_SIZE as u64)
                 .min(source.len().saturating_sub(offset)) as usize;
-            let data = read_file_at(&source.file, offset, requested, &self.metrics)?;
+            let data =
+                source.with_file(|file| read_file_at(file, offset, requested, &self.metrics))?;
             self.metrics
                 .cache_misses
                 .fetch_add(end - start + 1, Ordering::Relaxed);
@@ -1444,23 +1620,18 @@ pub(crate) fn clear_reader_resources(py: Python<'_>) -> PyResult<Py<PyDict>> {
 #[pyfunction]
 pub(crate) fn release_reader_handles_under(path: &str) -> PyResult<usize> {
     let root = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-    let mut handles = manager()
-        .handles
-        .lock()
-        .map_err(|_| io::Error::other("reader manager handle lock poisoned"))?;
-    let identities = handles
-        .entries
-        .keys()
-        .filter(|identity| identity.path.starts_with(&root))
-        .cloned()
-        .collect::<Vec<_>>();
-    for identity in &identities {
-        handles.entries.remove(identity);
-        if handles.by_path.get(&identity.path) == Some(identity) {
-            handles.by_path.remove(&identity.path);
-        }
-    }
-    Ok(identities.len())
+    Ok(manager().release_handles_under(&root)?)
+}
+
+#[pyfunction]
+pub(crate) fn release_reader_resources_under(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+    let root = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let (handles, cache_entries, cache_bytes) = manager().release_resources_under(&root)?;
+    let dict = PyDict::new(py);
+    dict.set_item("handles", handles)?;
+    dict.set_item("cache_entries", cache_entries)?;
+    dict.set_item("cache_bytes", cache_bytes)?;
+    Ok(dict.unbind())
 }
 
 fn manager() -> &'static ReaderManager {
@@ -1529,23 +1700,8 @@ fn read_file_at(
     Ok(data)
 }
 
-#[cfg(windows)]
-fn open_reader_file(path: &Path) -> io::Result<File> {
-    use std::fs::OpenOptions;
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const SHARE_READ: u32 = 0x0000_0001;
-    const SHARE_WRITE: u32 = 0x0000_0002;
-    const SHARE_DELETE: u32 = 0x0000_0004;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(SHARE_READ | SHARE_WRITE | SHARE_DELETE)
-        .open(path)
-}
-
-#[cfg(not(windows))]
-fn open_reader_file(path: &Path) -> io::Result<File> {
-    File::open(path)
+fn open_reader_file(path: &Path) -> io::Result<TrackedFile> {
+    TrackedFile::open_reader(path, "reader_file")
 }
 
 #[cfg(unix)]

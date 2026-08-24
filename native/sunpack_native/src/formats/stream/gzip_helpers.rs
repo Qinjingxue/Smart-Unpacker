@@ -117,7 +117,11 @@ fn write_prefix_atomic(data: &[u8], end: usize, output: &Path) -> Result<u64, St
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<(), String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "gzip_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         file.write_all(&data[..end])
             .map_err(|err| err.to_string())?;
         file.flush().map_err(|err| err.to_string())?;
@@ -147,7 +151,11 @@ fn write_prefix_and_suffix_atomic(
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<u64, String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "gzip_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         file.write_all(&data[..end])
             .map_err(|err| err.to_string())?;
         file.write_all(suffix).map_err(|err| err.to_string())?;

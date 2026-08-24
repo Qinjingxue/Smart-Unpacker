@@ -12,6 +12,7 @@ from sunpack.repair.config import repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from sunpack.support.archive_formats import canonical_format as _normalize_format
+from sunpack.support.resource_lifecycle import open_task_file, read_task_text, write_task_text
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
@@ -875,7 +876,7 @@ class RepairScheduler:
         target = _telemetry_target(result)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("a", encoding="utf-8") as handle:
+            with open_task_file(target, "a", encoding="utf-8") as handle:
                 for record in records:
                     handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
             _write_pretty_telemetry(_telemetry_pretty_target(target), records)
@@ -943,12 +944,13 @@ def _write_pretty_telemetry(path: Path, records: list[dict[str, Any]]) -> None:
     existing: list[Any] = []
     if path.exists():
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(read_task_text(path, encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             loaded = []
         if isinstance(loaded, list):
             existing = loaded
-    path.write_text(
+    write_task_text(
+        path,
         json.dumps([*existing, *records], ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )

@@ -2,7 +2,11 @@ fn write_bytes_atomic(data: &[u8], output: &Path) -> Result<u64, String> {
     ensure_parent(output).map_err(|err| err.to_string())?;
     let temp = temp_path(output);
     let result = (|| -> Result<(), String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "zip_directory_output",
+        )
+        .map_err(|err| err.to_string())?;
         file.write_all(data).map_err(|err| err.to_string())?;
         file.flush().map_err(|err| err.to_string())?;
         Ok(())

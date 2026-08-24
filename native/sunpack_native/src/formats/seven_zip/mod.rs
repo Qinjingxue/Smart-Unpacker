@@ -15,7 +15,7 @@ use sevenz_rust2::{
     Password,
 };
 use sha2::Digest;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 

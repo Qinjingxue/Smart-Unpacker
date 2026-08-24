@@ -8,6 +8,8 @@ import shutil
 from dataclasses import asdict, dataclass
 from enum import Enum
 
+from sunpack.support.resource_lifecycle import promotion_barrier, task_walk
+
 
 LOGGER = logging.getLogger(__name__)
 INTERNAL_METADATA_DIR = ".sunpack"
@@ -184,10 +186,16 @@ class OutputCleanupManager:
                 )
 
         try:
-            if is_directory:
-                self.executor.remove_tree(path)
-            else:
-                self.executor.remove_file(path)
+            from sunpack.support.archive_sessions import release_archive_sessions_under
+
+            with promotion_barrier(
+                (path,),
+                cache_releasers=(release_archive_sessions_under,),
+            ):
+                if is_directory:
+                    self.executor.remove_tree(path)
+                else:
+                    self.executor.remove_file(path)
         except OSError as exc:
             LOGGER.warning("output cleanup failed event=%s role=%s path=%s: %s", event, role, path, exc)
             return OutputCleanupResult(
@@ -255,7 +263,11 @@ def _payload_inventory(root: str) -> tuple[int, int] | None:
     file_count = 0
     byte_count = 0
     try:
-        for current, directories, files in os.walk(root, followlinks=False, onerror=_raise_walk_error):
+        for current, directories, files in task_walk(
+            root,
+            followlinks=False,
+            onerror=_raise_walk_error,
+        ):
             if _same_path(current, root):
                 directories[:] = [name for name in directories if name != INTERNAL_METADATA_DIR]
             for name in [*directories, *files]:

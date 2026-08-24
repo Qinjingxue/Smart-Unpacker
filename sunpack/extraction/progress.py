@@ -8,6 +8,7 @@ from typing import Any
 from sunpack_native import scan_output_tree as _native_scan_output_tree
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_manifest_files
 from sunpack.support.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER
+from sunpack.support.resource_lifecycle import read_task_text, write_task_text
 
 
 CONTENT_FAILURE_KINDS = {
@@ -104,7 +105,7 @@ def write_extraction_progress_manifest_payload(
         return "", manifest
     target = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
+    write_task_text(target, _json_text(manifest, pretty=pretty), encoding="utf-8")
     return str(target), manifest
 
 
@@ -145,13 +146,13 @@ def _compact_complete_progress_manifest(
 
 def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
     path = Path(manifest_path)
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = json.loads(read_task_text(path, encoding="utf-8"))
     manifest = filter_extraction_manifest_payload(
         manifest,
         partial_keep_ratio=partial_keep_ratio,
         output_root=str(manifest.get("out_dir") or path.parent.parent),
     )
-    path.write_text(_json_text(manifest), encoding="utf-8")
+    write_task_text(path, _json_text(manifest), encoding="utf-8")
     return manifest
 
 

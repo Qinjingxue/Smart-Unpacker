@@ -1,5 +1,6 @@
 import os
 import math
+import weakref
 from binascii import crc32
 from dataclasses import dataclass
 from collections import Counter
@@ -8,6 +9,11 @@ from sunpack_native import AnalysisBinaryView as _NativeAnalysisBinaryView
 from sunpack_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
 from sunpack_native import probe_rar_bytes as _probe_rar_bytes
 from sunpack.support.archive_sessions import get_archive_session
+from sunpack.support.resource_lifecycle import (
+    ResourceKind,
+    lifecycle_registration,
+    register_current_task_resource,
+)
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.support.archive_state_view import ArchiveStateByteView
 
@@ -33,13 +39,38 @@ class SharedBinaryView:
         self.size = os.path.getsize(path)
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
-        self._session = get_archive_session(path)
-        self._native = self._session.analysis_view(
-            cache_bytes=self.cache_bytes,
-            max_read_bytes=self.max_read_bytes,
-            max_concurrent_reads=max_concurrent_reads,
-        )
+        with lifecycle_registration((path,)):
+            self._session = get_archive_session(path)
+            self._native = self._session.analysis_view(
+                cache_bytes=self.cache_bytes,
+                max_read_bytes=self.max_read_bytes,
+                max_concurrent_reads=max_concurrent_reads,
+            )
+            native = self._native
+            self._resource_lease = register_current_task_resource(
+                self,
+                (path,),
+                lambda native=native: getattr(native, "close", lambda: None)(),
+                kind=ResourceKind.NATIVE_ANALYSIS_VIEW,
+                registration_held=True,
+            )
+        self._resource_finalizer = weakref.finalize(self, self._resource_lease.close)
         self.size = int(self._native.size)
+
+    @property
+    def closed(self) -> bool:
+        return self._resource_lease.closed
+
+    def close(self) -> None:
+        self._resource_lease.close()
+        self._resource_finalizer.detach()
+        self._session = None
+
+    def __enter__(self) -> "SharedBinaryView":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def read_at(self, offset: int, size: int) -> bytes:
         return bytes(self._native.read_at(int(offset), int(size)))
@@ -147,14 +178,38 @@ class MultiVolumeBinaryView:
         self.path = self.volumes[0]
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
-        self._native = _NativeAnalysisMultiVolumeView(
-            self.volumes,
-            cache_bytes=self.cache_bytes,
-            max_read_bytes=self.max_read_bytes,
-            max_concurrent_reads=max_concurrent_reads,
-        )
+        with lifecycle_registration(self.volumes):
+            self._native = _NativeAnalysisMultiVolumeView(
+                self.volumes,
+                cache_bytes=self.cache_bytes,
+                max_read_bytes=self.max_read_bytes,
+                max_concurrent_reads=max_concurrent_reads,
+            )
+            native = self._native
+            self._resource_lease = register_current_task_resource(
+                self,
+                self.volumes,
+                lambda native=native: getattr(native, "close", lambda: None)(),
+                kind=ResourceKind.NATIVE_MULTI_VOLUME_VIEW,
+                registration_held=True,
+            )
+        self._resource_finalizer = weakref.finalize(self, self._resource_lease.close)
         self.path = str(self._native.path)
         self.size = int(self._native.size)
+
+    @property
+    def closed(self) -> bool:
+        return self._resource_lease.closed
+
+    def close(self) -> None:
+        self._resource_lease.close()
+        self._resource_finalizer.detach()
+
+    def __enter__(self) -> "MultiVolumeBinaryView":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def logical_offset_for_disk(self, disk_number: int, relative_offset: int) -> int | None:
         """Translate PKZIP's zero-based disk-relative offset into the logical view."""

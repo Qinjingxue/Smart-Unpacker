@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 import zlib
 
+from sunpack.support.resource_lifecycle import open_task_file, task_rglob
+
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import (
@@ -88,7 +90,7 @@ def _output_files(output_dir: str) -> list[dict[str, Any]]:
     if not root.is_dir():
         return []
     output: list[dict[str, Any]] = []
-    for path in root.rglob("*"):
+    for path in task_rglob(root, "*"):
         if not path.is_file():
             continue
         try:
@@ -103,7 +105,7 @@ def _output_files(output_dir: str) -> list[dict[str, Any]]:
 
 def _crc32(path: Path, *, chunk_size: int = 1024 * 1024) -> int:
     checksum = 0
-    with path.open("rb") as handle:
+    with open_task_file(path, "rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
             if not chunk:

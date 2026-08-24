@@ -28,6 +28,7 @@ pub(crate) fn probe_rar_bytes(
     let view = AnalysisBinaryView {
         path: "<memory>".to_string(),
         reader: ManagedReader::from_bytes(data.as_bytes().to_vec(), ReaderConfig::default()),
+        closed: false,
     };
     view.probe_rar(py, start_offset, max_blocks_to_walk)
 }

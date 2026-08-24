@@ -4,6 +4,8 @@ import subprocess
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
+from sunpack.support.resource_lifecycle import task_walk
+
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
@@ -1114,7 +1116,7 @@ class SingleArchiveExtractor:
         total_bytes = 0
         if not os.path.isdir(path):
             return {"file_count": 0, "total_bytes": 0}
-        for root, _dirs, files in os.walk(path):
+        for root, _dirs, files in task_walk(path):
             for name in files:
                 file_count += 1
                 try:

@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from sunpack.support.resource_lifecycle import open_task_file
+
 
 def json_safe(value: Any) -> Any:
     if isinstance(value, bytes):
@@ -19,13 +21,13 @@ def to_json_text(value: Any, *, pretty: bool = True) -> str:
 
 
 def load_json_file(path: Path) -> Any:
-    with open(path, "r", encoding="utf-8") as handle:
+    with open_task_file(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
 def write_json_file(path: Path, value: Any, *, pretty: bool = True):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    with open_task_file(path, "w", encoding="utf-8") as handle:
         handle.write(to_json_text(value, pretty=pretty))
         handle.write("\n")
 

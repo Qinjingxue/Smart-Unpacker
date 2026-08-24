@@ -1,10 +1,11 @@
+use crate::io::resource_lifecycle::TrackedFile;
 use base64::Engine;
 use encoding_rs::{BIG5, GBK, SHIFT_JIS, UTF_8};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,7 @@ pub(crate) fn archive_state_write_to_file_native(
     ensure_parent(output)?;
     let temp = temp_path(output);
     let result = (|| -> PyResult<()> {
-        let mut target = File::create(&temp)?;
+        let mut target = TrackedFile::create(&temp, "archive_state_output")?;
         for segment in &segments {
             write_segment(&mut target, segment)?;
         }
@@ -117,7 +118,7 @@ struct TarSegmentReader {
     starts: Vec<u64>,
     total: u64,
     file_index: Option<usize>,
-    file: Option<File>,
+    file: Option<TrackedFile>,
 }
 
 impl TarSegmentReader {
@@ -177,7 +178,8 @@ impl TarSegmentReader {
                 }
                 Segment::Range { path, start, .. } => {
                     if self.file_index != Some(index) {
-                        self.file = Some(File::open(&path)?);
+                        let file = TrackedFile::open(&path, "tar_segment_file")?;
+                        self.file = Some(file);
                         self.file_index = Some(index);
                     }
                     let file = self.file.as_mut().ok_or_else(|| {
@@ -321,11 +323,14 @@ fn tar_manifest_from_reader<'py>(
         }
         if typeflag == b'L' || typeflag == b'K' {
             if raw_payload_truncated {
-                error = Some(if typeflag == b'L' {
-                    "GNU longname payload is truncated"
-                } else {
-                    "GNU longlink payload is truncated"
-                }.to_string());
+                error = Some(
+                    if typeflag == b'L' {
+                        "GNU longname payload is truncated"
+                    } else {
+                        "GNU longlink payload is truncated"
+                    }
+                    .to_string(),
+                );
                 break;
             }
             let payload = reader.read_vec_at(payload_start, raw_size as usize)?;
@@ -409,9 +414,13 @@ fn tar_manifest_from_reader<'py>(
         }
         let sparse_valid = match effective.get("GNU.sparse.map") {
             Some(value) => tar_sparse_map(value)
-                .map(|extents| extents.iter().all(|(start, length)| {
-                    start.checked_add(*length).is_some_and(|end| end <= logical_size)
-                }))
+                .map(|extents| {
+                    extents.iter().all(|(start, length)| {
+                        start
+                            .checked_add(*length)
+                            .is_some_and(|end| end <= logical_size)
+                    })
+                })
                 .unwrap_or(false),
             None => true,
         };
@@ -437,7 +446,11 @@ fn tar_manifest_from_reader<'py>(
                 item.set_item("raw_path", &archive_path)?;
                 item.set_item(
                     "size",
-                    if matches!(typeflag, b'1' | b'2') { 0 } else { logical_size },
+                    if matches!(typeflag, b'1' | b'2') {
+                        0
+                    } else {
+                        logical_size
+                    },
                 )?;
                 item.set_item(
                     "typeflag",
@@ -541,7 +554,10 @@ fn tar_padding(size: u64) -> u64 {
 const BLOCK_SIZE_TAR: u64 = 512;
 
 fn tar_text(field: &[u8]) -> String {
-    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).into_owned()
 }
 
@@ -559,10 +575,17 @@ fn tar_pax(payload: &[u8]) -> Option<HashMap<String, String>> {
     let mut cursor = 0usize;
     while cursor < payload.len() {
         let space = payload[cursor..].iter().position(|byte| *byte == b' ')? + cursor;
-        if space <= cursor || !payload[cursor..space].iter().all(|byte| byte.is_ascii_digit()) {
+        if space <= cursor
+            || !payload[cursor..space]
+                .iter()
+                .all(|byte| byte.is_ascii_digit())
+        {
             return None;
         }
-        let length = std::str::from_utf8(&payload[cursor..space]).ok()?.parse::<usize>().ok()?;
+        let length = std::str::from_utf8(&payload[cursor..space])
+            .ok()?
+            .parse::<usize>()
+            .ok()?;
         if length == 0 {
             return None;
         }
@@ -600,7 +623,10 @@ fn tar_sparse_extension_span(
             .and_then(|value| value.checked_add(span))
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("TAR sparse offset overflow"))?;
         let mut extension = [0u8; 512];
-        if reader.read_exact_at(extension_offset, &mut extension).is_err() {
+        if reader
+            .read_exact_at(extension_offset, &mut extension)
+            .is_err()
+        {
             return Ok(None);
         }
         if !tar_validate_sparse_block(&extension, 0, 21, &mut previous_end) {
@@ -612,7 +638,12 @@ fn tar_sparse_extension_span(
     Ok(Some((span, previous_end)))
 }
 
-fn tar_validate_sparse_block(block: &[u8], start: usize, count: usize, previous_end: &mut u64) -> bool {
+fn tar_validate_sparse_block(
+    block: &[u8],
+    start: usize,
+    count: usize,
+    previous_end: &mut u64,
+) -> bool {
     for index in 0..count {
         let base = start + index * 24;
         let Some(offset_field) = block.get(base..base + 12) else {
@@ -806,10 +837,7 @@ fn validate_operation_expected(
     Ok(())
 }
 
-fn expected_length_for_operation(
-    operation: &Bound<'_, PyDict>,
-    op: &str,
-) -> PyResult<Option<u64>> {
+fn expected_length_for_operation(operation: &Bound<'_, PyDict>, op: &str) -> PyResult<Option<u64>> {
     match op {
         "replace_range" | "delete" => optional_u64(operation, "size"),
         "insert" | "append" => Ok(Some(0)),
@@ -817,11 +845,7 @@ fn expected_length_for_operation(
     }
 }
 
-fn read_segments_range(
-    segments: &[Segment],
-    offset: u64,
-    len: Option<u64>,
-) -> PyResult<Vec<u8>> {
+fn read_segments_range(segments: &[Segment], offset: u64, len: Option<u64>) -> PyResult<Vec<u8>> {
     let total = segments_size(segments);
     if offset > total {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -998,7 +1022,7 @@ fn append_segment(output: &mut Vec<u8>, segment: &Segment) -> PyResult<()> {
     match segment {
         Segment::Bytes(data) => output.extend_from_slice(data),
         Segment::Range { path, start, len } => {
-            let mut file = File::open(path)?;
+            let mut file = TrackedFile::open(path, "archive_state_source")?;
             file.seek(SeekFrom::Start(*start))?;
             let mut limited = file.take(*len);
             limited.read_to_end(output)?;
@@ -1007,11 +1031,11 @@ fn append_segment(output: &mut Vec<u8>, segment: &Segment) -> PyResult<()> {
     Ok(())
 }
 
-fn write_segment(target: &mut File, segment: &Segment) -> PyResult<()> {
+fn write_segment(target: &mut TrackedFile, segment: &Segment) -> PyResult<()> {
     match segment {
         Segment::Bytes(data) => target.write_all(data)?,
         Segment::Range { path, start, len } => {
-            let mut source = File::open(path)?;
+            let mut source = TrackedFile::open(path, "archive_state_source")?;
             source.seek(SeekFrom::Start(*start))?;
             let mut limited = source.take(*len);
             let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
@@ -1187,7 +1211,8 @@ fn decode_zip_filename(
         }
         return Ok(decoded.replace('\\', "/"));
     }
-    Ok(raw.iter()
+    Ok(raw
+        .iter()
         .map(|byte| cp437_char(*byte))
         .collect::<String>()
         .replace('\\', "/"))
@@ -1208,10 +1233,7 @@ fn valid_unicode_path_name<'a>(raw: &[u8], extra: &'a [u8]) -> Option<&'a str> {
         }
         if field_id == ZIP_UNICODE_PATH_EXTRA_FIELD {
             let field = &extra[data_start..data_end];
-            if field.len() >= 6
-                && field[0] == 1
-                && u32_le(field, 1) == crc32fast::hash(raw)
-            {
+            if field.len() >= 6 && field[0] == 1 && u32_le(field, 1) == crc32fast::hash(raw) {
                 if let Ok(name) = std::str::from_utf8(&field[5..]) {
                     if !name.is_empty() {
                         return Some(name);
@@ -1258,8 +1280,14 @@ mod tests {
 
     #[test]
     fn zip_filename_decoder_uses_cp437_when_utf8_flag_is_absent() {
-        assert_eq!(decode_zip_filename(b"caf\x82.txt", b"", 0, None).unwrap(), "café.txt");
-        assert_eq!(decode_zip_filename(b"dir\\file.txt", b"", 0, None).unwrap(), "dir/file.txt");
+        assert_eq!(
+            decode_zip_filename(b"caf\x82.txt", b"", 0, None).unwrap(),
+            "café.txt"
+        );
+        assert_eq!(
+            decode_zip_filename(b"dir\\file.txt", b"", 0, None).unwrap(),
+            "dir/file.txt"
+        );
     }
 
     #[test]

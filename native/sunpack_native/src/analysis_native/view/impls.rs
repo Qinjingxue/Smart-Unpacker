@@ -1,4 +1,14 @@
 impl AnalysisBinaryView {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.closed {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "analysis binary view is closed",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn read_field_at_bytes(
         &self,
         offset: u64,
@@ -11,6 +21,7 @@ impl AnalysisBinaryView {
     }
 
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
+        self.ensure_open()?;
         self.reader
             .read_at(offset, size)
             .map_err(reader_error_to_py)
@@ -946,7 +957,18 @@ impl AnalysisBinaryView {
 }
 
 impl AnalysisMultiVolumeView {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.closed {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "analysis multi-volume view is closed",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
+        self.ensure_open()?;
         self.reader
             .read_at(offset, size)
             .map_err(reader_error_to_py)

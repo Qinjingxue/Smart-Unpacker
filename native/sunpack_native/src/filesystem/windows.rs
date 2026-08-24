@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::ffi::{c_void, OsStr};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -122,11 +122,14 @@ extern "system" {
     ) -> i32;
 }
 
-struct OwnedHandle(isize);
+struct OwnedHandle {
+    raw: isize,
+    _resource: crate::io::resource_lifecycle::NativeResourceGuard,
+}
 
 impl OwnedHandle {
     fn raw(&self) -> Handle {
-        self.0 as Handle
+        self.raw as Handle
     }
 }
 
@@ -352,6 +355,14 @@ fn open_path(
     share_mode: u32,
     is_directory: bool,
 ) -> io::Result<OwnedHandle> {
+    let resource = crate::io::resource_lifecycle::NativeResourceGuard::register(
+        if is_directory {
+            "directory_metadata_handle"
+        } else {
+            "file_metadata_handle"
+        },
+        [path.to_path_buf()],
+    )?;
     let path = canonical_wide(path)?;
     let flags = if is_directory {
         FILE_FLAG_BACKUP_SEMANTICS
@@ -372,7 +383,10 @@ fn open_path(
     if handle == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
-    Ok(OwnedHandle(handle as isize))
+    Ok(OwnedHandle {
+        raw: handle as isize,
+        _resource: resource,
+    })
 }
 
 fn read_file_usn(handle: Handle) -> io::Result<WatchFileObservation> {
@@ -625,9 +639,7 @@ pub(super) fn validate_volume_journal(path: &Path) -> io::Result<()> {
         // the volume journal. with_volume_context has already cached that
         // capability failure for this volume, so watch can safely continue
         // with conservative change detection and no repeated volume probes.
-        Err(error) if error.raw_os_error() == Some(5) => {
-            Ok(())
-        }
+        Err(error) if error.raw_os_error() == Some(5) => Ok(()),
         other => other,
     }
 }
@@ -707,7 +719,7 @@ fn with_volume_context<T>(
     let mut contexts = contexts
         .lock()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume handle cache poisoned"))?;
-    let context = contexts.context_for(volume_key, Instant::now());
+    let context = contexts.context_for(volume_key.clone(), Instant::now());
     drop(contexts);
     let mut context = context
         .lock()
@@ -717,6 +729,10 @@ fn with_volume_context<T>(
         return Err(io::Error::from_raw_os_error(error_code));
     }
     if context.handle.is_none() {
+        let resource = crate::io::resource_lifecycle::NativeResourceGuard::register(
+            "volume_device",
+            [PathBuf::from(&volume_key)],
+        )?;
         let handle = unsafe {
             CreateFileW(
                 volume.as_ptr(),
@@ -735,7 +751,10 @@ fn with_volume_context<T>(
             }
             return Err(error);
         }
-        context.handle = Some(OwnedHandle(handle as isize));
+        context.handle = Some(OwnedHandle {
+            raw: handle as isize,
+            _resource: resource,
+        });
     }
     let handle = context.handle.as_ref().unwrap().raw();
     let result = operation(handle);

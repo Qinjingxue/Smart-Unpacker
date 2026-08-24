@@ -10,6 +10,7 @@ import zlib
 
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
+from sunpack.support.resource_lifecycle import read_task_bytes, write_task_bytes
 from sunpack.repair.pipeline.modules._common import (
     module_limits,
     patch_diagnosis,
@@ -119,7 +120,7 @@ def _python_trailing_trim_result(
     if not path:
         return None
     try:
-        data = Path(path).read_bytes()
+        data = read_task_bytes(Path(path))
     except OSError:
         return None
     truncate_at = _compressed_stream_end_offset(fmt, data)
@@ -128,7 +129,7 @@ def _python_trailing_trim_result(
     target = Path(workspace) / f"{module_name}_trimmed.{_stream_extension(fmt)}"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data[:truncate_at])
+        write_task_bytes(target, data[:truncate_at])
     except OSError:
         return None
     actions = ["python_stream_trailing_junk_trim"]

@@ -1287,7 +1287,9 @@ fn file_head_record(path: String, magic_size: usize) -> FileHeadRecord {
         .unwrap_or(false);
     let mut magic = Vec::new();
     if is_file && magic_size > 0 {
-        if let Ok(mut handle) = fs::File::open(&path_buf) {
+        if let Ok(mut handle) =
+            crate::io::resource_lifecycle::TrackedFile::open(&path_buf, "directory_probe_file")
+        {
             let limit = magic_size.min(1024 * 1024);
             let mut buffer = vec![0u8; limit];
             if let Ok(count) = handle.read(&mut buffer) {

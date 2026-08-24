@@ -360,7 +360,11 @@ fn write_stored_7z_entries(
 
     let temp = temp_path(output);
     let result = (|| -> Result<u64, String> {
-        let file = File::create(&temp).map_err(|err| err.to_string())?;
+        let file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "seven_zip_salvage_output",
+        )
+        .map_err(|err| err.to_string())?;
         let mut writer = ArchiveWriter::new(file).map_err(|err| err.to_string())?;
         writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
         writer.set_encrypt_header(false);

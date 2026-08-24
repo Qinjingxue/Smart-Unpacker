@@ -1,3 +1,4 @@
+use crate::io::resource_lifecycle::TrackedFile;
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
 use bzip2::Compression as Bzip2Compression;
@@ -7,7 +8,7 @@ use flate2::write::GzEncoder;
 use flate2::{Compression as GzipCompression, Decompress, FlushDecompress, Status};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

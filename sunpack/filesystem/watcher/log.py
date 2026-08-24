@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sunpack.support.resource_lifecycle import open_service_file
+
 
 DEFAULT_EVENTS_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_EVENTS_BACKUP_COUNT = 1
@@ -37,7 +39,7 @@ def append_jsonl_record(
             current_size = 0
         if current_size > 0 and current_size + len(encoded) > limit:
             _rotate_jsonl(target, backups)
-        with target.open("ab") as handle:
+        with open_service_file(target, "ab") as handle:
             handle.write(encoded)
 
 

@@ -8,6 +8,7 @@ from typing import Any
 
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.support.resource_lifecycle import write_task_bytes
 
 from sunpack_native import (
     archive_state_size_native as _native_archive_state_size,
@@ -90,7 +91,7 @@ class ArchiveStateByteView:
             raise _translate_native_patch_error(exc) from exc
         timing["to_bytes"] = time.perf_counter() - started
         started = time.perf_counter()
-        target.write_bytes(data)
+        write_task_bytes(target, data)
         timing["write_bytes"] = time.perf_counter() - started
         return target, timing
 

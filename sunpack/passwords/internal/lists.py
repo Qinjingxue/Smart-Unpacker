@@ -1,5 +1,7 @@
 from typing import List
 
+from sunpack.support.resource_lifecycle import open_task_file
+
 
 def parse_password_lines(text: str) -> List[str]:
     return [
@@ -10,7 +12,7 @@ def parse_password_lines(text: str) -> List[str]:
 
 
 def read_password_file(password_file: str) -> List[str]:
-    with open(password_file, "r", encoding="utf-8") as handle:
+    with open_task_file(password_file, "r", encoding="utf-8") as handle:
         return parse_password_lines(handle.read())
 
 

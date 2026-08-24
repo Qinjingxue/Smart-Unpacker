@@ -67,7 +67,11 @@ fn recover_stream_prefix(
     let result = (|| -> Result<RecoveryStats, String> {
         let cursor = Cursor::new(data.to_vec());
         let mut decoder = decoder_for(format, cursor)?;
-        let file = File::create(&temp).map_err(|err| err.to_string())?;
+        let file = crate::io::resource_lifecycle::TrackedFile::create(
+            &temp,
+            "stream_repair_output",
+        )
+        .map_err(|err| err.to_string())?;
         let mut encoder = CandidateEncoder::new(format, file).map_err(|err| err.to_string())?;
         let mut buffer = vec![0u8; DECODE_CHUNK_SIZE];
         let mut decoded = 0u64;

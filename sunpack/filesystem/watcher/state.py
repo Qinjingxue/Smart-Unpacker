@@ -5,11 +5,12 @@ import errno
 import json
 import os
 import stat
-import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
+
+from sunpack.support.resource_lifecycle import named_task_temporary_file, read_task_text
 
 from .group_models import (
     BLOCKER_MISSING_VOLUME,
@@ -78,7 +79,7 @@ class WatchStateStore:
         if not self.path.exists():
             return
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = json.loads(read_task_text(self.path, encoding="utf-8"))
         except Exception:
             return
         if not isinstance(payload, dict):
@@ -128,7 +129,7 @@ class WatchStateStore:
             }
             temp_path: Path | None = None
             try:
-                with tempfile.NamedTemporaryFile(
+                with named_task_temporary_file(
                     mode="w",
                     encoding="utf-8",
                     dir=self.path.parent,
