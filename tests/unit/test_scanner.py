@@ -22,7 +22,11 @@ def test_directory_scanner_captures_files_and_directories(tmp_path):
     (tmp_path / "archive.zip").write_bytes(b"PK\x03\x04")
     (tmp_path / "nested" / "notes.txt").write_text("hello", encoding="utf-8")
 
-    snapshot = DirectoryScanner(str(tmp_path)).scan()
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "directory_scan_mode": "recursive",
+        }
+    }).scan()
     names = {entry.path.name for entry in _entries(snapshot)}
 
     assert snapshot.root_path == tmp_path
@@ -481,6 +485,7 @@ def test_directory_scanner_whitelist_keeps_only_allowed_path_globs(tmp_path):
 
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
+            "directory_scan_mode": "recursive",
             "scan_filters": [
                 {"name": "whitelist", "enabled": True, "path_globs": ["archives/**"]},
             ]
@@ -594,6 +599,7 @@ def test_directory_scanner_whitelist_empty_fields_are_not_restrictions(tmp_path)
 
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
+            "directory_scan_mode": "recursive",
             "scan_filters": [
                 {
                     "name": "whitelist",

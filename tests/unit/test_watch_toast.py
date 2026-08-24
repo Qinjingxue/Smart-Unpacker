@@ -177,9 +177,7 @@ def test_mixed_batch_exposes_output_and_aggregate_failure_report(tmp_path):
 
     coordinator.succeeded("good", [str(output)])
     coordinator.failed("broken", ["CRC mismatch"], [{"kind": "corrupt_archive"}])
-    time.sleep(0.05)
-
-    terminal = _terminal_snapshots(host)
+    terminal = host.wait_for_terminal_snapshots(timeout=1.0)
     assert len(terminal) == 1
     assert terminal[0].kind == ToastSnapshotKind.MIXED
     assert [action.kind for action in terminal[0].actions] == [
