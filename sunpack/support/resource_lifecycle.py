@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import contextvars
 import os
+import stat as stat_module
 import sys
 import tempfile
 import threading
@@ -93,13 +94,36 @@ class FileIdentity:
     ) -> "FileIdentity":
         normalized = _normalized_path(path)
         try:
-            stat = os.stat(normalized, follow_symlinks=False)
+            metadata = os.stat(normalized, follow_symlinks=False)
         except OSError:
-            stat = None
+            metadata = None
+        if metadata is None:
+            return cls(path=normalized, is_directory=bool(directory))
+        return cls._from_normalized_stat(normalized, metadata, directory=directory)
+
+    @classmethod
+    def from_stat(
+        cls,
+        path: os.PathLike[str] | str,
+        metadata: os.stat_result,
+        *,
+        directory: bool | None = None,
+    ) -> "FileIdentity":
+        normalized = _normalized_path(path)
+        return cls._from_normalized_stat(normalized, metadata, directory=directory)
+
+    @classmethod
+    def _from_normalized_stat(
+        cls,
+        normalized: str,
+        metadata: os.stat_result,
+        *,
+        directory: bool | None = None,
+    ) -> "FileIdentity":
         if directory is None:
-            directory = bool(stat and os.path.isdir(normalized))
-        device = int(stat.st_dev) if stat is not None and stat.st_dev else None
-        file_id = int(stat.st_ino) if stat is not None and stat.st_ino else None
+            directory = stat_module.S_ISDIR(metadata.st_mode)
+        device = int(metadata.st_dev) if metadata.st_dev else None
+        file_id = int(metadata.st_ino) if metadata.st_ino else None
         return cls(
             path=normalized,
             device=device,
@@ -130,6 +154,31 @@ class FileIdentity:
         return self.contains(other) or other.contains(self)
 
 
+def _file_identity(
+    path: os.PathLike[str] | str,
+    *,
+    directory: bool | None = None,
+) -> FileIdentity:
+    """Reuse an identity already resolved by the active file operation."""
+
+    normalized = _normalized_path(path)
+    for cached in reversed(_CURRENT_FILE_IDENTITIES.get()):
+        if cached.path != normalized:
+            continue
+        if directory is not None and cached.is_directory is not bool(directory):
+            continue
+        return cached
+    try:
+        metadata = os.stat(normalized, follow_symlinks=False)
+    except OSError:
+        return FileIdentity(path=normalized, is_directory=bool(directory))
+    return FileIdentity._from_normalized_stat(
+        normalized,
+        metadata,
+        directory=directory,
+    )
+
+
 def file_identities(
     files: Iterable[os.PathLike[str] | str | FileIdentity],
     *,
@@ -141,7 +190,7 @@ def file_identities(
         identity = (
             item
             if isinstance(item, FileIdentity)
-            else FileIdentity.from_path(item, directory=True if directories else None)
+            else _file_identity(item, directory=True if directories else None)
         )
         key = (identity.path, identity.device, identity.file_id, identity.is_directory)
         if key not in seen:
@@ -228,6 +277,10 @@ _CURRENT_PROMOTION_ROOTS: contextvars.ContextVar[tuple[FileIdentity, ...]] = con
 )
 _CURRENT_OPERATION_STACK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "sunpack_current_resource_operation_stack",
+    default=(),
+)
+_CURRENT_FILE_IDENTITIES: contextvars.ContextVar[tuple[FileIdentity, ...]] = contextvars.ContextVar(
+    "sunpack_current_file_identities",
     default=(),
 )
 
@@ -446,6 +499,7 @@ class TaskResourceScope:
         self.created_at = time.time()
         self._resource_ids: list[str] = []
         self._active_operations = 0
+        self._active_file_operations: dict[FileIdentity, int] = {}
         with _CHANGED:
             existing = _TASK_SCOPES.get(task_id)
             if existing is not None and existing.state is not ScopeState.CLOSED:
@@ -491,22 +545,63 @@ class TaskResourceScope:
                 return lease
 
     @contextlib.contextmanager
-    def operation(self) -> Iterator[None]:
-        with _CHANGED:
-            if self.state is not ScopeState.ACTIVE:
-                raise ResourceLifecycleError(
-                    f"task operation entered after quiesce: {self.task_id} ({self.state.value})"
-                )
-            self._active_operations += 1
+    def operation(
+        self,
+        *,
+        files: Iterable[os.PathLike[str] | str | FileIdentity] = (),
+    ) -> Iterator[None]:
+        raw_files = tuple(files)
+
+        def enter(identities: tuple[FileIdentity, ...]) -> None:
+            with _CHANGED:
+                if self.state is not ScopeState.ACTIVE:
+                    raise ResourceLifecycleError(
+                        f"task operation entered after quiesce: {self.task_id} ({self.state.value})"
+                    )
+                self._active_operations += 1
+                for identity in identities:
+                    self._active_file_operations[identity] = (
+                        self._active_file_operations.get(identity, 0) + 1
+                    )
+
+        if raw_files:
+            # The conservative logical identities acquire the promotion gate
+            # before os.stat touches a path. Resolve the physical identities
+            # once while that coordination lock is held.
+            logical_identities = tuple(
+                item
+                if isinstance(item, FileIdentity)
+                else FileIdentity(path=_normalized_path(item), is_directory=True)
+                for item in raw_files
+            )
+            with lifecycle_registration(logical_identities):
+                identities = file_identities(raw_files)
+                enter(identities)
+        else:
+            identities = ()
+            enter(identities)
         operation_token = _CURRENT_OPERATION_STACK.set(
             (*_CURRENT_OPERATION_STACK.get(), self.task_id)
+        )
+        identity_token = (
+            _CURRENT_FILE_IDENTITIES.set((*_CURRENT_FILE_IDENTITIES.get(), *identities))
+            if identities
+            else None
         )
         try:
             yield
         finally:
+            if identity_token is not None:
+                _CURRENT_FILE_IDENTITIES.reset(identity_token)
             _CURRENT_OPERATION_STACK.reset(operation_token)
             with _CHANGED:
                 self._active_operations = max(0, self._active_operations - 1)
+                for identity in identities:
+                    remaining = self._active_file_operations.get(identity, 0) - 1
+                    if remaining > 0:
+                        self._active_file_operations[identity] = remaining
+                    else:
+                        self._active_file_operations.pop(identity, None)
                 _CHANGED.notify_all()
 
     def begin_promotion(self, *, timeout: float) -> None:
@@ -719,9 +814,10 @@ def resource_snapshot(
         records = list(_RESOURCES.values())
         if identities:
             records = [record for record in records if record.overlaps(identities)]
+        active_operations = _describe_active_file_operations(identities)
         if not include_released:
             records = [record for record in records if record.state is not ResourceState.RELEASED]
-            return tuple(record.describe() for record in records)
+            return tuple([*(record.describe() for record in records), *active_operations])
         history = list(_RELEASE_HISTORY)
         if identities:
             root_paths = tuple(item.path for item in identities)
@@ -734,7 +830,7 @@ def resource_snapshot(
                     for root in root_paths
                 )
             ]
-        return tuple([*(record.describe() for record in records), *history])
+        return tuple([*(record.describe() for record in records), *active_operations, *history])
 
 
 def _format_busy(records: Sequence[ResourceRecord]) -> str:
@@ -746,6 +842,54 @@ def _format_busy(records: Sequence[ResourceRecord]) -> str:
         for record in records
     )
     return details or "<none>"
+
+
+def _matching_active_file_operations(
+    roots: Sequence[FileIdentity],
+    *,
+    exclude_task_id: str | None = None,
+) -> list[tuple["TaskResourceScope", FileIdentity, int]]:
+    matches: list[tuple[TaskResourceScope, FileIdentity, int]] = []
+    for scope in _TASK_SCOPES.values():
+        if scope.task_id == exclude_task_id or scope.state is ScopeState.CLOSED:
+            continue
+        for identity, count in scope._active_file_operations.items():
+            if count > 0 and (not roots or any(identity.overlaps(root) for root in roots)):
+                matches.append((scope, identity, count))
+    return matches
+
+
+def _describe_active_file_operations(
+    roots: Sequence[FileIdentity],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "resource_id": f"operation:{scope.task_id}:{identity.path}",
+            "task_id": scope.task_id,
+            "kind": ResourceKind.FILE_OPERATION.value,
+            "policy": ResourcePolicy.TASK_OWNED.value,
+            "files": [identity.path],
+            "owner_type": "TaskResourceScope",
+            "owner": scope.task_id,
+            "promotion_blocking": True,
+            "state": ResourceState.ACTIVE.value,
+            "created_at": scope.created_at,
+            "created_thread": None,
+            "created_from": "<lightweight file operation>",
+            "release_error": "",
+            "active_count": count,
+        }
+        for scope, identity, count in _matching_active_file_operations(roots)
+    ]
+
+
+def _format_active_file_operations(
+    operations: Sequence[tuple["TaskResourceScope", FileIdentity, int]],
+) -> str:
+    return "; ".join(
+        f"file_operation task={scope.task_id} files={[identity.path]} active_count={count}"
+        for scope, identity, count in operations
+    ) or "<none>"
 
 
 def _release_promotable_records(roots: Sequence[FileIdentity]) -> ReleaseReport:
@@ -762,7 +906,12 @@ def _release_promotable_records(roots: Sequence[FileIdentity]) -> ReleaseReport:
     return _release_records(records)
 
 
-def _wait_for_task_resources(roots: Sequence[FileIdentity], timeout: float) -> None:
+def _wait_for_task_resources(
+    roots: Sequence[FileIdentity],
+    timeout: float,
+    *,
+    exclude_operation_task_id: str | None = None,
+) -> None:
     deadline = time.monotonic() + max(0.0, float(timeout))
     with _CHANGED:
         while True:
@@ -771,12 +920,19 @@ def _wait_for_task_resources(roots: Sequence[FileIdentity], timeout: float) -> N
                 for record in _matching_active_records(roots)
                 if record.policy is ResourcePolicy.TASK_OWNED and record.task_id is not None
             ]
-            if not busy:
+            active_operations = _matching_active_file_operations(
+                roots,
+                exclude_task_id=exclude_operation_task_id,
+            )
+            if not busy and not active_operations:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ResourceBusyError(
-                    "promotion blocked by active task resources: " + _format_busy(busy)
+                    "promotion blocked by active task resources: "
+                    + _format_busy(busy)
+                    + "; active operations: "
+                    + _format_active_file_operations(active_operations)
                 )
             _CHANGED.wait(min(remaining, 0.05))
 
@@ -916,7 +1072,11 @@ def promotion_barrier(
             raise ResourceLifecycleError(f"promotion cache cleanup failed: {release_report.failed}")
 
         remaining = max(0.0, deadline - time.monotonic())
-        _wait_for_task_resources(root_identities, remaining)
+        _wait_for_task_resources(
+            root_identities,
+            remaining,
+            exclude_operation_task_id=current.task_id if current is not None else None,
+        )
 
         native_promotion_token = _begin_native_promotion(root_identities)
 
@@ -981,7 +1141,7 @@ class TaskFileHandle:
 
 
 def open_task_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> TaskFileHandle:
-    identity = FileIdentity.from_path(file)
+    identity = _file_identity(file)
     with lifecycle_registration((identity,)) as identities:
         handle = builtins.open(file, *args, **kwargs)
         try:
@@ -999,7 +1159,7 @@ def open_task_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> T
 
 
 def open_service_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> TaskFileHandle:
-    identity = FileIdentity.from_path(file)
+    identity = _file_identity(file)
     with lifecycle_registration((identity,)) as identities:
         handle = builtins.open(file, *args, **kwargs)
         try:
@@ -1019,7 +1179,7 @@ def open_service_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -
 
 def named_task_temporary_file(*args: Any, **kwargs: Any) -> TaskFileHandle:
     directory = kwargs.get("dir") or tempfile.gettempdir()
-    directory_identity = FileIdentity.from_path(directory, directory=True)
+    directory_identity = _file_identity(directory, directory=True)
     with lifecycle_registration((directory_identity,)):
         handle = tempfile.NamedTemporaryFile(*args, **kwargs)
         identity = FileIdentity.from_path(handle.name)
@@ -1059,7 +1219,7 @@ class TaskDirectoryIterator:
 
 
 def task_scandir(path: os.PathLike[str] | str = ".") -> TaskDirectoryIterator:
-    identity = FileIdentity.from_path(path, directory=True)
+    identity = _file_identity(path, directory=True)
     with lifecycle_registration((identity,)) as identities:
         iterator = os.scandir(path)
         try:

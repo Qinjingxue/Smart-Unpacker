@@ -349,26 +349,25 @@ class AsyncWorkBroker:
         item.token.raise_if_cancelled()
         marker = CURRENT_WORK.set(item.context)
         try:
-            from sunpack.support.resource_lifecycle import ResourceKind, task_resource_scope
+            from sunpack.support.resource_lifecycle import FileIdentity, task_resource_scope
 
             scope = task_resource_scope(item.context.request_id)
             if scope is None:
                 return item.operation()
-            with scope.operation():
-                operation_lease = None
-                file_id = str(item.context.file_id or "")
-                if file_id and (os.path.isabs(file_id) or os.path.exists(file_id)):
-                    operation_lease = scope.register(
-                        item,
-                        (file_id,),
-                        lambda: None,
-                        kind=ResourceKind.FILE_OPERATION,
-                    )
-                try:
-                    return item.operation()
-                finally:
-                    if operation_lease is not None:
-                        operation_lease.close()
+            file_id = str(item.context.file_id or "")
+            operation_files = ()
+            if file_id:
+                if os.path.isabs(file_id):
+                    operation_files = (file_id,)
+                else:
+                    try:
+                        metadata = os.stat(file_id, follow_symlinks=False)
+                    except OSError:
+                        pass
+                    else:
+                        operation_files = (FileIdentity.from_stat(file_id, metadata),)
+            with scope.operation(files=operation_files):
+                return item.operation()
         finally:
             CURRENT_WORK.reset(marker)
 

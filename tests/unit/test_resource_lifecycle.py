@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+import sunpack.support.resource_lifecycle as lifecycle
 from sunpack.support.resource_lifecycle import (
     ResourceBusyError,
     ResourceKind,
@@ -211,6 +212,76 @@ def test_work_broker_inherits_scope_when_request_id_is_omitted(tmp_path):
 
     asyncio.run(scenario())
     assert holder["handle"].closed
+
+
+def test_work_broker_file_operation_uses_lightweight_path_counter(tmp_path, monkeypatch):
+    path = tmp_path / "lightweight-operation.bin"
+    path.write_bytes(b"payload")
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+
+    async def scenario() -> None:
+        broker = AsyncWorkBroker(thread_capacity=1)
+        scope = TaskResourceScope("lightweight-operation-task", files=(path,))
+
+        def slow_operation() -> None:
+            operation_started.set()
+            assert release_operation.wait(1.0)
+
+        def unexpected_uuid():
+            raise AssertionError("broker file operations must not allocate resource UUIDs")
+
+        monkeypatch.setattr(lifecycle.uuid, "uuid4", unexpected_uuid)
+        with scope.activate():
+            task = asyncio.create_task(broker.run("read", str(path), slow_operation))
+            await asyncio.to_thread(operation_started.wait, 1.0)
+            operations = [
+                item
+                for item in resource_snapshot((tmp_path,))
+                if item["kind"] == ResourceKind.FILE_OPERATION.value
+            ]
+            assert len(operations) == 1
+            assert operations[0]["task_id"] == scope.task_id
+            assert operations[0]["active_count"] == 1
+            release_operation.set()
+            await task
+            assert not any(
+                item["kind"] == ResourceKind.FILE_OPERATION.value
+                for item in resource_snapshot((tmp_path,))
+            )
+            await scope.aclose()
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_work_broker_reuses_file_identity_for_nested_tracked_open(tmp_path, monkeypatch):
+    path = tmp_path / "identity-reuse.bin"
+    path.write_bytes(b"payload")
+
+    async def scenario() -> None:
+        broker = AsyncWorkBroker(thread_capacity=1)
+        scope = TaskResourceScope("identity-reuse-task", files=(path,))
+        real_stat = lifecycle.os.stat
+        stat_calls = 0
+
+        def counted_stat(*args, **kwargs):
+            nonlocal stat_calls
+            stat_calls += 1
+            return real_stat(*args, **kwargs)
+
+        def read_operation() -> bytes:
+            with open_task_file(path, "rb") as handle:
+                return handle.read()
+
+        monkeypatch.setattr(lifecycle.os, "stat", counted_stat)
+        with scope.activate():
+            assert await broker.run("read", str(path), read_operation) == b"payload"
+            await scope.aclose()
+        await broker.close()
+        assert stat_calls == 1
+
+    asyncio.run(scenario())
 
 
 def test_promotion_waits_for_other_tasks_broker_file_operation(tmp_path):
