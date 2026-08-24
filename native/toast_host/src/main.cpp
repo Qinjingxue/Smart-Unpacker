@@ -976,7 +976,22 @@ DWORD parse_process_id(const std::optional<std::wstring>& value) {
     return end != value->c_str() && *end == L'\0' ? static_cast<DWORD>(parsed) : 0;
 }
 
-HANDLE connect_server_pipe(const std::wstring& name, HANDLE parent) {
+void signal_ready_event(const std::wstring& name) {
+    if (!name.starts_with(L"Local\\SunPackToastReady-")) {
+        throw std::runtime_error("invalid Toast ready event name");
+    }
+    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str());
+    if (ready == nullptr) winrt::throw_last_error();
+    if (!SetEvent(ready)) {
+        const DWORD error = GetLastError();
+        CloseHandle(ready);
+        SetLastError(error);
+        winrt::throw_last_error();
+    }
+    CloseHandle(ready);
+}
+
+HANDLE connect_server_pipe(const std::wstring& name, HANDLE parent, const std::wstring& ready_event_name) {
     if (!name.starts_with(L"\\\\.\\pipe\\SunPackToast-")) {
         throw std::runtime_error("invalid Toast pipe name");
     }
@@ -991,6 +1006,12 @@ HANDLE connect_server_pipe(const std::wstring& name, HANDLE parent) {
         nullptr
     );
     if (pipe == INVALID_HANDLE_VALUE) winrt::throw_last_error();
+    try {
+        signal_ready_event(ready_event_name);
+    } catch (...) {
+        CloseHandle(pipe);
+        throw;
+    }
     HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (event == nullptr) {
         CloseHandle(pipe);
@@ -1038,6 +1059,7 @@ int run_host(
     const std::wstring& pipe_name,
     const std::wstring& session,
     DWORD parent_pid,
+    const std::wstring& ready_event_name,
     const std::wstring& diagnostic_log_path
 ) {
     if (!is_ordinary_integrity()) {
@@ -1049,7 +1071,7 @@ int run_host(
     }
     winrt::check_hresult(SetCurrentProcessExplicitAppUserModelID(kAppId));
     HANDLE parent = parent_pid == 0 ? nullptr : OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
-    HANDLE pipe = connect_server_pipe(pipe_name, parent);
+    HANDLE pipe = connect_server_pipe(pipe_name, parent, ready_event_name);
     if (pipe == INVALID_HANDLE_VALUE) {
         if (parent != nullptr) CloseHandle(parent);
         return 0;
@@ -1166,12 +1188,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         const auto pipe = argument_value(argc, argv, L"--pipe");
         const auto session = argument_value(argc, argv, L"--session");
+        const auto ready_event = argument_value(argc, argv, L"--ready-event");
         const auto diagnostic_log = argument_value(argc, argv, L"--diagnostic-log");
         const DWORD parent_pid = parse_process_id(argument_value(argc, argv, L"--parent-pid"));
-        if (!pipe || !session || session->size() < 16 || parent_pid == 0) {
+        if (!pipe || !session || session->size() < 16 || !ready_event || parent_pid == 0) {
             return ERROR_INVALID_PARAMETER;
         }
-        return run_host(*pipe, *session, parent_pid, diagnostic_log.value_or(L""));
+        return run_host(*pipe, *session, parent_pid, *ready_event, diagnostic_log.value_or(L""));
     } catch (const winrt::hresult_error& error) {
         return static_cast<int>(error.code().value & 0x7fffffff);
     } catch (...) {

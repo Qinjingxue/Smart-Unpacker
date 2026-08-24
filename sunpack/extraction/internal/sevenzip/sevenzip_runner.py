@@ -122,6 +122,36 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
     return environment
 
 
+def _worker_job_deadline(state: dict[str, Any]) -> float | None:
+    if state.get("cancel_requested"):
+        return float(state.get("cancel_deadline") or 0.0)
+    deadlines: list[float] = []
+    max_task_seconds = max(0.0, float(state.get("max_task_seconds") or 0.0))
+    if max_task_seconds:
+        deadlines.append(float(state["started_at"]) + max_task_seconds)
+    no_progress_timeout = max(0.0, float(state.get("no_progress_timeout") or 0.0))
+    if no_progress_timeout:
+        deadlines.append(float(state["last_progress_at"]) + no_progress_timeout)
+    return min(deadlines) if deadlines else None
+
+
+def _worker_job_due_reason(state: dict[str, Any], now: float) -> str | None:
+    deadline = _worker_job_deadline(state)
+    if deadline is None or now < deadline:
+        return None
+    if state.get("cancel_requested"):
+        return str(state.get("timeout_message") or "sevenzip_worker cancellation grace expired")
+    no_progress_timeout = max(0.0, float(state.get("no_progress_timeout") or 0.0))
+    if no_progress_timeout and now >= float(state["last_progress_at"]) + no_progress_timeout:
+        return "sevenzip_worker made no observable progress"
+    return "sevenzip_worker timed out"
+
+
+def _earliest_worker_deadline(states) -> float | None:
+    deadlines = [deadline for state in states if (deadline := _worker_job_deadline(state)) is not None]
+    return min(deadlines) if deadlines else None
+
+
 class _NativeWorkerProcess:
     def __init__(self, worker_path: str, startupinfo, process_config: dict | None = None):
         self.worker_path = worker_path
@@ -135,9 +165,10 @@ class _NativeWorkerProcess:
         self._async_jobs: dict[str, dict[str, Any]] = {}
         self._dispatch_lock = threading.Lock()
         self._stdin_lock = threading.Lock()
-        self._watchdog_stop = threading.Event()
+        self._deadline_stop = threading.Event()
+        self._deadline_changed = threading.Event()
         self._start()
-        threading.Thread(target=self._watchdog_loop, daemon=True, name="sunpack-native-watchdog").start()
+        threading.Thread(target=self._deadline_loop, daemon=True, name="sunpack-native-deadlines").start()
 
     def _start(self) -> None:
         self.worker_epoch = uuid.uuid4().hex
@@ -187,13 +218,15 @@ class _NativeWorkerProcess:
         while the native process owns the extraction concurrency.
         """
         self.register_job(job_id)
+        now = time.monotonic()
         state = {
             "on_line": on_line,
             "on_timeout": on_timeout,
-            "started_at": time.monotonic(),
-            "last_progress_at": time.monotonic(),
+            "started_at": now,
+            "last_progress_at": now,
             "cancel_requested": False,
             "cancel_deadline": 0.0,
+            "completion_lock": threading.Lock(),
             "worker_epoch": self.worker_epoch,
             "max_task_seconds": max(
                 0.0,
@@ -206,17 +239,38 @@ class _NativeWorkerProcess:
         }
         with self._dispatch_lock:
             self._async_jobs[job_id] = state
+        self._deadline_changed.set()
         try:
             self.send(payload)
         except Exception:
             self._finish_async_job(job_id)
             raise
 
-    def _finish_async_job(self, job_id: str) -> dict[str, Any] | None:
+    def _finish_async_job(
+        self,
+        job_id: str,
+        *,
+        expected: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         with self._dispatch_lock:
-            state = self._async_jobs.pop(job_id, None)
+            state = self._async_jobs.get(job_id)
+            if state is None or (expected is not None and state is not expected):
+                return None
+            self._async_jobs.pop(job_id, None)
             self._job_states.pop(job_id, None)
+        self._deadline_changed.set()
         return state
+
+    def _fail_async_job(self, job_id: str, state: dict[str, Any], message: str) -> bool:
+        with state["completion_lock"]:
+            claimed = self._finish_async_job(job_id, expected=state)
+            if claimed is None:
+                return False
+            try:
+                claimed["on_timeout"](message)
+            except Exception:
+                pass
+            return True
 
     def _dispatch_stdout(self, stream) -> None:
         try:
@@ -244,17 +298,26 @@ class _NativeWorkerProcess:
                         elif event == "job_finished":
                             job_state["state"] = "output_closed"
                 if async_state is not None:
-                    try:
-                        async_state["last_progress_at"] = time.monotonic()
-                        completed = bool(async_state["on_line"](line))
-                    except Exception as exc:
+                    completed = False
+                    callback_error = ""
+                    with async_state["completion_lock"]:
+                        with self._dispatch_lock:
+                            if self._async_jobs.get(job_id) is not async_state:
+                                continue
+                            async_state["last_progress_at"] = time.monotonic()
                         try:
-                            async_state["on_timeout"](f"sevenzip_worker completion callback failed: {exc}")
+                            completed = bool(async_state["on_line"](line))
+                        except Exception as exc:
+                            callback_error = f"sevenzip_worker completion callback failed: {exc}"
+                            completed = True
+                        if completed:
+                            self._finish_async_job(job_id, expected=async_state)
+                    self._deadline_changed.set()
+                    if callback_error:
+                        try:
+                            async_state["on_timeout"](callback_error)
                         except Exception:
                             pass
-                        completed = True
-                    if completed:
-                        self._finish_async_job(job_id)
                     continue
         except Exception:
             pass
@@ -262,11 +325,8 @@ class _NativeWorkerProcess:
             with self._dispatch_lock:
                 async_jobs = list(self._async_jobs.items())
             for job_id, state in async_jobs:
-                try:
-                    state["on_timeout"]("sevenzip_worker exited before job completion")
-                except Exception:
-                    pass
-                self._finish_async_job(job_id)
+                self._fail_async_job(job_id, state, "sevenzip_worker exited before job completion")
+            self._deadline_changed.set()
 
     @staticmethod
     def _pump(stream, output_queue: queue.Queue[str | None]) -> None:
@@ -291,62 +351,50 @@ class _NativeWorkerProcess:
     def cancel(self, job_id: str) -> None:
         self.send(json.dumps({"worker_command": "cancel", "job_id": job_id}, separators=(",", ":")))
 
-    def _watchdog_loop(self) -> None:
-        interval = max(
-            0.01,
-            float(self.process_config.get("watchdog_interval_ms", 100) or 100) / 1000.0,
-        )
-        while not self._watchdog_stop.wait(interval):
+    def _deadline_loop(self) -> None:
+        while not self._deadline_stop.is_set():
+            self._deadline_changed.clear()
+            with self._dispatch_lock:
+                deadline = _earliest_worker_deadline(self._async_jobs.values())
             if not self.is_alive():
                 return
+            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if self._deadline_changed.wait(timeout):
+                continue
             now = time.monotonic()
-            timed_out: list[tuple[str, dict[str, Any], str]] = []
-            force_failed: list[tuple[str, dict[str, Any], str]] = []
+            cancel_jobs: list[tuple[str, dict[str, Any], str]] = []
+            fail_jobs: list[tuple[str, dict[str, Any], str]] = []
             with self._dispatch_lock:
                 for job_id, state in self._async_jobs.items():
-                    max_task_seconds = state["max_task_seconds"]
-                    no_progress_timeout = state["no_progress_timeout"]
-                    timed = bool(max_task_seconds and now - state["started_at"] > max_task_seconds)
-                    no_progress = bool(
-                        no_progress_timeout and now - state["last_progress_at"] > no_progress_timeout
-                    )
-                    if not timed and not no_progress:
-                        if state["cancel_requested"] and now > state["cancel_deadline"]:
-                            force_failed.append((job_id, state, "sevenzip_worker cancellation grace expired"))
+                    message = _worker_job_due_reason(state, now)
+                    if message is None:
                         continue
-                    message = (
-                        "sevenzip_worker made no observable progress"
-                        if no_progress
-                        else "sevenzip_worker timed out"
-                    )
                     if not state["cancel_requested"]:
                         state["cancel_requested"] = True
+                        state["timeout_message"] = message
                         state["cancel_deadline"] = now + max(
                             0.5,
                             float(self.process_config.get("cancel_grace_seconds", 5) or 5),
                         )
-                        timed_out.append((job_id, state, message))
-                    elif now > state["cancel_deadline"]:
-                        force_failed.append((job_id, state, message))
-            for job_id, _state, message in timed_out:
+                        cancel_jobs.append((job_id, state, message))
+                    else:
+                        fail_jobs.append((job_id, state, message))
+            for job_id, state, message in cancel_jobs:
                 try:
                     self.cancel(job_id)
                 except Exception:
-                    force_failed.append((job_id, _state, message))
-            if force_failed:
-                for job_id, state, message in force_failed:
-                    try:
-                        state["on_timeout"](message)
-                    except Exception:
-                        pass
-                    self._finish_async_job(job_id)
-                self.close()
-                return
+                    fail_jobs.append((job_id, state, message))
+            if fail_jobs:
+                failed = any(self._fail_async_job(job_id, state, message) for job_id, state, message in fail_jobs)
+                if failed:
+                    self.close()
+                    return
 
     def close(self) -> None:
         if self.process is None:
             return
-        self._watchdog_stop.set()
+        self._deadline_stop.set()
+        self._deadline_changed.set()
         if self.is_alive() and self.process.stdin is not None:
             try:
                 self.process.stdin.write('{"worker_command":"shutdown","job_id":"shutdown"}\n')
@@ -411,6 +459,8 @@ class _AsyncNativeWorkerProcess:
         self._stderr_lines: list[str] = []
         self._send_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
+        self._stdout_task: asyncio.Task | None = None
+        self._deadline_changed = asyncio.Event()
         self._closing = False
         self.handshake: dict[str, Any] = {}
         self._ready: asyncio.Future | None = None
@@ -439,16 +489,21 @@ class _AsyncNativeWorkerProcess:
             env=environment,
         )
         self._ready = asyncio.get_running_loop().create_future()
+        self._stdout_task = asyncio.create_task(self._dispatch_stdout(), name="sunpack-native-stdout")
         self._tasks = [
-            asyncio.create_task(self._dispatch_stdout(), name="sunpack-native-stdout"),
+            self._stdout_task,
             asyncio.create_task(self._pump_stderr(), name="sunpack-native-stderr"),
-            asyncio.create_task(self._watchdog(), name="sunpack-native-watchdog"),
+            asyncio.create_task(self._deadline_loop(), name="sunpack-native-deadlines"),
+            asyncio.create_task(self._wait_for_exit(), name="sunpack-native-process-exit"),
         ]
         try:
             await asyncio.wait_for(asyncio.shield(self._ready), timeout=2.0)
         except asyncio.TimeoutError as exc:
             await self.close()
             raise RuntimeError("sevenzip_worker did not emit worker_ready during startup") from exc
+        except BaseException:
+            await self.close()
+            raise
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -465,11 +520,18 @@ class _AsyncNativeWorkerProcess:
             "cancel_requested": False,
             "cancel_deadline": 0.0,
             "state": "submitted",
+            "max_task_seconds": max(0.0, float(self.process_config.get("max_task_seconds", 0) or 0)),
+            "no_progress_timeout": max(
+                0.0,
+                float(self.process_config.get("watchdog_no_progress_timeout_seconds", 0) or 0),
+            ),
         }
+        self._deadline_changed.set()
         try:
             await self.send(payload)
         except BaseException:
             self._jobs.pop(job_id, None)
+            self._deadline_changed.set()
             raise
 
     async def send(self, payload: str) -> None:
@@ -506,6 +568,7 @@ class _AsyncNativeWorkerProcess:
                 if state is None:
                     continue
                 state["last_progress_at"] = time.monotonic()
+                self._deadline_changed.set()
                 event = str(payload.get("event") or "") if isinstance(payload, dict) else ""
                 if payload.get("type") == "result":
                     state["state"] = "result_received"
@@ -514,55 +577,104 @@ class _AsyncNativeWorkerProcess:
                 try:
                     completed = bool(state["on_line"](line))
                 except Exception as exc:
-                    state["on_timeout"](f"sevenzip_worker completion callback failed: {exc}")
+                    self._fail_job(job_id, state, f"sevenzip_worker completion callback failed: {exc}")
                     completed = True
                 if completed:
-                    self._jobs.pop(job_id, None)
+                    self._finish_job(job_id, state)
         finally:
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_exception(RuntimeError("sevenzip_worker exited before startup completed"))
             if not self._closing:
-                for job_id, state in tuple(self._jobs.items()):
-                    state["on_timeout"]("sevenzip_worker exited before job completion")
-                    self._jobs.pop(job_id, None)
+                self._fail_all_jobs("sevenzip_worker exited before job completion")
+            self._deadline_changed.set()
 
     async def _pump_stderr(self) -> None:
         assert self.process is not None and self.process.stderr is not None
         while line := await self.process.stderr.readline():
             self._stderr_lines.append(line.decode("utf-8", "replace"))
 
-    async def _watchdog(self) -> None:
-        interval = max(0.01, float(self.process_config.get("watchdog_interval_ms", 100) or 100) / 1000.0)
-        while not self._closing and self.is_alive():
-            await asyncio.sleep(interval)
+    def _finish_job(self, job_id: str, expected: dict[str, Any]) -> dict[str, Any] | None:
+        state = self._jobs.get(job_id)
+        if state is not expected:
+            return None
+        self._jobs.pop(job_id, None)
+        self._deadline_changed.set()
+        return state
+
+    def _fail_job(self, job_id: str, state: dict[str, Any], message: str) -> bool:
+        claimed = self._finish_job(job_id, state)
+        if claimed is None:
+            return False
+        try:
+            claimed["on_timeout"](message)
+        except Exception:
+            pass
+        return True
+
+    def _fail_all_jobs(self, message: str) -> None:
+        for job_id, state in tuple(self._jobs.items()):
+            self._fail_job(job_id, state, message)
+
+    async def _wait_for_exit(self) -> None:
+        assert self.process is not None
+        await self.process.wait()
+        self._deadline_changed.set()
+        stdout_task = self._stdout_task
+        if stdout_task is not None and stdout_task is not asyncio.current_task():
+            await asyncio.gather(stdout_task, return_exceptions=True)
+
+    async def _deadline_loop(self) -> None:
+        while not self._closing:
+            self._deadline_changed.clear()
+            deadline = _earliest_worker_deadline(self._jobs.values())
+            if not self.is_alive():
+                return
+            try:
+                if deadline is None:
+                    await self._deadline_changed.wait()
+                else:
+                    await asyncio.wait_for(
+                        self._deadline_changed.wait(),
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    )
+                continue
+            except asyncio.TimeoutError:
+                pass
+
             now = time.monotonic()
+            cancel_jobs: list[tuple[str, dict[str, Any], str]] = []
+            fail_jobs: list[tuple[str, dict[str, Any], str]] = []
             for job_id, state in tuple(self._jobs.items()):
-                max_seconds = max(0.0, float(self.process_config.get("max_task_seconds", 0) or 0))
-                no_progress_seconds = max(
-                    0.0,
-                    float(self.process_config.get("watchdog_no_progress_timeout_seconds", 0) or 0),
-                )
-                timed = bool(max_seconds and now - state["started_at"] > max_seconds)
-                stalled = bool(no_progress_seconds and now - state["last_progress_at"] > no_progress_seconds)
-                if not timed and not stalled:
-                    if not state["cancel_requested"] or now <= state["cancel_deadline"]:
-                        continue
-                message = "sevenzip_worker made no observable progress" if stalled else "sevenzip_worker timed out"
+                message = _worker_job_due_reason(state, now)
+                if message is None:
+                    continue
                 if not state["cancel_requested"]:
                     state["cancel_requested"] = True
+                    state["timeout_message"] = message
                     state["cancel_deadline"] = now + max(
-                        0.5, float(self.process_config.get("cancel_grace_seconds", 5) or 5)
+                        0.5,
+                        float(self.process_config.get("cancel_grace_seconds", 5) or 5),
                     )
-                    try:
-                        await self.cancel(job_id)
-                    except Exception:
-                        state["cancel_deadline"] = 0.0
-                    continue
-                state["on_timeout"](message)
-                self._jobs.pop(job_id, None)
+                    cancel_jobs.append((job_id, state, message))
+                else:
+                    fail_jobs.append((job_id, state, message))
+            for job_id, state, message in cancel_jobs:
+                try:
+                    await self.cancel(job_id)
+                except Exception:
+                    fail_jobs.append((job_id, state, message))
+            if fail_jobs:
+                failed = any(self._fail_job(job_id, state, message) for job_id, state, message in fail_jobs)
+                if failed:
+                    self._fail_all_jobs("sevenzip_worker terminated after a task timeout")
+                    await self.close()
+                    return
 
     async def close(self) -> None:
         if self.process is None:
             return
         self._closing = True
+        self._deadline_changed.set()
         if self.is_alive():
             try:
                 await self.send('{"worker_command":"shutdown","job_id":"shutdown"}')
@@ -574,12 +686,24 @@ class _AsyncNativeWorkerProcess:
                         await asyncio.wait_for(self.process.wait(), timeout=0.5)
                     except Exception:
                         self.process.kill()
+                        await self.process.wait()
+        stdin = self.process.stdin
+        if stdin is not None:
+            stdin.close()
+            try:
+                await stdin.wait_closed()
+            except Exception:
+                pass
         current = asyncio.current_task()
-        for task in self._tasks:
-            if task is not current and not task.done():
+        remaining = [task for task in self._tasks if task is not current]
+        if remaining:
+            _done, pending = await asyncio.wait(remaining, timeout=1.0)
+            for task in pending:
                 task.cancel()
-        await asyncio.gather(*(task for task in self._tasks if task is not current), return_exceptions=True)
+            await asyncio.gather(*remaining, return_exceptions=True)
         self._tasks.clear()
+        self._stdout_task = None
+        self._fail_all_jobs("sevenzip_worker closed before job completion")
 
 
 class _AsyncNativeWorkerHolder:
@@ -859,6 +983,11 @@ class SevenZipRunner:
                 return False
 
             def on_timeout(message: str) -> None:
+                failure_kind = (
+                    "worker_lost"
+                    if "exited before job completion" in message or not worker.is_alive()
+                    else "timeout"
+                )
                 complete(self._completed_process(
                     [worker.worker_path],
                     -101,
@@ -867,7 +996,7 @@ class SevenZipRunner:
                     request_payload=prepared_job,
                     process_failure={
                         "failure_stage": "worker_communication",
-                        "failure_kind": "worker_lost" if not worker.is_alive() else "timeout",
+                        "failure_kind": failure_kind,
                         "worker_epoch": worker.worker_epoch,
                         "message": message,
                     },

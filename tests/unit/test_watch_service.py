@@ -862,7 +862,6 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
             "watch": {
                 "state_dir": str(state_dir),
                 "roots": [],
-                "reload_poll_seconds": 1.0,
                 "tray_enabled": False,
             }
         },

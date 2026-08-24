@@ -85,7 +85,6 @@
       "warm_start_confirmations": 2,
       "max_task_seconds": 1800,
       "watchdog_no_progress_timeout_seconds": 180,
-      "watchdog_interval_ms": 500,
       "thread_capacity": 0,
       "stage_thread_capacity": 0,
       "max_inflight_files": 0,
@@ -135,8 +134,7 @@
     "toast_report_retention_days": 30,
     "toast_report_max_files": 256,
     "toast_report_max_bytes": 16777216,
-    "state_dir": "",
-    "reload_poll_seconds": 1.0
+    "state_dir": ""
   },
   "passwords": {
     "clipboard_passwords_enabled": true,

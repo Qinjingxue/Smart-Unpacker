@@ -27,3 +27,16 @@ def test_toast_host_clears_cppwinrt_factories_before_apartment_shutdown():
     clear_at = apartment_scope.index("winrt::clear_factory_cache();")
     uninit_at = apartment_scope.index("winrt::uninit_apartment();")
     assert clear_at < uninit_at
+
+
+def test_toast_host_signals_named_ready_event_after_pipe_creation():
+    source = _toast_host_source()
+    connect_pipe = source[
+        source.index("HANDLE connect_server_pipe(") : source.index("int run_host(")
+    ]
+
+    assert 'argument_value(argc, argv, L"--ready-event")' in source
+    assert "!ready_event" in source
+    assert 'OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str())' in source
+    assert connect_pipe.index("CreateNamedPipeW(") < connect_pipe.index("signal_ready_event(ready_event_name)")
+    assert connect_pipe.index("signal_ready_event(ready_event_name)") < connect_pipe.index("ConnectNamedPipe(")

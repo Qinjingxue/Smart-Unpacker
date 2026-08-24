@@ -15,7 +15,7 @@ def test_native_worker_progress_event_is_forwarded_to_task_callback(tmp_path):
 
     task = ArchiveTask(fact_bag=FactBag(), score=1, main_path=str(archive), all_parts=[str(archive)])
     events = []
-    runner = SevenZipRunner({"watchdog_interval_ms": 10})
+    runner = SevenZipRunner({})
     runner.worker_path = get_sevenzip_bridge_worker_path()
     runner.seven_zip_dll_path = get_7z_dll_path()
     runner.progress_callback = lambda current_task, event: events.append((current_task, event))

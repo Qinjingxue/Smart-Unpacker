@@ -214,7 +214,6 @@ class WatchScheduler:
         self._observer = Observer()
         self._observer_resource = None
         self._started = False
-        self._run_wakeup = threading.Event()
         self._wake_callback = wake_callback
         self.notification_sink = notification_sink or NullWatchNotificationSink()
         self._notification_error_actions: set[str] = set()
@@ -381,16 +380,6 @@ class WatchScheduler:
     def _release_observer(self) -> None:
         self._observer.stop()
         self._observer.join(timeout=self.observer_stop_timeout_seconds)
-
-    async def run_forever(self):
-        await self.start()
-        try:
-            while True:
-                self._run_wakeup.clear()
-                await self.run_once()
-                await asyncio.sleep(self.next_delay_seconds())
-        finally:
-            await self.stop()
 
     async def run_once(self) -> WatchRunResult:
         self._process_password_dirty_dirs(time.monotonic())
@@ -594,7 +583,6 @@ class WatchScheduler:
             "cache_cleanup_scheduled",
             idle_seconds=self.runtime_cache_cleanup_idle_seconds,
         )
-        self._run_wakeup.set()
 
     async def _maybe_clear_idle_caches(self) -> None:
         if not self.runtime_cache_cleanup_enabled:
@@ -835,7 +823,6 @@ class WatchScheduler:
             self._wake_service()
 
     def _wake_service(self) -> None:
-        self._run_wakeup.set()
         if self._wake_callback is not None:
             self._wake_callback()
 

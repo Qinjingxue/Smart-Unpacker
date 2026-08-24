@@ -60,7 +60,6 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["toast_report_max_files"] = max(1, _int_field(config, "toast_report_max_files"))
     config["toast_report_max_bytes"] = max(1024, _int_field(config, "toast_report_max_bytes"))
     config["state_dir"] = str(config["state_dir"])
-    config["reload_poll_seconds"] = max(0.2, _float_field(config, "reload_poll_seconds"))
     return config
 
 

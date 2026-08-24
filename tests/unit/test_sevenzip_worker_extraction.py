@@ -1,3 +1,4 @@
+import asyncio
 import binascii
 import json
 import os
@@ -381,7 +382,7 @@ def test_native_worker_result_escapes_control_characters(tmp_path):
         "archive_path": str(archive),
         "output_dir": str(tmp_path / "out"),
     }
-    runner = SevenZipRunner({"max_task_seconds": 2, "watchdog_interval_ms": 10})
+    runner = SevenZipRunner({"max_task_seconds": 2})
     runner.worker_path = worker_path
     runner.seven_zip_dll_path = seven_zip_dll
     try:
@@ -399,6 +400,107 @@ def test_native_worker_result_escapes_control_characters(tmp_path):
     assert worker_result["job_id"] == "control-name"
     assert worker_result["failed_item"] == "control-\x01-name.txt"
     assert worker_result["diagnostics"]["failed_item"]["path"] == "control-\x01-name.txt"
+
+
+def test_native_worker_asyncio_event_controller_completes_job(tmp_path):
+    worker_path = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive = tmp_path / "async.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("async.txt", "async payload")
+    out_dir = tmp_path / "async-out"
+    payload = {
+        "job_id": "async-event-controller",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+    }
+
+    async def run_attempt():
+        runner = SevenZipRunner(
+            {
+                "max_task_seconds": 5,
+                "watchdog_no_progress_timeout_seconds": 2,
+                "cancel_grace_seconds": 0.5,
+            }
+        )
+        runner.worker_path = worker_path
+        runner.seven_zip_dll_path = seven_zip_dll
+        try:
+            return await asyncio.wait_for(
+                runner.submit_attempt_asyncio(payload, task=_task(archive)),
+                timeout=10,
+            )
+        finally:
+            await runner.aclose()
+
+    completed = asyncio.run(run_attempt())
+
+    assert completed.returncode == 0
+    assert (out_dir / "async.txt").read_text(encoding="utf-8") == "async payload"
+
+
+def test_native_worker_asyncio_process_exit_completes_pending_job(tmp_path):
+    worker = tmp_path / "exit_worker.cmd"
+    worker.write_text(
+        '@echo {"type":"worker_ready"}\r\n@set /p request=\r\n@exit /b 7\r\n',
+        encoding="utf-8",
+    )
+    runner = SevenZipRunner({})
+    runner.worker_path = str(worker)
+
+    async def run_attempt():
+        try:
+            return await asyncio.wait_for(
+                runner.submit_attempt_asyncio(
+                    {"job_id": "async-process-exit"},
+                    task=_task(worker),
+                ),
+                timeout=3,
+            )
+        finally:
+            await runner.aclose()
+
+    completed = asyncio.run(run_attempt())
+
+    assert completed.returncode == -101
+    assert completed.worker_diagnostics["process_failure"]["failure_kind"] == "worker_lost"
+
+
+def test_native_worker_asyncio_deadline_cancels_without_polling(tmp_path):
+    worker = tmp_path / "stalled_worker.cmd"
+    worker.write_text(
+        '@echo {"type":"worker_ready"}\r\n'
+        "@set /p request=\r\n"
+        "@set /p cancellation=\r\n"
+        "@set /p shutdown=\r\n",
+        encoding="utf-8",
+    )
+    runner = SevenZipRunner(
+        {
+            "max_task_seconds": 0.05,
+            "cancel_grace_seconds": 0.5,
+        }
+    )
+    runner.worker_path = str(worker)
+
+    async def run_attempt():
+        try:
+            return await asyncio.wait_for(
+                runner.submit_attempt_asyncio(
+                    {"job_id": "async-deadline"},
+                    task=_task(worker),
+                ),
+                timeout=2,
+            )
+        finally:
+            await runner.aclose()
+
+    completed = asyncio.run(run_attempt())
+
+    assert completed.returncode == -101
+    assert completed.worker_diagnostics["process_failure"]["failure_kind"] == "timeout"
+    assert "timed out" in completed.stderr
 
 
 def test_native_worker_starts_in_neutral_working_directory(tmp_path, monkeypatch):
@@ -1105,7 +1207,6 @@ def test_sevenzip_runner_observed_process_timeout_reports_process_timeout(tmp_pa
         max_retries=1,
         process_config={
             "max_task_seconds": 0.1,
-            "watchdog_interval_ms": 10,
             "cancel_grace_seconds": 0.5,
         },
     )
