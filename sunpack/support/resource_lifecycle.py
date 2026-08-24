@@ -1140,6 +1140,37 @@ class TaskFileHandle:
         self.close()
 
 
+class _NamedTemporaryHandle:
+    def __init__(self, handle: Any, name: str, *, delete: bool):
+        self._handle = handle
+        self.name = name
+        self._delete = bool(delete)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+    def __iter__(self):
+        return iter(self._handle)
+
+    @property
+    def closed(self) -> bool:
+        return bool(self._handle.closed)
+
+    def close(self) -> None:
+        try:
+            self._handle.close()
+        finally:
+            if self._delete:
+                _remove_named_temporary_file(self.name)
+
+
+def _remove_named_temporary_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def open_task_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> TaskFileHandle:
     identity = _file_identity(file)
     with lifecycle_registration((identity,)) as identities:
@@ -1177,24 +1208,66 @@ def open_service_file(file: os.PathLike[str] | str, *args: Any, **kwargs: Any) -
     return TaskFileHandle(handle, lease)
 
 
-def named_task_temporary_file(*args: Any, **kwargs: Any) -> TaskFileHandle:
-    directory = kwargs.get("dir") or tempfile.gettempdir()
-    directory_identity = _file_identity(directory, directory=True)
-    with lifecycle_registration((directory_identity,)):
-        handle = tempfile.NamedTemporaryFile(*args, **kwargs)
-        identity = FileIdentity.from_path(handle.name)
+def named_task_temporary_file(
+    mode: str = "w+b",
+    buffering: int = -1,
+    encoding: str | None = None,
+    newline: str | None = None,
+    suffix: str | None = None,
+    prefix: str | None = None,
+    dir: os.PathLike[str] | str | None = None,
+    delete: bool = True,
+    *,
+    errors: str | None = None,
+) -> TaskFileHandle:
+    directory = os.fspath(dir if dir is not None else tempfile.gettempdir())
+    prefix = tempfile.gettempprefix() if prefix is None else os.fspath(prefix)
+    suffix = "" if suffix is None else os.fspath(suffix)
+    if not isinstance(directory, str) or not isinstance(prefix, str) or not isinstance(suffix, str):
+        raise TypeError("named task temporary files require string paths")
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    for _attempt in range(100):
+        name = os.path.join(directory, f"{prefix}{uuid.uuid4().hex}{suffix}")
+        logical_identity = FileIdentity(path=_normalized_path(name))
         try:
-            lease = register_current_task_resource(
-                handle,
-                (identity,),
-                handle.close,
-                kind=ResourceKind.PYTHON_FILE,
-                registration_held=True,
-            )
-        except BaseException:
-            handle.close()
-            raise
-    return TaskFileHandle(handle, lease)
+            with lifecycle_registration((logical_identity,)):
+                descriptor = os.open(name, flags, 0o600)
+                try:
+                    raw_handle = os.fdopen(
+                        descriptor,
+                        mode,
+                        buffering,
+                        encoding,
+                        errors,
+                        newline,
+                    )
+                except BaseException:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                    _remove_named_temporary_file(name)
+                    raise
+                handle = _NamedTemporaryHandle(raw_handle, name, delete=delete)
+                try:
+                    identity = FileIdentity.from_stat(name, os.fstat(raw_handle.fileno()))
+                    lease = register_current_task_resource(
+                        handle,
+                        (identity,),
+                        handle.close,
+                        kind=ResourceKind.PYTHON_FILE,
+                        registration_held=True,
+                    )
+                except BaseException:
+                    handle.close()
+                    _remove_named_temporary_file(name)
+                    raise
+            return TaskFileHandle(handle, lease)
+        except FileExistsError:
+            continue
+    raise FileExistsError("could not allocate a unique named task temporary file")
 
 
 class TaskDirectoryIterator:

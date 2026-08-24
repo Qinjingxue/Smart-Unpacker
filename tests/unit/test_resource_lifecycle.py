@@ -12,6 +12,7 @@ from sunpack.support.resource_lifecycle import (
     ResourceBusyError,
     ResourceKind,
     TaskResourceScope,
+    named_task_temporary_file,
     open_task_file,
     promotion_barrier,
     register_current_task_resource,
@@ -72,6 +73,48 @@ def test_promotion_gate_excludes_new_overlapping_file_opens(tmp_path):
 
     with promotion_barrier((root,), strict_open_file_audit=False):
         worker = threading.Thread(target=open_in_thread)
+        worker.start()
+        assert entered.wait(1.0)
+        assert not completed.wait(0.05)
+
+    worker.join(1.0)
+    assert completed.is_set()
+
+
+def test_named_temporary_file_in_ancestor_sibling_does_not_conflict_with_child_promotion(tmp_path):
+    promoted = tmp_path / "out" / "archive"
+    promoted.mkdir(parents=True)
+
+    with promotion_barrier((promoted,), strict_open_file_audit=False):
+        with named_task_temporary_file(
+            mode="w",
+            encoding="utf-8",
+            dir=tmp_path,
+            prefix=".state.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write("state")
+            temporary_path = tmp_path / os.path.basename(handle.name)
+
+    assert temporary_path.read_text(encoding="utf-8") == "state"
+    temporary_path.unlink()
+
+
+def test_named_temporary_file_waits_for_parent_promotion(tmp_path):
+    child = tmp_path / "state"
+    child.mkdir()
+    entered = threading.Event()
+    completed = threading.Event()
+
+    def create_temporary_file() -> None:
+        entered.set()
+        with named_task_temporary_file(dir=child) as handle:
+            handle.write(b"state")
+        completed.set()
+
+    with promotion_barrier((tmp_path,), strict_open_file_audit=False):
+        worker = threading.Thread(target=create_temporary_file)
         worker.start()
         assert entered.wait(1.0)
         assert not completed.wait(0.05)

@@ -730,8 +730,12 @@ def _finalize_response(
     ]
     flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
     shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
-    flatten_enabled = config.get("post_extract", {}).get("flatten_single_directory", True)
-    mutation_roots = [*flatten_targets, *(path for family in archives_to_clean for path in family)]
+    post_extract = config.get("post_extract", {})
+    flatten_enabled = post_extract.get("flatten_single_directory", True)
+    cleanup_mode = post_extract.get("archive_cleanup_mode", "recycle")
+    mutation_roots = list(flatten_targets) if flatten_enabled else []
+    if cleanup_mode != "keep":
+        mutation_roots.extend(path for family in archives_to_clean for path in family)
     if mutation_roots:
         with promotion_barrier(
             mutation_roots,

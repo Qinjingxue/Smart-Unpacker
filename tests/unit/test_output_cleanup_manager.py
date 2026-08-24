@@ -152,6 +152,7 @@ def test_output_deletion_primitives_are_confined_to_approved_infrastructure():
         Path("sunpack/filesystem/watcher/scheduler.py"),
         Path("sunpack/filesystem/watcher/service.py"),
         Path("sunpack/filesystem/watcher/state.py"),
+        Path("sunpack/support/resource_lifecycle.py"),
     }
     violations: list[str] = []
     for path in (project_root / "sunpack").rglob("*.py"):
