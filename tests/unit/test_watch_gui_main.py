@@ -44,7 +44,7 @@ def test_watch_gui_elevation_relaunch_preserves_launch_options(monkeypatch, tmp_
 
     def build_argv(**kwargs):
         captured["launch_kwargs"] = kwargs
-        return ["sunpack-watch.exe", "--once", "--no-tray"]
+        return ["sunpack-runtime.exe", "--_sunpack-mode=watch", "--once", "--no-tray"]
 
     monkeypatch.setattr(gui_main, "runtime_working_directory", lambda: str(tmp_path))
     monkeypatch.setattr(
@@ -66,6 +66,6 @@ def test_watch_gui_elevation_relaunch_preserves_launch_options(monkeypatch, tmp_
             "initial_scan": False,
             "prefer_windowed_python": True,
         },
-        "argv": ["sunpack-watch.exe", "--once", "--no-tray"],
+        "argv": ["sunpack-runtime.exe", "--_sunpack-mode=watch", "--once", "--no-tray"],
         "cwd": str(tmp_path),
     }

@@ -3,17 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_native_launcher_routes_watch_start_directly_to_watch_executable():
+def test_native_launcher_routes_watch_start_to_a_separate_shared_runtime_process():
     source = (Path(__file__).resolve().parents[2] / "native" / "sevenzip_bridge" / "src" / "launcher.cpp").read_text(
         encoding="utf-8"
     )
 
-    assert 'L"\\\\sunpack-watch.exe"' in source
+    assert source.count('L"\\\\sunpack-runtime.exe"') == 2
+    assert 'L"--_sunpack-mode=watch"' in source
+    assert "sunpack-watch.exe" not in source
     assert 'wcscmp(argv[1], L"watch") == 0' in source
     assert 'wcscmp(argv[2], L"start") == 0' in source
     assert "spawn_watch(context, watch_arguments, !once" in source
     assert "CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS" in source
     assert "--_sunpack-runtime-id=" in source
+
+
+def test_native_launcher_keeps_cli_server_and_watch_lifecycles_separate():
+    source = (Path(__file__).resolve().parents[2] / "native" / "sevenzip_bridge" / "src" / "launcher.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'spawn_runtime(context, {L"--persistent-server"}, true' in source
+    assert "spawn_watch(context, watch_arguments, !once" in source
+    assert "spawn_watch(context, watch_start_arguments, true, nullptr)" in source
+    assert "request(context, watch_arguments" not in source
 
 
 def test_native_launcher_starts_watch_only_after_watch_add_succeeds():

@@ -941,11 +941,9 @@ $releaseRoot = Join-Path $repoRoot "release"
 $distFolderName = "sunpack-" + $buildArch + "-" + $repairSystemMode
 $appExeName = "sunpack.exe"
 $runtimeExeName = "sunpack-runtime.exe"
-$watchExeName = "sunpack-watch.exe"
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
 $distRuntimeExePath = Join-Path $distAppRoot $runtimeExeName
-$distWatchExePath = Join-Path $distAppRoot $watchExeName
 $nuitkaBuildRoot = Join-Path $buildRoot ("nuitka-" + $distFolderName)
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
@@ -1077,9 +1075,7 @@ if ($runAcceptanceTests) {
 Write-Step "Building Windows release with Nuitka"
     $nuitkaEntryRoot = Join-Path $nuitkaBuildRoot "entries"
     $nuitkaRuntimeEntryPath = Join-Path $nuitkaEntryRoot "sunpack-runtime.py"
-    $nuitkaWatchEntryPath = Join-Path $nuitkaEntryRoot "sunpack-watch.py"
     $nuitkaRuntimeDist = Join-Path $nuitkaBuildRoot ([System.IO.Path]::GetFileNameWithoutExtension($runtimeExeName) + ".dist")
-    $nuitkaWatchDist = Join-Path $nuitkaBuildRoot ([System.IO.Path]::GetFileNameWithoutExtension($watchExeName) + ".dist")
     $sitePackages = Join-Path $venvPath "Lib\site-packages"
     $nuitkaDynamicPackages = @(
     "watchdog",
@@ -1116,16 +1112,11 @@ Write-Step "Building Windows release with Nuitka"
 
     New-Item -ItemType Directory -Path $nuitkaEntryRoot -Force | Out-Null
     New-NuitkaEntrypoint -Path $nuitkaRuntimeEntryPath -RepairSystem $repairSystemMode
-    New-NuitkaEntrypoint -Path $nuitkaWatchEntryPath -RepairSystem $repairSystemMode
-    Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaRuntimeEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $runtimeExeName -ConsoleMode "force" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--help" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-runtime-report.xml")
-    Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaWatchEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $watchExeName -ConsoleMode "disable" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--once --no-tray" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-watch-report.xml")
+    Invoke-NuitkaStandaloneBuild -PythonPath $venvPython -EntryPath $nuitkaRuntimeEntryPath -OutputRoot $nuitkaBuildRoot -ExecutableName $runtimeExeName -ConsoleMode "disable" -IconPath $iconPath -DynamicPackages $nuitkaDynamicPackages -SitePackages $sitePackages -IncludeModelRuntime:($repairSystemMode -eq "full") -PgoArgs "--help" -EnableExperimentalCProfileGuidedOptimization:$ExperimentalCProfileGuidedOptimization -ReportPath (Join-Path $nuitkaBuildRoot "sunpack-runtime-report.xml")
     Embed-WindowsApplicationManifest -PythonPath $venvPython -EmbeddingScriptPath $manifestEmbeddingScriptPath -ManifestPath $applicationManifestPath -ExecutablePaths @(
-        (Join-Path $nuitkaRuntimeDist $runtimeExeName),
-        (Join-Path $nuitkaWatchDist $watchExeName)
+        (Join-Path $nuitkaRuntimeDist $runtimeExeName)
     )
-    Remove-IfExists -LiteralPath (Join-Path $nuitkaWatchDist ".sunpack_watch")
     Copy-NuitkaDistContents -Source $nuitkaRuntimeDist -Destination $distAppRoot
-    Copy-NuitkaDistContents -Source $nuitkaWatchDist -Destination $distAppRoot
 Copy-Item -LiteralPath $launcherBuildPath -Destination $distExePath -Force
 
 Write-Step "Validating packaged outputs"
@@ -1134,9 +1125,8 @@ Assert-PathExists -LiteralPath $distRuntimeExePath -Description "Packaged SunPac
 Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged sunpack executable"
 Assert-PeMachine -LiteralPath $distRuntimeExePath -BuildArch $buildArch -Description "Packaged SunPack runtime executable"
 Assert-PeSubsystem -LiteralPath $distExePath -Expected 3 -Description "Packaged sunpack executable"
-Assert-PathExists -LiteralPath $distWatchExePath -Description "Packaged SunPack watch GUI executable"
-Assert-PeMachine -LiteralPath $distWatchExePath -BuildArch $buildArch -Description "Packaged SunPack watch GUI executable"
-Assert-PeSubsystem -LiteralPath $distWatchExePath -Expected 2 -Description "Packaged SunPack watch GUI executable"
+Assert-PeSubsystem -LiteralPath $distRuntimeExePath -Expected 2 -Description "Packaged shared SunPack runtime executable"
+Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "sunpack-watch.exe") -Description "Retired duplicate watch executable"
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 
 Write-Step "Adding release metadata and helper scripts"

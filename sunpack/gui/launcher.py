@@ -4,14 +4,15 @@ import sys
 from pathlib import Path
 
 from sunpack.support.runtime_identity import runtime_id, runtime_id_argument
+from sunpack.support.runtime_mode import RUNTIME_MODE_WATCH, runtime_mode_argument
 
 
-WATCH_EXECUTABLE_NAME = "sunpack-watch.exe"
+RUNTIME_EXECUTABLE_NAME = "sunpack-runtime.exe"
 
 
-def packaged_watch_executable(executable: str | Path | None = None) -> Path | None:
+def packaged_runtime_executable(executable: str | Path | None = None) -> Path | None:
     current = Path(executable or sys.executable).resolve()
-    candidate = current.parent / WATCH_EXECUTABLE_NAME
+    candidate = current.parent / RUNTIME_EXECUTABLE_NAME
     return candidate if candidate.is_file() else None
 
 
@@ -22,9 +23,9 @@ def watch_launch_argv(
     initial_scan: bool = False,
     prefer_windowed_python: bool = False,
 ) -> list[str]:
-    packaged = packaged_watch_executable()
+    packaged = packaged_runtime_executable()
     if packaged is not None:
-        argv = [str(packaged)]
+        argv = [str(packaged), runtime_mode_argument(RUNTIME_MODE_WATCH)]
     else:
         executable = Path(sys.executable).resolve()
         if prefer_windowed_python and executable.name.lower() == "python.exe":

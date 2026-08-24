@@ -31,7 +31,7 @@ def test_installer_optionally_registers_watch_autostart():
     assert "Start SunPack Watch when Windows starts" in script
     assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in script
     assert 'ValueName: "SunPackWatchService"' in script
-    assert 'ValueData: """{app}\\sunpack-watch.exe"""' in script
+    assert 'ValueData: """{app}\\sunpack-runtime.exe"" --_sunpack-mode=watch"' in script
     assert "Tasks: autostart" in script
     assert "uninsdeletevalue" in script
 
@@ -58,10 +58,10 @@ def test_uninstaller_unconditionally_removes_watch_autostart():
 def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
-    assert "procedure StopExistingWatch" in script
+    assert "procedure StopExistingProcesses" in script
     assert "watch stop" in script
     assert "function PrepareToInstall" in script
-    assert "StopExistingWatch;" in script
+    assert "StopExistingProcesses;" in script
     assert "function ClearInstallDirectory: Boolean" in script
     assert "function ClearExternalRuntimeState: Boolean" in script
     assert "IsPersistentInstallFile" in script
@@ -80,16 +80,16 @@ def test_uninstaller_stops_running_watch_before_removing_files():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
     assert "function InitializeUninstall(): Boolean" in script
-    assert "function WaitForExistingWatchToExit: Boolean" in script
-    assert "function StopExistingWatchAndWait: Boolean" in script
+    assert "function WaitForExistingRuntimesToExit: Boolean" in script
+    assert "function StopExistingProcessesAndWait: Boolean" in script
     assert "RemoveStartupRunValue;" in script
-    assert "Result := StopExistingWatchAndWait;" in script
-    assert "Please stop it and run the uninstaller again." in script
+    assert "Result := StopExistingProcessesAndWait;" in script
+    assert "Please stop them and run the uninstaller again." in script
     assert "Get-Process -ErrorAction SilentlyContinue" in script
-    assert "WatchAppPath := ExpandConstant('{app}\\sunpack-watch.exe')" in script
+    assert "RuntimeAppPath := ExpandConstant('{app}\\sunpack-runtime.exe')" in script
     assert "$targets = @(" in script
     assert "CliAppPath: string;" in script
-    assert "WatchAppPath: string;" in script
+    assert "RuntimeAppPath: string;" in script
     assert "ExpandConstant('{app}\\sunpack.exe')" in script
     assert "$deadline = (Get-Date).AddSeconds(20)" in script
     assert "Start-Sleep -Milliseconds 250" in script
@@ -176,8 +176,8 @@ def test_build_uses_nuitka_only():
     assert '"--pgo-c"' in build_script
     assert '"--pgo-args=$PgoArgs"' in build_script
     assert '-PgoArgs "--help"' in build_script
-    assert '-PgoArgs "--once --no-tray"' in build_script
-    assert 'Remove-IfExists -LiteralPath (Join-Path $nuitkaWatchDist ".sunpack_watch")' in build_script
+    assert build_script.count("Invoke-NuitkaStandaloneBuild -PythonPath") == 1
+    assert "$nuitkaWatchDist" not in build_script
     assert 'Embed-WindowsApplicationManifest -PythonPath $venvPython' in build_script
     assert '"scripts\\embed_windows_manifest.py"' in build_script
     assert '"--nofollow-import-to=$package"' in build_script
@@ -268,10 +268,12 @@ def test_acceptance_setup_bootstraps_and_checks_real_archive_generators():
     assert "zstd.exe" in acceptance_script
 
 
-def test_release_package_includes_console_and_gui_executables():
+def test_release_package_uses_native_console_launcher_and_one_shared_gui_runtime():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
 
-    assert '$watchExeName = "sunpack-watch.exe"' in build_script
-    assert "Packaged SunPack watch GUI executable" in build_script
-    assert 'ConsoleMode "force"' in build_script
+    assert '$runtimeExeName = "sunpack-runtime.exe"' in build_script
+    assert '$watchExeName' not in build_script
+    assert "Packaged shared SunPack runtime executable" in build_script
+    assert build_script.count("Invoke-NuitkaStandaloneBuild -PythonPath") == 1
     assert 'ConsoleMode "disable"' in build_script
+    assert 'Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "sunpack-watch.exe")' in build_script

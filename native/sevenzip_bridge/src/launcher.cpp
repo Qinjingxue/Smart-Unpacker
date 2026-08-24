@@ -19,6 +19,7 @@ namespace {
 constexpr char kRequestMagic[] = "SPK1";
 constexpr char kStreamMagic[] = "SPS1";
 constexpr char kRuntimeIdentityArgumentPrefix[] = "--_sunpack-runtime-id=";
+constexpr wchar_t kWatchRuntimeModeArgument[] = L"--_sunpack-mode=watch";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
 
 std::wstring current_executable_path() {
@@ -463,8 +464,8 @@ bool spawn_runtime(const InstallContext& context, const std::vector<std::wstring
 
 bool spawn_watch(const InstallContext& context, const std::vector<std::wstring>& arguments, bool detached,
                  DWORD* exit_code = nullptr) {
-    const std::wstring watch = context.directory + L"\\sunpack-watch.exe";
-    std::wstring command = quote_argument(watch);
+    const std::wstring runtime = context.directory + L"\\sunpack-runtime.exe";
+    std::wstring command = quote_argument(runtime) + L" " + quote_argument(kWatchRuntimeModeArgument);
     for (const auto& argument : arguments) command += L" " + quote_argument(argument);
     command += L" " + quote_argument(wide_utf8(std::string(kRuntimeIdentityArgumentPrefix) + context.runtime_id));
     STARTUPINFOW startup{};
@@ -472,7 +473,7 @@ bool spawn_watch(const InstallContext& context, const std::vector<std::wstring>&
     PROCESS_INFORMATION process{};
     const DWORD flags = detached ? (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS) : 0;
     const wchar_t* child_cwd = context.directory.empty() ? nullptr : context.directory.c_str();
-    if (!CreateProcessW(watch.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
+    if (!CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
                         child_cwd,
                         &startup, &process)) return false;
     CloseHandle(process.hThread);

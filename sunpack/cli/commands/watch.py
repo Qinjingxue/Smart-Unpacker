@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from sunpack.support.runtime_cwd import runtime_working_directory
 
 from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
@@ -19,7 +16,6 @@ from sunpack.filesystem.watcher.service import (
     signal_reload,
     signal_stop,
 )
-from sunpack.support.runtime_identity import runtime_id, runtime_id_argument
 
 
 COMMAND = "watch"
@@ -195,30 +191,15 @@ def _watch_running(config: dict) -> bool:
 
 
 def _request_watch_elevation(args) -> bool:
+    from sunpack.gui.launcher import watch_launch_argv
     from sunpack.platform.windows.elevation import relaunch_elevated
 
     return relaunch_elevated(
-        _watch_cli_start_argv(args),
+        watch_launch_argv(
+            once=bool(getattr(args, "once", False)),
+            no_tray=bool(getattr(args, "no_tray", False)),
+            initial_scan=bool(getattr(args, "initial_scan", False)),
+            prefer_windowed_python=True,
+        ),
         cwd=runtime_working_directory(),
     )
-
-
-def _watch_cli_start_argv(args) -> list[str]:
-    command = ["watch", "start"]
-    if bool(getattr(args, "once", False)):
-        command.append("--once")
-    if bool(getattr(args, "no_tray", False)):
-        command.append("--no-tray")
-    if bool(getattr(args, "initial_scan", False)):
-        command.append("--initial-scan")
-    if getattr(sys, "frozen", False):
-        argv = [str(Path(sys.executable).resolve()), *command]
-    else:
-        entry = Path(__file__).resolve().parents[3] / "sunpack.py"
-        if entry.is_file():
-            argv = [str(Path(sys.executable).resolve()), str(entry), *command]
-        else:
-            argv = [str(Path(sys.executable).resolve()), "-m", "sunpack", *command]
-    if runtime_id() is not None:
-        argv.append(runtime_id_argument())
-    return argv

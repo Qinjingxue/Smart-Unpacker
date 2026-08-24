@@ -81,13 +81,16 @@ try {
     )
 
     $appPath = Join-Path $installRoot "sunpack.exe"
-    $watchAppPath = Join-Path $installRoot "sunpack-watch.exe"
+    $runtimeAppPath = Join-Path $installRoot "sunpack-runtime.exe"
     $builtinPasswordsPath = Join-Path $installRoot "builtin_passwords.txt"
     if (-not (Test-Path -LiteralPath $appPath)) {
         throw "Installed executable was not found: $appPath"
     }
-    if (-not (Test-Path -LiteralPath $watchAppPath)) {
-        throw "Installed watch GUI executable was not found: $watchAppPath"
+    if (-not (Test-Path -LiteralPath $runtimeAppPath)) {
+        throw "Installed shared runtime executable was not found: $runtimeAppPath"
+    }
+    if (Test-Path -LiteralPath (Join-Path $installRoot "sunpack-watch.exe")) {
+        throw "Retired duplicate watch executable was installed."
     }
     if (-not (Test-Path -LiteralPath $builtinPasswordsPath)) {
         throw "Installed builtin password file was not found: $builtinPasswordsPath"
@@ -109,7 +112,7 @@ try {
         throw "Context menu command does not reference the installed executable: $directCommand"
     }
     $startupCommand = [string](Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName).$startupValueName
-    if ($startupCommand -ne ('"{0}"' -f $watchAppPath)) {
+    if ($startupCommand -ne ('"{0}" --_sunpack-mode=watch' -f $runtimeAppPath)) {
         throw "Startup Run value is incorrect: $startupCommand"
     }
 
@@ -154,7 +157,7 @@ try {
     $localSunPackCache = Join-Path $env:LOCALAPPDATA "SunPack\cache"
     New-Item -ItemType Directory -Path $localSunPackCache -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $localSunPackCache "machine_probe.json") -Value "{}" -Encoding UTF8
-    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}"' -f $watchAppPath)
+    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}" --_sunpack-mode=watch' -f $runtimeAppPath)
 
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {

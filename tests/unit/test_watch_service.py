@@ -227,26 +227,36 @@ def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):
     assert result.summary == {"elevated_relaunch": True}
 
 
-def test_watch_cli_elevation_argv_preserves_runtime_flags(monkeypatch):
-    monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
-    monkeypatch.setattr(runtime_identity, "_runtime_id", None)
+def test_watch_cli_elevation_starts_a_separate_watch_mode_runtime(monkeypatch, tmp_path):
+    captured = {}
+    runtime = tmp_path / "sunpack-runtime.exe"
+    runtime.write_bytes(b"")
+    import sunpack.gui.launcher as launcher
+    import sunpack.platform.windows.elevation as elevation
 
-    argv = watch_command._watch_cli_start_argv(SimpleNamespace(once=True, no_tray=True))
-
-    assert argv[1:] == ["watch", "start", "--once", "--no-tray"]
-
-
-def test_watch_cli_elevation_argv_forwards_initial_scan(monkeypatch):
-    monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
-    monkeypatch.setattr(runtime_identity, "_runtime_id", None)
-
-    argv = watch_command._watch_cli_start_argv(
-        SimpleNamespace(once=False, no_tray=False, initial_scan=True)
+    monkeypatch.setattr(launcher, "packaged_runtime_executable", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(runtime_identity, "_runtime_id", "v2-0123456789abcdef")
+    monkeypatch.setattr(watch_command, "runtime_working_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        elevation,
+        "relaunch_elevated",
+        lambda argv, *, cwd: captured.update(argv=argv, cwd=cwd) or True,
     )
 
-    assert argv[1:] == ["watch", "start", "--initial-scan"]
+    assert watch_command._request_watch_elevation(
+        SimpleNamespace(once=True, no_tray=True, initial_scan=True)
+    )
+    assert captured == {
+        "argv": [
+            str(runtime),
+            "--_sunpack-mode=watch",
+            "--_sunpack-runtime-id=v2-0123456789abcdef",
+            "--once",
+            "--no-tray",
+            "--initial-scan",
+        ],
+        "cwd": str(tmp_path),
+    }
 
 
 def test_initial_scan_request_is_scoped_and_consumed_once(tmp_path, monkeypatch):
@@ -271,16 +281,6 @@ def test_initial_scan_request_is_scoped_and_consumed_once(tmp_path, monkeypatch)
         str(first_root.resolve()),
         str(second_root.resolve()),
     ]
-
-
-def test_watch_cli_elevation_argv_forwards_runtime_identity(monkeypatch):
-    monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
-    monkeypatch.setattr(runtime_identity, "_runtime_id", "v2-0123456789abcdef")
-
-    argv = watch_command._watch_cli_start_argv(SimpleNamespace(once=False, no_tray=False))
-
-    assert argv[-1] == "--_sunpack-runtime-id=v2-0123456789abcdef"
 
 
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):

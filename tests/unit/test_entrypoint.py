@@ -4,9 +4,13 @@ import sunpack.support.resources as resources
 from sunpack.support import runtime_identity
 
 
-def test_nuitka_watch_executable_uses_gui_entrypoint(monkeypatch):
+def test_shared_runtime_watch_mode_uses_gui_entrypoint(monkeypatch):
     monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\Python310\\python.exe")
-    monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-watch.exe"])
+    monkeypatch.setattr(
+        entrypoint.sys,
+        "argv",
+        [r"C:\\package\\sunpack-runtime.exe", "--_sunpack-mode=watch"],
+    )
     monkeypatch.setattr(gui_main, "main", lambda: 17)
 
     assert entrypoint.main() == 17
@@ -17,7 +21,12 @@ def test_entrypoint_consumes_private_runtime_identity_before_gui(monkeypatch):
     monkeypatch.setattr(
         entrypoint.sys,
         "argv",
-        [r"C:\\package\\sunpack-watch.exe", "--_sunpack-runtime-id=v2-0123456789abcdef", "--once"],
+        [
+            r"C:\\package\\sunpack-runtime.exe",
+            "--_sunpack-mode=watch",
+            "--_sunpack-runtime-id=v2-0123456789abcdef",
+            "--once",
+        ],
     )
 
     def fake_main():
@@ -30,12 +39,30 @@ def test_entrypoint_consumes_private_runtime_identity_before_gui(monkeypatch):
     assert entrypoint.main() == 19
 
 
-def test_frozen_watch_executable_uses_gui_entrypoint(monkeypatch):
-    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\package\\sunpack-watch.exe")
-    monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-runtime.exe"])
-    monkeypatch.setattr(gui_main, "main", lambda: 23)
+def test_shared_runtime_default_mode_stays_on_cli_lifecycle(monkeypatch):
+    captured = {}
+    import sunpack.cli.cli as cli
+    import sunpack.cli.persistent_process as persistent_process
+
+    monkeypatch.setattr(entrypoint.sys, "executable", r"C:\\package\\sunpack-runtime.exe")
+    monkeypatch.setattr(entrypoint.sys, "argv", [r"C:\\package\\sunpack-runtime.exe", "--help"])
+    monkeypatch.setattr(gui_main, "main", lambda: (_ for _ in ()).throw(AssertionError("watch entrypoint used")))
+    monkeypatch.setattr(persistent_process, "handle_early_argv", lambda argv: captured.setdefault("early", argv) and None)
+    monkeypatch.setattr(cli, "main", lambda: 23)
 
     assert entrypoint.main() == 23
+    assert captured == {"early": ["--help"]}
+
+
+def test_entrypoint_rejects_duplicate_runtime_modes(monkeypatch, capsys):
+    monkeypatch.setattr(
+        entrypoint.sys,
+        "argv",
+        ["sunpack-runtime.exe", "--_sunpack-mode=watch", "--_sunpack-mode=cli"],
+    )
+
+    assert entrypoint.main() == 2
+    assert "duplicate SunPack runtime mode" in capsys.readouterr().err
 
 
 def test_nuitka_resource_lookup_starts_at_the_executable_directory(tmp_path, monkeypatch):

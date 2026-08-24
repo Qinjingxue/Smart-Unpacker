@@ -195,7 +195,7 @@ python -m pytest tests\unit\test_model_runtime.py
 3. 构建并安装 Rust wheel
 4. 构建和测试 C++ bridge/worker
 5. 可选运行 acceptance tests
-6. Nuitka 分别构建 console 和 GUI standalone 包后合并到同一发行目录。
+6. Nuitka 构建一个无控制台的 standalone runtime；原生 `sunpack.exe` 提供 CLI 控制台交互，watch 通过私有进程模式参数启动同一 runtime 的独立进程。
 7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`，lite 构建显式排除并校验 torch/PyG 运行时
 8. 校验关键 PE 文件架构
 9. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check

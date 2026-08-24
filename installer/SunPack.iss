@@ -69,7 +69,7 @@ Type: dirifempty; Name: "{app}"
 Type: filesandordirs; Name: "{localappdata}\SunPack"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-watch.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-runtime.exe"" --_sunpack-mode=watch"; Tasks: autostart; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"
@@ -228,7 +228,7 @@ begin
     Log(Format('Context menu script exited with code %d: %s', [ResultCode, ScriptPath]));
 end;
 
-procedure StopExistingWatch;
+procedure StopExistingProcesses;
 var
   ExistingApp: string;
   ResultCode: Integer;
@@ -246,23 +246,23 @@ begin
     Log(Format('Existing SunPack persistent shutdown exited with code %d', [ResultCode]));
 end;
 
-function WaitForExistingWatchToExit: Boolean;
+function WaitForExistingRuntimesToExit: Boolean;
 var
   PowerShellPath: string;
   CliAppPath: string;
-  WatchAppPath: string;
+  RuntimeAppPath: string;
   Command: string;
   Parameters: string;
   ResultCode: Integer;
 begin
   Result := True;
   CliAppPath := ExpandConstant('{app}\sunpack.exe');
-  WatchAppPath := ExpandConstant('{app}\sunpack-watch.exe');
-  if (not FileExists(CliAppPath)) and (not FileExists(WatchAppPath)) then
+  RuntimeAppPath := ExpandConstant('{app}\sunpack-runtime.exe');
+  if (not FileExists(CliAppPath)) and (not FileExists(RuntimeAppPath)) then
     Exit;
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Command :=
-    '$targets = @(' + PowerShellSingleQuotedString(CliAppPath) + ', ' + PowerShellSingleQuotedString(WatchAppPath) + '); ' +
+    '$targets = @(' + PowerShellSingleQuotedString(CliAppPath) + ', ' + PowerShellSingleQuotedString(RuntimeAppPath) + '); ' +
     '$deadline = (Get-Date).AddSeconds(20); ' +
     'do { ' +
     '  $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +
@@ -275,20 +275,20 @@ begin
   Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' + AddQuotes(Command);
   if not Exec(PowerShellPath, Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
-    Log('Failed to wait for existing SunPack watch process to exit.');
+    Log('Failed to wait for existing SunPack runtime processes to exit.');
     Result := False;
   end
   else if ResultCode <> 0 then
   begin
-    Log(Format('Timed out waiting for existing SunPack watch process to exit: %d', [ResultCode]));
+    Log(Format('Timed out waiting for existing SunPack runtime processes to exit: %d', [ResultCode]));
     Result := False;
   end;
 end;
 
-function StopExistingWatchAndWait: Boolean;
+function StopExistingProcessesAndWait: Boolean;
 begin
-  StopExistingWatch;
-  Result := WaitForExistingWatchToExit;
+  StopExistingProcesses;
+  Result := WaitForExistingRuntimesToExit;
 end;
 
 function IsPersistentInstallFile(const FileName: string): Boolean;
@@ -363,9 +363,9 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  if not StopExistingWatchAndWait then
+  if not StopExistingProcessesAndWait then
   begin
-    Result := 'SunPack Watch is still running. Please stop it and run the installer again.';
+    Result := 'SunPack runtime processes are still running. Please stop them and run the installer again.';
     Exit;
   end;
   RunContextMenuScript(False);
@@ -387,9 +387,9 @@ end;
 function InitializeUninstall(): Boolean;
 begin
   RemoveStartupRunValue;
-  Result := StopExistingWatchAndWait;
+  Result := StopExistingProcessesAndWait;
   if not Result then
-    MsgBox('SunPack Watch is still running. Please stop it and run the uninstaller again.', mbError, MB_OK);
+    MsgBox('SunPack runtime processes are still running. Please stop them and run the uninstaller again.', mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

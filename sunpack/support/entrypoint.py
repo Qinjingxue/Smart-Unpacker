@@ -1,20 +1,21 @@
-import os
 import sys
 
 
 def main() -> int:
     from sunpack.support.runtime_identity import consume_runtime_id
+    from sunpack.support.runtime_mode import RUNTIME_MODE_WATCH, consume_runtime_mode
 
     try:
         public_argv = consume_runtime_id(sys.argv[1:])
+        runtime_mode, public_argv = consume_runtime_mode(public_argv)
     except ValueError as exc:
         print(f"SunPack startup failed: {exc}", file=sys.stderr, flush=True)
         return 2
-    # Existing CLI and GUI entry points read sys.argv directly.  Remove the
-    # native launcher's private identity argument before either is entered.
+    # Existing CLI and GUI entry points read sys.argv directly. Remove the
+    # process-local private bootstrap arguments before either is entered.
     sys.argv[:] = [sys.argv[0], *public_argv]
 
-    if _is_watch_executable():
+    if runtime_mode == RUNTIME_MODE_WATCH:
         from sunpack.gui.main import main as watch_main
 
         return watch_main()
@@ -27,8 +28,3 @@ def main() -> int:
     from sunpack.cli.cli import main as cli_main
 
     return cli_main()
-
-
-def _is_watch_executable() -> bool:
-    executable_names = (sys.executable, sys.argv[0] if sys.argv else "")
-    return any(os.path.basename(path).lower() == "sunpack-watch.exe" for path in executable_names)
