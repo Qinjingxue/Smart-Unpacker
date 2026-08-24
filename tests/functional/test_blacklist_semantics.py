@@ -10,6 +10,9 @@ from tests.helpers.fs_builder import make_zip
 def scan_config(blocked_files=None, blocked_extensions=None):
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+        "filesystem": {
+            "directory_scan_mode": "recursive",
+        },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
         {

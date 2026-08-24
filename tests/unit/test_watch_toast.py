@@ -292,9 +292,7 @@ def test_failure_toast_links_to_unique_localized_aggregate_report(tmp_path):
         ["CRC mismatch"],
         [{"kind": "corrupt_archive", "message": "CRC mismatch"}],
     )
-    time.sleep(0.05)
-
-    terminal = _terminal_snapshots(host)
+    terminal = host.wait_for_terminal_snapshots(timeout=1.0)
     assert len(terminal) == 1
     assert terminal[0].kind == ToastSnapshotKind.FAILURE
     assert terminal[0].title == "解压失败"
