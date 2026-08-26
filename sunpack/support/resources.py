@@ -1,3 +1,4 @@
+import os
 import platform
 import sys
 from pathlib import Path
@@ -57,6 +58,14 @@ def find_resource_path(filename: str) -> Path | None:
 
 
 def get_resource_path(filename: str) -> Path:
+    if (getattr(sys, "frozen", False) or "__compiled__" in globals()) and filename in {
+        ".sunpack_watch",
+        "builtin_passwords.txt",
+        "sunpack_watch_roots.txt",
+    }:
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "SunPack" / filename
     return candidate_resource_roots()[0] / filename
 
 

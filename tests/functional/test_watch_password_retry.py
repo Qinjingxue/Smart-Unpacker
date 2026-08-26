@@ -10,10 +10,16 @@ from sunpack_native import zip_fast_verify_passwords
 
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
+import sunpack.filesystem.watcher.scheduler as scheduler_module
 from sunpack.config.loader import load_config
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.tool_config import get_test_tools
+
+
+@pytest.fixture(autouse=True)
+def _isolate_password_pipeline_from_installed_broker(monkeypatch):
+    monkeypatch.setattr(scheduler_module, "validate_ntfs_watch_roots", lambda _roots: None)
 
 
 async def _wait_for_completed_watch_run(watcher: WatchScheduler, *, timeout: float = 10.0):

@@ -23,10 +23,10 @@ AppName=SunPack
 AppVersion={#AppVersion}
 AppVerName=SunPack {#AppVersion} ({#TargetArch}, {#RepairSystem})
 AppPublisher=SunPack
-DefaultDirName={localappdata}\Programs\SunPack
+DefaultDirName={autopf}\SunPack
 DefaultGroupName=SunPack
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBaseFilename}
 SetupIconFile={#SourceDir}\sunpack.ico
@@ -39,8 +39,9 @@ ChangesEnvironment=yes
 ChangesAssociations=yes
 CloseApplications=yes
 RestartApplications=no
-UsePreviousAppDir=yes
+UsePreviousAppDir=no
 UsePreviousTasks=yes
+UsedUserAreasWarning=no
 
 #if TargetArch == "arm64"
 ArchitecturesAllowed=arm64
@@ -60,13 +61,15 @@ Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; Group
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt,builtin_passwords.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
-Source: "{#SourceDir}\builtin_passwords.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
+Source: "{#SourceDir}\sunpack_watch_roots.txt"; DestDir: "{localappdata}\SunPack"; Flags: onlyifdoesntexist skipifsourcedoesntexist
+Source: "{#SourceDir}\builtin_passwords.txt"; DestDir: "{localappdata}\SunPack"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\*"
 Type: dirifempty; Name: "{app}"
 Type: filesandordirs; Name: "{localappdata}\SunPack"
+Type: filesandordirs; Name: "{commonappdata}\SunPack\Service"
+Type: dirifempty; Name: "{commonappdata}\SunPack"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-runtime.exe"" --_sunpack-mode=watch"; Tasks: autostart; Flags: uninsdeletevalue
@@ -79,7 +82,7 @@ Name: "{group}\Uninstall SunPack"; Filename: "{uninstallexe}"
 Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--register-toast"; StatusMsg: "Registering watch notifications..."; Flags: runhidden waituntilterminated
 
 [UninstallRun]
-Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--unregister-toast"; Flags: runhidden waituntilterminated skipifdoesntexist
+Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--unregister-toast"; RunOnceId: "SunPackToastHost"; Flags: runhidden waituntilterminated skipifdoesntexist
 
 [Code]
 const
@@ -88,6 +91,99 @@ const
   StartupRegistryKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   StartupValueName = 'SunPackWatchService';
   PathMarkerName = 'PathAddedByInstaller';
+  WatchBrokerServiceName = 'SunPackWatchBroker';
+  WatchBrokerServiceSddl = 'D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;LCRP;;;IU)';
+
+function RunServiceControl(const Parameters: string; var ResultCode: Integer): Boolean;
+begin
+  Result := Exec(
+    ExpandConstant('{sys}\sc.exe'),
+    Parameters,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+end;
+
+function WaitForBrokerServiceDeleted: Boolean;
+var
+  Attempt: Integer;
+  ResultCode: Integer;
+begin
+  for Attempt := 1 to 80 do
+  begin
+    if RunServiceControl('query ' + WatchBrokerServiceName, ResultCode) and (ResultCode = 1060) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(250);
+  end;
+  Result := False;
+end;
+
+function StopAndDeleteBrokerService: Boolean;
+var
+  ResultCode: Integer;
+begin
+  { Stop is best-effort because a fresh install has no service and a released
+    demand-start service is normally already stopped. }
+  RunServiceControl('stop ' + WatchBrokerServiceName, ResultCode);
+  Sleep(250);
+  if not RunServiceControl('delete ' + WatchBrokerServiceName, ResultCode) then
+  begin
+    Result := False;
+    Exit;
+  end;
+  if (ResultCode <> 0) and (ResultCode <> 1060) then
+  begin
+    Log(Format('Failed to delete %s: sc.exe exit code %d', [WatchBrokerServiceName, ResultCode]));
+    Result := False;
+    Exit;
+  end;
+  Result := WaitForBrokerServiceDeleted;
+  if not Result then
+    Log('Timed out waiting for the Watch Broker service to be deleted.');
+end;
+
+procedure RollBackBrokerInstallAndRaise(Message: string);
+begin
+  if not StopAndDeleteBrokerService then
+    Log('The partially installed Watch Broker service also failed to roll back.');
+  RaiseException(Message);
+end;
+
+procedure InstallBrokerService;
+var
+  BrokerPath: string;
+  QuotedImagePath: string;
+  Parameters: string;
+  ResultCode: Integer;
+begin
+  BrokerPath := ExpandConstant('{app}\service\sunpack-watch-broker.exe');
+  if not FileExists(BrokerPath) then
+    RaiseException('Packaged Watch Broker executable is missing: ' + BrokerPath);
+  { sc.exe must receive literal quote characters as part of binPath. The
+    outer AddQuotes groups the argument; the backslash-escaped inner quotes
+    are persisted in the SCM ImagePath value. }
+  QuotedImagePath := '\"' + BrokerPath + '\"';
+  Parameters :=
+    'create ' + WatchBrokerServiceName +
+    ' binPath= ' + AddQuotes(QuotedImagePath) +
+    ' type= own start= demand obj= LocalSystem DisplayName= ' + AddQuotes('SunPack Watch Broker');
+  if (not RunServiceControl(Parameters, ResultCode)) or (ResultCode <> 0) then
+    RaiseException(Format('Failed to create %s (sc.exe exit code %d).', [WatchBrokerServiceName, ResultCode]));
+  if (not RunServiceControl('sidtype ' + WatchBrokerServiceName + ' unrestricted', ResultCode)) or (ResultCode <> 0) then
+    RollBackBrokerInstallAndRaise(Format('Failed to set the service SID type (sc.exe exit code %d).', [ResultCode]));
+  if (not RunServiceControl('sdset ' + WatchBrokerServiceName + ' ' + WatchBrokerServiceSddl, ResultCode)) or (ResultCode <> 0) then
+    RollBackBrokerInstallAndRaise(Format('Failed to secure the Watch Broker service (sc.exe exit code %d).', [ResultCode]));
+  RunServiceControl(
+    'description ' + WatchBrokerServiceName + ' ' +
+    AddQuotes('Provides minimal privileged NTFS USN journal reads while SunPack Watch is running.'),
+    ResultCode
+  );
+end;
 
 function NormalizePathEntry(Value: string): string;
 begin
@@ -341,21 +437,6 @@ begin
   end;
 end;
 
-function ClearExternalRuntimeState: Boolean;
-var
-  StateRoot: string;
-begin
-  StateRoot := ExpandConstant('{localappdata}\SunPack');
-  if not DirExists(StateRoot) then
-  begin
-    Result := True;
-    Exit;
-  end;
-  Result := DelTree(StateRoot, True, True, True) or not DirExists(StateRoot);
-  if not Result then
-    Log('Failed to remove old SunPack external runtime state: ' + StateRoot);
-end;
-
 procedure InitializeWizard();
 begin
   WizardForm.LicenseAcceptedRadio.Checked := True;
@@ -368,17 +449,17 @@ begin
     Result := 'SunPack runtime processes are still running. Please stop them and run the installer again.';
     Exit;
   end;
+  if not StopAndDeleteBrokerService then
+  begin
+    Result := 'The existing SunPack Watch Broker service could not be removed. Restart Windows and run the installer again.';
+    Exit;
+  end;
   RunContextMenuScript(False);
   RemoveStartupRunValue;
   RemoveUserPath;
   if not ClearInstallDirectory then
   begin
     Result := 'Some old SunPack files could not be removed. Close SunPack and run the installer again.';
-    Exit;
-  end;
-  if not ClearExternalRuntimeState then
-  begin
-    Result := 'Some old SunPack runtime state could not be removed. Close SunPack and run the installer again.';
     Exit;
   end;
   Result := '';
@@ -388,14 +469,17 @@ function InitializeUninstall(): Boolean;
 begin
   RemoveStartupRunValue;
   Result := StopExistingProcessesAndWait;
+  if Result then
+    Result := StopAndDeleteBrokerService;
   if not Result then
-    MsgBox('SunPack runtime processes are still running. Please stop them and run the uninstaller again.', mbError, MB_OK);
+    MsgBox('SunPack runtime processes or the Watch Broker service could not be stopped. Please restart Windows and run the uninstaller again.', mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    InstallBrokerService;
     if WizardIsTaskSelected('addtopath') then
       AddUserPath;
     if WizardIsTaskSelected('contextmenu') then
@@ -409,6 +493,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
+    StopAndDeleteBrokerService;
     RunContextMenuScript(False);
     RemoveStartupRunValue;
     RemoveUserPath;

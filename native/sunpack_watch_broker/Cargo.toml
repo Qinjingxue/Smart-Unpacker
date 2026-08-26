@@ -1,0 +1,23 @@
+[package]
+name = "sunpack-watch-broker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "sunpack-watch-broker"
+path = "src/main.rs"
+
+[dependencies]
+sunpack-usn-core = { path = "../sunpack_usn_core", default-features = false, features = ["journal"] }
+windows-service = "0.8.1"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

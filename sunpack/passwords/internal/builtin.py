@@ -25,7 +25,8 @@ def get_builtin_passwords() -> list[str]:
 
 
 def builtin_password_path() -> Path:
-    return find_resource_path("builtin_passwords.txt") or get_resource_path("builtin_passwords.txt")
+    writable_path = get_resource_path("builtin_passwords.txt")
+    return writable_path if writable_path.exists() else (find_resource_path("builtin_passwords.txt") or writable_path)
 
 
 def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 30) -> bool:

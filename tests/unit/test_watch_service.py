@@ -6,11 +6,11 @@ import json
 import threading
 import time
 from types import SimpleNamespace
+import pytest
 
 import sunpack.filesystem.watcher.service as service_module
 import sunpack.coordinator.watch_runtime as watch_runtime
 import sunpack.cli.commands.watch as watch_command
-from sunpack.support import runtime_identity
 from sunpack.filesystem.watcher.service import (
     CONTROL_RELOAD,
     CONTROL_SCHEDULER_WAKEUP,
@@ -29,6 +29,12 @@ class FakeRunner:
 
 
 _TEST_LOOP = asyncio.new_event_loop()
+
+
+@pytest.fixture(autouse=True)
+def _stub_watch_broker(monkeypatch):
+    monkeypatch.setattr(service_module, "_acquire_watch_broker", lambda: None)
+    monkeypatch.setattr(service_module, "_release_watch_broker", lambda: None)
 
 def _await(awaitable):
     return _TEST_LOOP.run_until_complete(awaitable)
@@ -216,49 +222,6 @@ def test_watch_add_reports_start_request_without_creating_watch_process(tmp_path
     assert "started" not in result.summary
 
 
-def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):
-    monkeypatch.setattr(watch_command, "_request_watch_elevation", lambda _args: True)
-    args = SimpleNamespace(once=False, no_tray=False)
-    ctx = SimpleNamespace(t=lambda key, **_kwargs: key)
-
-    code, result = _await(watch_command._handle_start(args, ctx))
-
-    assert code == 0
-    assert result.summary == {"elevated_relaunch": True}
-
-
-def test_watch_cli_elevation_starts_a_separate_watch_mode_runtime(monkeypatch, tmp_path):
-    captured = {}
-    runtime = tmp_path / "sunpack-runtime.exe"
-    runtime.write_bytes(b"")
-    import sunpack.gui.launcher as launcher
-    import sunpack.platform.windows.elevation as elevation
-
-    monkeypatch.setattr(launcher, "packaged_runtime_executable", lambda *_args, **_kwargs: runtime)
-    monkeypatch.setattr(runtime_identity, "_runtime_id", "v2-0123456789abcdef")
-    monkeypatch.setattr(watch_command, "runtime_working_directory", lambda: str(tmp_path))
-    monkeypatch.setattr(
-        elevation,
-        "relaunch_elevated",
-        lambda argv, *, cwd: captured.update(argv=argv, cwd=cwd) or True,
-    )
-
-    assert watch_command._request_watch_elevation(
-        SimpleNamespace(once=True, no_tray=True, initial_scan=True)
-    )
-    assert captured == {
-        "argv": [
-            str(runtime),
-            "--_sunpack-mode=watch",
-            "--_sunpack-runtime-id=v2-0123456789abcdef",
-            "--once",
-            "--no-tray",
-            "--initial-scan",
-        ],
-        "cwd": str(tmp_path),
-    }
-
-
 def test_initial_scan_request_is_scoped_and_consumed_once(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     config = {"watch": {"state_dir": str(state_dir)}}
@@ -284,6 +247,9 @@ def test_initial_scan_request_is_scoped_and_consumed_once(tmp_path, monkeypatch)
 
 
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
+    lifecycle = []
+    monkeypatch.setattr(service_module, "_acquire_watch_broker", lambda: lifecycle.append("broker_acquire"))
+    monkeypatch.setattr(service_module, "_release_watch_broker", lambda: lifecycle.append("broker_release"))
     state_dir = tmp_path / ".sunpack_watch"
     roots_path = tmp_path / "sunpack_watch_roots.txt"
     monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
@@ -302,7 +268,50 @@ def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
 
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
+    original_stop_scheduler = service._stop_scheduler
+
+    async def stop_scheduler():
+        lifecycle.append("scheduler_stop")
+        await original_stop_scheduler()
+
+    monkeypatch.setattr(service, "_stop_scheduler", stop_scheduler)
+
     assert _await(service.run(once=True)) == 0
+    assert lifecycle == ["broker_acquire", "scheduler_stop", "scheduler_stop", "broker_release"]
+    assert not _watch_running({"watch": {"state_dir": str(state_dir)}})
+    assert not (state_dir / "watch.lock").exists()
+
+
+def test_watch_service_cleans_up_when_broker_cannot_start(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {
+            "watch": {
+                "state_dir": str(state_dir),
+                "roots": [],
+                "tray_enabled": False,
+                "clipboard_monitor_enabled": False,
+            }
+        },
+    )
+    released = []
+    monkeypatch.setattr(
+        service_module,
+        "_acquire_watch_broker",
+        lambda: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+    monkeypatch.setattr(service_module, "_release_watch_broker", lambda: released.append(True))
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        _await(service.run(once=True))
+
+    assert released == []
+    assert service._broker_acquired is False
     assert not _watch_running({"watch": {"state_dir": str(state_dir)}})
     assert not (state_dir / "watch.lock").exists()
 

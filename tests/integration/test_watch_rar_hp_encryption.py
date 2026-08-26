@@ -19,6 +19,17 @@ MAX_SETTLE_SECONDS = 45.0
 PAYLOAD_SIZE = 256 * 1024
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _watch_broker_lease():
+    from sunpack_native import watch_broker_acquire, watch_broker_release
+
+    watch_broker_acquire()
+    try:
+        yield
+    finally:
+        watch_broker_release()
+
+
 def _watch_config() -> dict:
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}

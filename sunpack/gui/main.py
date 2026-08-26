@@ -15,8 +15,6 @@ from sunpack.support.runtime_cwd import runtime_working_directory
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parse_args(argv)
-        if _request_watch_elevation(args):
-            return 0
         os.chdir(runtime_working_directory())
         from sunpack.platform.windows.process_qos import enter_background_processing
 
@@ -49,23 +47,6 @@ def _run_watch_service(*, once: bool, no_tray: bool, initial_scan: bool = False)
             initial_scan=initial_scan,
         )
     )
-
-
-def _request_watch_elevation(args: argparse.Namespace) -> bool:
-    from sunpack.gui.launcher import watch_launch_argv
-    from sunpack.platform.windows.elevation import relaunch_elevated
-
-    return relaunch_elevated(
-        watch_launch_argv(
-            once=bool(args.once),
-            no_tray=bool(args.no_tray),
-            initial_scan=bool(args.initial_scan),
-            prefer_windowed_python=True,
-        ),
-        cwd=runtime_working_directory(),
-    )
-
-
 def _write_bootstrap_error(exc: BaseException) -> None:
     try:
         state_dir = get_resource_path(".sunpack_watch")

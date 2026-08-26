@@ -405,6 +405,8 @@ required = [
     'seven_zip_scan_source', 'seven_zip_atomic_repair',
     'archive_nested_payload_salvage',
     'rar_block_chain_trim_recovery', 'rar_end_block_repair',
+    'watch_broker_acquire', 'watch_broker_release',
+    'watch_broker_is_connected', 'watch_broker_ping_seconds',
 ]
 assert n.native_available()
 missing = [name for name in required if not callable(getattr(n, name, None))]
@@ -921,7 +923,10 @@ $applicationManifestPath = Join-Path $repoRoot "sunpack.manifest"
 $manifestEmbeddingScriptPath = Join-Path $repoRoot "scripts\embed_windows_manifest.py"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
+$nativeWorkspaceLock = Join-Path $repoRoot "native\Cargo.lock"
+$watchBrokerCargoToml = Join-Path $repoRoot "native\sunpack_watch_broker\Cargo.toml"
 $rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
+$watchBrokerBuildPath = Join-Path $rustTargetDir ("$rustTarget\release\sunpack-watch-broker.exe")
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $toastHostRoot = Join-Path $repoRoot "native\toast_host"
@@ -946,6 +951,8 @@ $distExePath = Join-Path $distAppRoot $appExeName
 $distRuntimeExePath = Join-Path $distAppRoot $runtimeExeName
 $nuitkaBuildRoot = Join-Path $buildRoot ("nuitka-" + $distFolderName)
 $distToolsRoot = Join-Path $distAppRoot "tools"
+$distServiceRoot = Join-Path $distAppRoot "service"
+$distWatchBrokerPath = Join-Path $distServiceRoot "sunpack-watch-broker.exe"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
 $releaseZipName = "sunpack-windows-{0}-{1}-{2}.zip" -f $buildArch, $repairSystemMode, $versionValue
@@ -980,6 +987,8 @@ Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $applicationManifestPath -Description "Windows application manifest"
 Assert-PathExists -LiteralPath $manifestEmbeddingScriptPath -Description "Manifest resource embedding script"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
+Assert-PathExists -LiteralPath $nativeWorkspaceLock -Description "native Rust workspace lockfile"
+Assert-PathExists -LiteralPath $watchBrokerCargoToml -Description "SunPack Watch Broker Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
 Assert-PathExists -LiteralPath (Join-Path $toastHostRoot "CMakeLists.txt") -Description "Toast Host CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
@@ -1036,6 +1045,7 @@ New-Item -ItemType Directory -Path $nativeWheelRoot -Force | Out-Null
 Invoke-Native -FilePath "cargo" -Arguments @("--version")
 Invoke-Native -FilePath $maturinCommand -Arguments @(
     "build",
+    "--locked",
     "--manifest-path", $nativeCargoToml,
     "--release",
     "--target", $rustTarget,
@@ -1045,6 +1055,18 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot
 Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $venvPython, "--reinstall", $nativeWheelPath)
 Test-NativeImport -PythonPath $venvPython
+
+Write-Step "Building minimal Windows Watch Broker service"
+Invoke-Native -FilePath "cargo" -Arguments @(
+    "build",
+    "--locked",
+    "--manifest-path", $watchBrokerCargoToml,
+    "--release",
+    "--target", $rustTarget,
+    "--target-dir", $rustTargetDir
+)
+Assert-PathExists -LiteralPath $watchBrokerBuildPath -Description "SunPack Watch Broker executable"
+Assert-PeMachine -LiteralPath $watchBrokerBuildPath -BuildArch $buildArch -Description "SunPack Watch Broker executable"
 
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
 Build-ToastHost -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -SourceRoot $toastHostRoot -BuildDir $toastHostBuildDir -ToolsRoot $toolsRoot -BuildArch $buildArch
@@ -1118,12 +1140,16 @@ Write-Step "Building Windows release with Nuitka"
     )
     Copy-NuitkaDistContents -Source $nuitkaRuntimeDist -Destination $distAppRoot
 Copy-Item -LiteralPath $launcherBuildPath -Destination $distExePath -Force
+New-Item -ItemType Directory -Path $distServiceRoot -Force | Out-Null
+Copy-Item -LiteralPath $watchBrokerBuildPath -Destination $distWatchBrokerPath -Force
 
 Write-Step "Validating packaged outputs"
 Assert-PathExists -LiteralPath $distExePath -Description "Packaged sunpack executable"
 Assert-PathExists -LiteralPath $distRuntimeExePath -Description "Packaged SunPack runtime executable"
+Assert-PathExists -LiteralPath $distWatchBrokerPath -Description "Packaged SunPack Watch Broker service"
 Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged sunpack executable"
 Assert-PeMachine -LiteralPath $distRuntimeExePath -BuildArch $buildArch -Description "Packaged SunPack runtime executable"
+Assert-PeMachine -LiteralPath $distWatchBrokerPath -BuildArch $buildArch -Description "Packaged SunPack Watch Broker service"
 Assert-PeSubsystem -LiteralPath $distExePath -Expected 3 -Description "Packaged sunpack executable"
 Assert-PeSubsystem -LiteralPath $distRuntimeExePath -Expected 2 -Description "Packaged shared SunPack runtime executable"
 Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "sunpack-watch.exe") -Description "Retired duplicate watch executable"

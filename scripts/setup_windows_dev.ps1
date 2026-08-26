@@ -669,6 +669,8 @@ required = [
     'seven_zip_scan_source', 'seven_zip_atomic_repair',
     'archive_nested_payload_salvage',
     'rar_block_chain_trim_recovery', 'rar_end_block_repair',
+    'watch_broker_acquire', 'watch_broker_release',
+    'watch_broker_is_connected', 'watch_broker_ping_seconds',
 ]
 assert n.native_available()
 missing = [name for name in required if not callable(getattr(n, name, None))]
@@ -757,7 +759,10 @@ $venvScripts = Join-Path $venvPath "Scripts"
 $projectPath = Join-Path $repoRoot "pyproject.toml"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
+$nativeWorkspaceLock = Join-Path $repoRoot "native\Cargo.lock"
+$watchBrokerCargoToml = Join-Path $repoRoot "native\sunpack_watch_broker\Cargo.toml"
 $rustTargetDir = Join-Path $repoRoot (".cache\rust-target\" + $buildArch)
+$watchBrokerBuildPath = Join-Path $rustTargetDir ("$rustTarget\release\sunpack-watch-broker.exe")
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $toastHostRoot = Join-Path $repoRoot "native\toast_host"
@@ -770,6 +775,8 @@ $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 
 Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
+Assert-PathExists -LiteralPath $nativeWorkspaceLock -Description "native Rust workspace lockfile"
+Assert-PathExists -LiteralPath $watchBrokerCargoToml -Description "SunPack Watch Broker Cargo manifest"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
 Assert-CommandExists -Command "uv" -Description "uv dependency manager"
 if ($Clean) {
@@ -805,6 +812,7 @@ New-Item -ItemType Directory -Path $nativeWheelRoot -Force | Out-Null
 Invoke-Native -FilePath "cargo" -Arguments @("--version")
 Invoke-Native -FilePath $maturinCommand -Arguments @(
     "build",
+    "--locked",
     "--manifest-path", $nativeCargoToml,
     "--release",
     "--target", $rustTarget,
@@ -814,6 +822,17 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot
 Invoke-Native -FilePath "uv" -Arguments @("pip", "install", "--python", $venvPython, "--reinstall", $nativeWheelPath)
 Test-NativeImport -PythonPath $venvPython
+
+Write-Step "Building minimal Windows Watch Broker service"
+Invoke-Native -FilePath "cargo" -Arguments @(
+    "build",
+    "--locked",
+    "--manifest-path", $watchBrokerCargoToml,
+    "--release",
+    "--target", $rustTarget,
+    "--target-dir", $rustTargetDir
+)
+Assert-PathExists -LiteralPath $watchBrokerBuildPath -Description "SunPack Watch Broker executable"
 
 Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZipLicensePath -BuildArch $buildArch
 if ($buildArch -eq "x64" -and -not $SkipAcceptanceTestTools) {

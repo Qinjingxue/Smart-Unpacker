@@ -34,7 +34,7 @@ import psutil
 
 import sunpack.filesystem.watcher.scheduler as scheduler_module
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
-from sunpack.platform.windows.elevation import is_process_elevated, relaunch_elevated
+from sunpack.platform.windows.elevation import is_process_elevated
 
 
 CONTENT_REASON_MASK = 0x00000001 | 0x00000002 | 0x00000004
@@ -294,6 +294,17 @@ def _watch_config() -> dict:
     }
 
 
+def _start_detection_scheduler(watcher: WatchScheduler) -> None:
+    # This benchmark drives _pop_ready itself so it can measure the exact
+    # completion boundary without running the extraction pipeline.  The public
+    # async start method delegates this same operation through WorkBroker.
+    watcher._start_blocking()
+
+
+def _stop_detection_scheduler(watcher: WatchScheduler) -> None:
+    watcher._stop_blocking()
+
+
 def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes: int, delay_seconds: float) -> ScenarioResult:
     scenario_root = base / scenario.name / "in"
     scenario_root.mkdir(parents=True, exist_ok=True)
@@ -378,7 +389,7 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
     cpu_before = sum(process.cpu_times()[:2])
     suite_started = time.perf_counter()
     thread = threading.Thread(target=writer, name=f"watch-validation-{scenario.name}", daemon=True)
-    watcher.start()
+    _start_detection_scheduler(watcher)
     try:
         time.sleep(0.15)
         thread.start()
@@ -419,7 +430,7 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
         if not result.final_ready:
             result.errors.append("final archive was not declared ready before timeout")
     finally:
-        watcher.stop()
+        _stop_detection_scheduler(watcher)
         scheduler_module._watch_candidate_for_path = original_observer
     result.write_seconds = max(0.0, writer_finished_at[0] - writer_started_at[0]) if writer_started.is_set() else 0.0
     result.total_seconds = time.perf_counter() - suite_started
@@ -533,92 +544,99 @@ def report_markdown(report: dict) -> str:
         )
         for error in item["errors"]:
             lines.append(f"\n> `{item['name']}`: {error}")
+    comparison = report.get("baseline_comparison")
+    if comparison is not None:
+        lines.extend(
+            [
+                "",
+                "## Direct-USN baseline comparison",
+                "",
+                f"- Passed: `{comparison['passed']}`",
+                f"- Complete Journal coverage: `{comparison['journal_coverage_complete']}`",
+                f"- No premature processing: `{comparison['no_premature_processing']}`",
+                f"- Premature attempts did not regress: `{comparison['premature_attempts_not_regressed']}`",
+                "",
+                "| Scenario | Baseline | Broker | Delta | Pass |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for item in comparison["scenarios"]:
+            if "error" in item:
+                lines.append(f"| {item['name']} | n/a | n/a | n/a | no ({item['error']}) |")
+            else:
+                lines.append(
+                    f"| {item['name']} | {item['baseline_latency_seconds']:.3f}s | "
+                    f"{item['current_latency_seconds']:.3f}s | {item['delta_seconds']:+.3f}s | "
+                    f"{'yes' if item['passed'] else 'no'} |"
+                )
     lines.append("")
     return "\n".join(lines)
 
 
-def build_matrix_report(non_elevated: dict, elevated: dict | None, *, elevated_launched: bool) -> dict:
-    comparison: dict[str, object] = {
-        "elevated_launched": elevated_launched,
-        "non_elevated": non_elevated,
-        "elevated": elevated,
-    }
-    if elevated is None:
-        comparison["summary"] = None
-        return comparison
-    normal = non_elevated["summary"]
-    admin = elevated["summary"]
-    comparison["summary"] = {
-        "all_passed": normal["failed"] == 0 and admin["failed"] == 0,
-        "non_elevated_passed": normal["passed"],
-        "elevated_passed": admin["passed"],
-        "non_elevated_premature_attempts": normal["premature_attempts"],
-        "elevated_premature_attempts": admin["premature_attempts"],
-        "non_elevated_journal_coverage": (
-            normal["journal_known_deltas"] / max(normal["journal_delta_queries"], 1)
-        ),
-        "elevated_journal_coverage": (
-            admin["journal_known_deltas"] / max(admin["journal_delta_queries"], 1)
-        ),
-        "non_elevated_non_close_content_deltas": normal.get("journal_non_close_content_deltas", 0),
-        "elevated_non_close_content_deltas": admin.get("journal_non_close_content_deltas", 0),
-        "median_latency_delta_seconds": (
-            admin["stable_latency_median_seconds"] - normal["stable_latency_median_seconds"]
-        ),
-        "p95_latency_delta_seconds": (
-            admin["stable_latency_p95_seconds"] - normal["stable_latency_p95_seconds"]
-        ),
-        "observation_throughput_ratio": (
-            admin["observation_calls_per_second"] / max(normal["observation_calls_per_second"], 1e-9)
-        ),
-    }
-    return comparison
-
-
-def matrix_report_markdown(matrix: dict) -> str:
-    elevated = matrix.get("elevated")
-    if elevated is None:
-        return (
-            "# SunPack Watch privilege comparison\n\n"
-            f"- Elevated process launched: `{matrix['elevated_launched']}`\n"
-            "- Elevated report: `missing`\n"
-        )
-    normal = matrix["non_elevated"]["summary"]
-    admin = elevated["summary"]
-    normal_scenarios = {item["name"]: item for item in matrix["non_elevated"]["scenarios"]}
-    admin_scenarios = {item["name"]: item for item in elevated["scenarios"]}
-    lines = [
-        "# SunPack Watch privilege comparison",
-        "",
-        "| Metric | Non-elevated | Elevated |",
-        "|---|---:|---:|",
-        f"| Passed | {normal['passed']}/{normal['scenario_count']} | {admin['passed']}/{admin['scenario_count']} |",
-        f"| Premature attempts | {normal['premature_attempts']} | {admin['premature_attempts']} |",
-        f"| Journal-known deltas | {normal['journal_known_deltas']}/{normal['journal_delta_queries']} | {admin['journal_known_deltas']}/{admin['journal_delta_queries']} |",
-        f"| Content / non-close content deltas | {normal['journal_content_deltas']}/{normal.get('journal_non_close_content_deltas', 0)} | {admin['journal_content_deltas']}/{admin.get('journal_non_close_content_deltas', 0)} |",
-        f"| Stable latency median | {normal['stable_latency_median_seconds']:.3f}s | {admin['stable_latency_median_seconds']:.3f}s |",
-        f"| Stable latency p95 | {normal['stable_latency_p95_seconds']:.3f}s | {admin['stable_latency_p95_seconds']:.3f}s |",
-        f"| Native observations/sec | {normal['observation_calls_per_second']:.1f} | {admin['observation_calls_per_second']:.1f} |",
-        f"| Peak scenario RSS delta | {normal['peak_scenario_rss_delta_bytes']} B | {admin['peak_scenario_rss_delta_bytes']} B |",
-        "",
-        "| Scenario | Non-elevated latency | Elevated latency | Delta |",
-        "|---|---:|---:|---:|",
-    ]
-    for name, item in normal_scenarios.items():
-        peer = admin_scenarios.get(name)
-        if peer is None or item["stable_latency_seconds"] is None or peer["stable_latency_seconds"] is None:
-            lines.append(f"| {name} | n/a | n/a | n/a |")
+def build_baseline_comparison(
+    current: dict,
+    baseline: dict,
+    *,
+    maximum_regression_seconds: float,
+    maximum_regression_ratio: float,
+) -> dict:
+    baseline_scenarios = {item["name"]: item for item in baseline.get("scenarios", [])}
+    comparisons = []
+    for item in current["scenarios"]:
+        peer = baseline_scenarios.get(item["name"])
+        if peer is None:
+            comparisons.append({"name": item["name"], "passed": False, "error": "missing baseline scenario"})
             continue
-        normal_latency = item["stable_latency_seconds"]
-        admin_latency = peer["stable_latency_seconds"]
-        lines.append(
-            f"| {name} | {normal_latency:.3f}s | {admin_latency:.3f}s | {admin_latency - normal_latency:+.3f}s |"
+        current_latency = item.get("stable_latency_seconds")
+        baseline_latency = peer.get("stable_latency_seconds")
+        if current_latency is None or baseline_latency is None:
+            comparisons.append({"name": item["name"], "passed": False, "error": "missing latency"})
+            continue
+        allowed = baseline_latency * (1.0 + maximum_regression_ratio) + maximum_regression_seconds
+        comparisons.append(
+            {
+                "name": item["name"],
+                "passed": bool(item.get("passed")) and current_latency <= allowed,
+                "baseline_latency_seconds": baseline_latency,
+                "current_latency_seconds": current_latency,
+                "delta_seconds": current_latency - baseline_latency,
+                "allowed_latency_seconds": allowed,
+            }
         )
-    lines.append("")
-    return "\n".join(lines)
+    current_summary = current["summary"]
+    baseline_summary = baseline.get("summary", {})
+    current_premature = int(current_summary["premature_attempts"])
+    baseline_premature = int(baseline_summary.get("premature_attempts", 0))
+    premature_attempts_not_regressed = current_premature <= baseline_premature
+    return {
+        "baseline_mode": baseline.get("mode", "unknown"),
+        "maximum_regression_seconds": maximum_regression_seconds,
+        "maximum_regression_ratio": maximum_regression_ratio,
+        "journal_coverage_complete": current_summary["journal_known_deltas"] == current_summary["journal_delta_queries"],
+        "no_premature_processing": current_premature == 0,
+        "baseline_premature_attempts": baseline_premature,
+        "current_premature_attempts": current_premature,
+        "premature_attempts_not_regressed": premature_attempts_not_regressed,
+        "scenarios": comparisons,
+        "passed": (
+            current_summary["failed"] == 0
+            and premature_attempts_not_regressed
+            and current_summary["journal_known_deltas"] == current_summary["journal_delta_queries"]
+            and bool(comparisons)
+            and all(item["passed"] for item in comparisons)
+        ),
+    }
 
 
 def run_suite(args: argparse.Namespace) -> tuple[dict, Path]:
+    broker_release = None
+    if args.transport == "broker":
+        from sunpack_native import watch_broker_acquire, watch_broker_is_connected, watch_broker_release
+
+        watch_broker_acquire()
+        if not watch_broker_is_connected():
+            raise RuntimeError("SunPack Watch Broker did not establish its lifecycle lease")
+        broker_release = watch_broker_release
     started_at = datetime.now(timezone.utc).isoformat()
     suite_started = time.perf_counter()
     payload = _zip_payload(args.payload_mb)
@@ -641,25 +659,39 @@ def run_suite(args: argparse.Namespace) -> tuple[dict, Path]:
         }
     work_parent = Path(args.work_root).resolve() if args.work_root else output.parent / "work"
     work_parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f"sunpack-watch-{args.mode}-", dir=work_parent) as raw_base:
-        base = Path(raw_base)
-        results = []
-        for index, scenario in enumerate(scenarios, 1):
-            if scenario.name in resumed:
-                print(f"[{index}/{len(scenarios)}] {scenario.name} (resumed)", flush=True)
-                results.append(resumed[scenario.name])
-                continue
-            print(f"[{index}/{len(scenarios)}] {scenario.name}", flush=True)
-            results.append(
-                run_scenario(
-                    base,
-                    scenario,
-                    payload,
-                    chunk_bytes=args.chunk_kb * 1024,
-                    delay_seconds=args.chunk_delay,
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"sunpack-watch-{args.transport}-", dir=work_parent) as raw_base:
+            base = Path(raw_base)
+            results = []
+            for index, scenario in enumerate(scenarios, 1):
+                if scenario.name in resumed:
+                    print(f"[{index}/{len(scenarios)}] {scenario.name} (resumed)", flush=True)
+                    results.append(resumed[scenario.name])
+                    continue
+                print(f"[{index}/{len(scenarios)}] {scenario.name}", flush=True)
+                results.append(
+                    run_scenario(
+                        base,
+                        scenario,
+                        payload,
+                        chunk_bytes=args.chunk_kb * 1024,
+                        delay_seconds=args.chunk_delay,
+                    )
                 )
-            )
-    report = build_report(args.mode, results, started_at, sum(item.total_seconds for item in results))
+    finally:
+        if broker_release is not None:
+            broker_release()
+    report = build_report(args.transport, results, started_at, sum(item.total_seconds for item in results))
+    if args.baseline:
+        baseline_path = Path(args.baseline).resolve()
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        report["baseline_path"] = str(baseline_path)
+        report["baseline_comparison"] = build_baseline_comparison(
+            report,
+            baseline,
+            maximum_regression_seconds=args.max_latency_regression_seconds,
+            maximum_regression_ratio=args.max_latency_regression_ratio,
+        )
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, output)
@@ -667,72 +699,30 @@ def run_suite(args: argparse.Namespace) -> tuple[dict, Path]:
     return report, output
 
 
-def _elevated_argv(args: argparse.Namespace, output: Path) -> list[str]:
-    command = [
-        str(Path(sys.executable).resolve()),
-        str(Path(__file__).resolve()),
-        "--mode",
-        "elevated",
-        "--output",
-        str(output),
-        "--payload-mb",
-        str(args.payload_mb),
-        "--chunk-kb",
-        str(args.chunk_kb),
-        "--chunk-delay",
-        str(args.chunk_delay),
-    ]
-    for scenario in args.scenario or []:
-        command.extend(("--scenario", scenario))
-    return command
-
-
-def run_matrix(args: argparse.Namespace) -> int:
-    output_dir = Path(args.output).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    non_elevated_args = argparse.Namespace(**vars(args))
-    non_elevated_args.mode = "non_elevated"
-    non_elevated_args.output = str(output_dir / "non_elevated.json")
-    report, _ = run_suite(non_elevated_args)
-    elevated_output = output_dir / "elevated.json"
-    elevated_output.unlink(missing_ok=True)
-    launched = relaunch_elevated(_elevated_argv(args, elevated_output), cwd=str(Path(__file__).resolve().parents[2]))
-    elevated_report = None
-    if launched:
-        deadline = time.monotonic() + args.elevation_timeout
-        while time.monotonic() < deadline and not elevated_output.exists():
-            time.sleep(0.25)
-        if elevated_output.exists():
-            elevated_report = json.loads(elevated_output.read_text(encoding="utf-8"))
-    matrix = build_matrix_report(report, elevated_report, elevated_launched=launched)
-    matrix_path = output_dir / "matrix.json"
-    matrix_path.write_text(json.dumps(matrix, ensure_ascii=False, indent=2), encoding="utf-8")
-    matrix_path.with_suffix(".md").write_text(matrix_report_markdown(matrix), encoding="utf-8")
-    return 0 if report["summary"]["failed"] == 0 and matrix.get("elevated", {}).get("summary", {}).get("failed", 1) == 0 else 1
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run real Windows/NTFS SunPack Watch validation scenarios.")
-    parser.add_argument("--mode", choices=("current", "non_elevated", "elevated", "matrix"), default="current")
-    parser.add_argument("--output", required=True, help="JSON output path, or output directory for --mode matrix")
+    parser.add_argument("--transport", choices=("broker", "direct"), default="broker")
+    parser.add_argument("--output", required=True, help="JSON output path")
     parser.add_argument("--work-root", default="")
     parser.add_argument("--payload-mb", type=float, default=2.0)
     parser.add_argument("--chunk-kb", type=int, default=128)
     parser.add_argument("--chunk-delay", type=float, default=0.05)
     parser.add_argument("--scenario", action="append", default=[])
-    parser.add_argument("--elevation-timeout", type=float, default=240.0)
+    parser.add_argument("--baseline", default="", help="Previous elevated/direct-USN report to compare against")
+    parser.add_argument("--max-latency-regression-seconds", type=float, default=0.5)
+    parser.add_argument("--max-latency-regression-ratio", type=float, default=0.05)
     parser.add_argument("--resume", action="store_true", help="Reuse passing scenarios from an existing output report")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.mode == "matrix":
-        return run_matrix(args)
     report, output = run_suite(args)
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2), flush=True)
     print(output, flush=True)
-    return 0 if report["summary"]["failed"] == 0 else 1
+    comparison = report.get("baseline_comparison")
+    passed = report["summary"]["failed"] == 0 and (comparison is None or comparison["passed"])
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

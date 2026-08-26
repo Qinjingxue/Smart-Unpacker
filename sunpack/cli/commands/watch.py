@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from sunpack.support.runtime_cwd import runtime_working_directory
-
 from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
 from sunpack.cli.cli_types import CliCommandResult
@@ -81,12 +79,6 @@ async def handle(args, ctx):
 
 
 async def _handle_start(args, ctx):
-    if _request_watch_elevation(args):
-        return 0, CliCommandResult(
-            command=COMMAND,
-            inputs={"action": "start"},
-            summary={"elevated_relaunch": True},
-        )
     from sunpack.coordinator.watch_runtime import run_watch_service
 
     code = await run_watch_service(
@@ -188,18 +180,3 @@ def _handle_startup(args):
 
 def _watch_running(config: dict) -> bool:
     return is_watch_lock_active(config)
-
-
-def _request_watch_elevation(args) -> bool:
-    from sunpack.gui.launcher import watch_launch_argv
-    from sunpack.platform.windows.elevation import relaunch_elevated
-
-    return relaunch_elevated(
-        watch_launch_argv(
-            once=bool(getattr(args, "once", False)),
-            no_tray=bool(getattr(args, "no_tray", False)),
-            initial_scan=bool(getattr(args, "initial_scan", False)),
-            prefer_windowed_python=True,
-        ),
-        cwd=runtime_working_directory(),
-    )

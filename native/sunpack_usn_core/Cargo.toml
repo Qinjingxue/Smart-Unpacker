@@ -1,0 +1,22 @@
+[package]
+name = "sunpack-usn-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[features]
+default = ["client", "journal"]
+client = [
+    "windows-sys/Win32_System_IO",
+    "windows-sys/Win32_System_Pipes",
+    "windows-sys/Win32_System_Services",
+    "windows-sys/Win32_System_Threading",
+]
+journal = ["windows-sys/Win32_System_IO"]
+
+[dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }

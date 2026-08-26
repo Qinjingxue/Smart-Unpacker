@@ -36,7 +36,6 @@ def runtime_cache_stats(*, inspection_services: Iterable[Any] = ()) -> dict[str,
         "archive_sessions": _archive_session_stats(),
         "reader": _reader_stats(),
         "native_seven_zip": _native_seven_zip_stats(),
-        "watch_filesystem": _watch_filesystem_stats(),
         "inspection": [],
     }
     for service in inspection_services:
@@ -70,7 +69,6 @@ def clear_all_runtime_caches(*, inspection_services: Iterable[Any] = ()) -> dict
         ("projection_cache", clear_projection_cache),
         ("global_cache", clear_all_caches),
         ("native_seven_zip", _clear_native_seven_zip_caches),
-        ("watch_filesystem", _clear_watch_filesystem_resources),
         ("archive_sessions", clear_archive_sessions),
     ):
         try:
@@ -136,20 +134,3 @@ def _clear_native_seven_zip_caches() -> dict[str, Any]:
     except (ImportError, AttributeError):
         return {"available": False}
     return dict(clear_seven_zip_runtime_caches())
-
-
-def _watch_filesystem_stats() -> dict[str, Any]:
-    try:
-        from sunpack_native import watch_filesystem_resource_stats
-
-        return dict(watch_filesystem_resource_stats())
-    except (ImportError, AttributeError, TypeError):
-        return {"available": False}
-
-
-def _clear_watch_filesystem_resources() -> dict[str, Any]:
-    try:
-        from sunpack_native import clear_watch_filesystem_resources
-    except (ImportError, AttributeError):
-        return {"available": False}
-    return {"volume_contexts": int(clear_watch_filesystem_resources())}

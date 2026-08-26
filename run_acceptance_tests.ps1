@@ -194,6 +194,8 @@ required = [
     'seven_zip_scan_source', 'seven_zip_atomic_repair',
     'archive_nested_payload_salvage',
     'rar_block_chain_trim_recovery', 'rar_end_block_repair',
+    'watch_broker_acquire', 'watch_broker_release',
+    'watch_broker_is_connected', 'watch_broker_ping_seconds',
 ]
 assert n.native_available()
 missing = [name for name in required if not callable(getattr(n, name, None))]
@@ -409,7 +411,7 @@ function Get-EnvironmentRefreshReasons {
     if (-not $nativeOrigin -or -not (Test-Path -LiteralPath $nativeOrigin)) {
         $reasons.Add("sunpack_native is not importable from .venv")
     } else {
-        $nativeSourceRoot = Join-Path $RepoRoot "native\sunpack_native"
+        $nativeSourceRoot = Join-Path $RepoRoot "native"
         $nativeSourceNewest = Get-NewestSourceWriteTime -Root $nativeSourceRoot -Include @("*.rs", "Cargo.toml", "Cargo.lock")
         $nativeInstalledTime = (Get-Item -LiteralPath $nativeOrigin).LastWriteTimeUtc
         if ($nativeInstalledTime -lt $nativeSourceNewest) {
@@ -505,6 +507,61 @@ function Wait-BeforeExit {
     $null = Read-Host
 }
 
+function Install-AcceptanceWatchBroker {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$BuildArch
+    )
+    $existing = Get-Service -Name "SunPackWatchBroker" -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+        return $false
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "Acceptance tests require an elevated PowerShell to install the temporary Watch Broker service."
+    }
+    $rustTarget = if ($BuildArch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+    $brokerPath = Join-Path $RepoRoot (".cache\rust-target\{0}\{1}\release\sunpack-watch-broker.exe" -f $BuildArch, $rustTarget)
+    if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
+        $brokerPath = Join-Path $RepoRoot "native\target\release\sunpack-watch-broker.exe"
+    }
+    if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
+        throw "Built Watch Broker service executable was not found: $brokerPath"
+    }
+    try {
+        New-Service `
+            -Name "SunPackWatchBroker" `
+            -BinaryPathName ('"{0}"' -f $brokerPath) `
+            -DisplayName "SunPack Watch Broker (acceptance)" `
+            -StartupType Manual | Out-Null
+        & sc.exe sidtype SunPackWatchBroker unrestricted | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to configure the acceptance Watch Broker service SID."
+        }
+        & sc.exe sdset SunPackWatchBroker "D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;LCRP;;;IU)" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to configure the acceptance Watch Broker service DACL."
+        }
+    } catch {
+        Remove-AcceptanceWatchBroker
+        throw
+    }
+    return $true
+}
+
+function Remove-AcceptanceWatchBroker {
+    Stop-Service -Name "SunPackWatchBroker" -Force -ErrorAction SilentlyContinue
+    & sc.exe delete SunPackWatchBroker | Out-Null
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline -and (Get-Service -Name "SunPackWatchBroker" -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (Get-Service -Name "SunPackWatchBroker" -ErrorAction SilentlyContinue) {
+        throw "Temporary acceptance Watch Broker service was not removed."
+    }
+}
+
 trap {
     Write-Host ("ERROR: " + $_.Exception.Message) -ForegroundColor Red
     Wait-BeforeExit
@@ -516,12 +573,42 @@ Ensure-AcceptanceEnvironment -RepoRoot $repoRoot -VenvPython $venvPython
 Assert-AcceptanceTestTools -RepoRoot $repoRoot
 $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
+$unelevatedRunner = Join-Path $repoRoot "scripts\run_unelevated_process.py"
+if (-not (Test-Path -LiteralPath $unelevatedRunner -PathType Leaf)) {
+    throw "Unelevated process runner not found: $unelevatedRunner"
+}
 
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
 Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit", "--durations=20")
 Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional", "--durations=20")
-Invoke-TestStep -Label "Integration tests" -Command @($python, "-m", "pytest", "-q", "tests/integration", "--durations=20")
-Invoke-TestStep -Label "Full real archive and watch matrix" -Command @($python, "-m", "pytest", "-q", "tests/real", "--durations=20")
+$ownsAcceptanceBroker = Install-AcceptanceWatchBroker -RepoRoot $repoRoot -BuildArch $Arch
+try {
+    $integrationArguments = @("-m", "pytest", "-q", "tests/integration", "--durations=20")
+    $integrationCommand = @(
+        $python,
+        $unelevatedRunner,
+        "--cwd", $repoRoot,
+        "--timeout-seconds", [string]$StepTimeoutSeconds,
+        "--",
+        $python
+    ) + $integrationArguments
+    Invoke-TestStep -Label "Integration tests (ordinary user token)" -Command $integrationCommand -TimeoutSeconds ($StepTimeoutSeconds + 30)
+
+    $realArguments = @("-m", "pytest", "-q", "tests/real", "--durations=20")
+    $realCommand = @(
+        $python,
+        $unelevatedRunner,
+        "--cwd", $repoRoot,
+        "--timeout-seconds", [string]$StepTimeoutSeconds,
+        "--",
+        $python
+    ) + $realArguments
+    Invoke-TestStep -Label "Full real archive and watch matrix (ordinary user token)" -Command $realCommand -TimeoutSeconds ($StepTimeoutSeconds + 30)
+} finally {
+    if ($ownsAcceptanceBroker) {
+        Remove-AcceptanceWatchBroker
+    }
+}
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")

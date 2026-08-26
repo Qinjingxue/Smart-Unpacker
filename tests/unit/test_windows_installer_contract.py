@@ -4,11 +4,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_installer_is_per_user_and_owns_only_its_path_entry():
+def test_installer_is_machine_wide_but_owns_only_its_user_path_entry():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
-    assert "PrivilegesRequired=lowest" in script
-    assert "DefaultDirName={localappdata}\\Programs\\SunPack" in script
+    assert "PrivilegesRequired=admin" in script
+    assert "DefaultDirName={autopf}\\SunPack" in script
     assert "PathAddedByInstaller" in script
     assert "procedure AddUserPath" in script
     assert "procedure RemoveUserPath" in script
@@ -45,6 +45,38 @@ def test_installer_registers_and_unregisters_ordinary_user_toast_host():
     assert "[UninstallRun]" in script
 
 
+def test_installer_owns_a_minimal_demand_start_watch_broker_service():
+    installer = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+    build = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "SunPackWatchBroker" in installer
+    assert "sunpack-watch-broker.exe" in installer
+    assert "start= demand" in installer
+    assert "obj= LocalSystem" in installer
+    assert "sidtype " in installer and " unrestricted" in installer
+    assert "(A;;LCRP;;;IU)" in installer
+    assert "InstallBrokerService;" in installer
+    assert installer.count("StopAndDeleteBrokerService;") >= 2
+    assert "sunpack_watch_broker\\Cargo.toml" in build
+    assert 'Join-Path $distAppRoot "service"' in build
+
+
+def test_privileged_journal_code_is_compiled_only_into_the_service():
+    core = (ROOT / "native" / "sunpack_usn_core" / "Cargo.toml").read_text(encoding="utf-8")
+    broker = (ROOT / "native" / "sunpack_watch_broker" / "Cargo.toml").read_text(encoding="utf-8")
+    native = (ROOT / "native" / "sunpack_native" / "Cargo.toml").read_text(encoding="utf-8")
+    client_source = (ROOT / "native" / "sunpack_usn_core" / "src" / "client.rs").read_text(encoding="utf-8")
+    journal_source = (ROOT / "native" / "sunpack_usn_core" / "src" / "journal.rs").read_text(encoding="utf-8")
+
+    assert 'default = ["client", "journal"]' in core
+    assert 'default-features = false, features = ["journal"]' in broker
+    assert 'default-features = false, features = ["client"]' in native
+    assert "OpenSCManagerW" in client_source
+    assert "FSCTL_QUERY_USN_JOURNAL" not in client_source
+    assert "FSCTL_QUERY_USN_JOURNAL" in journal_source
+    assert "OpenSCManagerW" not in journal_source
+
+
 def test_uninstaller_unconditionally_removes_watch_autostart():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
@@ -63,14 +95,14 @@ def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     assert "function PrepareToInstall" in script
     assert "StopExistingProcesses;" in script
     assert "function ClearInstallDirectory: Boolean" in script
-    assert "function ClearExternalRuntimeState: Boolean" in script
+    assert "function StopAndDeleteBrokerService: Boolean" in script
     assert "IsPersistentInstallFile" in script
     assert "FindData: TFindRec" in script
     assert "DirExists(ItemPath)" in script
     assert "TFindData" not in script
     assert "sunpack_watch_roots.txt,builtin_passwords.txt" in script
-    assert 'Source: "{#SourceDir}\\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
-    assert 'Source: "{#SourceDir}\\builtin_passwords.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
+    assert 'Source: "{#SourceDir}\\sunpack_watch_roots.txt"; DestDir: "{localappdata}\\SunPack"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
+    assert 'Source: "{#SourceDir}\\builtin_passwords.txt"; DestDir: "{localappdata}\\SunPack"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
     assert "RunContextMenuScript(False);" in script
     assert "RemoveStartupRunValue;" in script
     assert "RemoveUserPath;" in script
@@ -84,7 +116,8 @@ def test_uninstaller_stops_running_watch_before_removing_files():
     assert "function StopExistingProcessesAndWait: Boolean" in script
     assert "RemoveStartupRunValue;" in script
     assert "Result := StopExistingProcessesAndWait;" in script
-    assert "Please stop them and run the uninstaller again." in script
+    assert "Watch Broker service could not be stopped" in script
+    assert "StopAndDeleteBrokerService" in script
     assert "Get-Process -ErrorAction SilentlyContinue" in script
     assert "RuntimeAppPath := ExpandConstant('{app}\\sunpack-runtime.exe')" in script
     assert "$targets = @(" in script
@@ -203,23 +236,29 @@ def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
         assert "'scan_directory_entries'" not in script, path
 
 
-def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
+def test_installer_smoke_uses_process_exit_code_for_started_processes():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 
     assert "Start-Process" in script
     assert "-PassThru" in script
+    assert ".WaitForExit(" in script
     assert "$process.ExitCode" in script
-    assert "$LASTEXITCODE" not in script
+    assert "Invoke-UninstallerChecked" in script
+    assert "entire descendant tree" in script
+    assert "Wait-UninstallCompletion -InstallRoot $installRoot -ServiceName $serviceName" in script
+    assert "Command failed with exit code" in script
 
 
 def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 
-    assert 'Join-Path $installRoot "builtin_passwords.txt"' in script
-    assert 'Join-Path $installRoot ".sunpack_watch"' in script
+    assert 'Join-Path $userDataRoot "builtin_passwords.txt"' in script
+    assert 'Join-Path $userDataRoot ".sunpack_watch"' in script
     assert 'Join-Path $env:LOCALAPPDATA "SunPack\\cache"' in script
     assert "Upgrade install overwrote the existing builtin password file" in script
     assert "Upgrade install left stale application data behind" in script
+    assert "Invoke-UnelevatedChecked" in script
+    assert "run_unelevated_process.py" in script
     assert "Upgrade install left stale configuration data behind" in script
     assert "Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName" in script
     assert "Uninstaller left the watch state directory behind" in script

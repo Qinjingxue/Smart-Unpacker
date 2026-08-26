@@ -6,6 +6,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "The installer lifecycle test must run from an elevated PowerShell because it installs a real LocalSystem service."
+}
 
 function Invoke-Checked {
     param(
@@ -20,6 +27,77 @@ function Invoke-Checked {
         -NoNewWindow
     if ($process.ExitCode -ne 0) {
         throw "Command failed with exit code $($process.ExitCode): $FilePath $($Arguments -join ' ')"
+    }
+}
+
+function Invoke-UninstallerChecked {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 300
+    )
+    # Do not use Start-Process -Wait here. PowerShell 5.1 waits for the
+    # uninstaller's entire descendant tree, which includes the replacement
+    # Explorer process started after unregistering shell integrations.
+    $process = Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $Arguments `
+        -PassThru `
+        -NoNewWindow
+    if (-not $process.WaitForExit([Math]::Max(1, $TimeoutSeconds) * 1000)) {
+        try {
+            $process.Kill()
+        } catch {
+        }
+        throw "Uninstaller timed out after $TimeoutSeconds seconds: $FilePath $($Arguments -join ' ')"
+    }
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+        throw "Uninstaller failed with exit code ${exitCode}: $FilePath $($Arguments -join ' ')"
+    }
+}
+
+function Wait-UninstallCompletion {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    do {
+        $rootExists = Test-Path -LiteralPath $InstallRoot
+        $serviceExists = $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)
+        if (-not $rootExists -and -not $serviceExists) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw "Uninstaller did not remove the application directory and service within $TimeoutSeconds seconds. RootExists=$rootExists ServiceExists=$serviceExists"
+}
+
+function Invoke-UnelevatedChecked {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 120
+    )
+    $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    $runnerPath = Join-Path $repoRoot "scripts\run_unelevated_process.py"
+    if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
+        throw "Unelevated installer test runner is unavailable under: $repoRoot"
+    }
+    $runnerArguments = @(
+        $runnerPath,
+        "--cwd", (Split-Path -Parent $FilePath),
+        "--timeout-seconds", [string]$TimeoutSeconds,
+        "--",
+        $FilePath
+    ) + $Arguments
+    & $pythonPath @runnerArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unelevated command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
     }
 }
 
@@ -51,8 +129,14 @@ $folderMenuKey = "HKCU:\Software\Classes\Directory\shell\SunPack"
 $backgroundMenuKey = "HKCU:\Software\Classes\Directory\Background\shell\SunPack"
 $startupRunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupValueName = "SunPackWatchService"
+$serviceName = "SunPackWatchBroker"
+$userDataRoot = Join-Path $env:LOCALAPPDATA "SunPack"
+$userDataBackup = $null
 $uninstaller = $null
 
+if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+    throw "Installer smoke test requires the service to be absent: $serviceName"
+}
 if (Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -ErrorAction SilentlyContinue) {
     throw "Installer smoke test requires a clean startup state and will not overwrite an existing Run value: $startupValueName"
 }
@@ -70,6 +154,18 @@ foreach ($key in @(
 
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
+    if (Test-Path -LiteralPath $userDataRoot) {
+        $userDataBackup = Join-Path $env:LOCALAPPDATA ("SunPack.installer-test-backup-" + [guid]::NewGuid().ToString("N"))
+        $resolvedDataRoot = [System.IO.Path]::GetFullPath($userDataRoot)
+        $resolvedBackup = [System.IO.Path]::GetFullPath($userDataBackup)
+        $localAppDataRoot = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\') + '\'
+        if (-not $resolvedDataRoot.StartsWith($localAppDataRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $resolvedBackup.StartsWith($localAppDataRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to move user data outside LocalAppData."
+        }
+        Move-Item -LiteralPath $userDataRoot -Destination $userDataBackup
+    }
+
     Invoke-Checked -FilePath $resolvedInstaller -Arguments @(
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
@@ -82,7 +178,9 @@ try {
 
     $appPath = Join-Path $installRoot "sunpack.exe"
     $runtimeAppPath = Join-Path $installRoot "sunpack-runtime.exe"
-    $builtinPasswordsPath = Join-Path $installRoot "builtin_passwords.txt"
+    $builtinPasswordsPath = Join-Path $userDataRoot "builtin_passwords.txt"
+    $watchRootsPath = Join-Path $userDataRoot "sunpack_watch_roots.txt"
+    $brokerPath = Join-Path $installRoot "service\sunpack-watch-broker.exe"
     if (-not (Test-Path -LiteralPath $appPath)) {
         throw "Installed executable was not found: $appPath"
     }
@@ -94,6 +192,24 @@ try {
     }
     if (-not (Test-Path -LiteralPath $builtinPasswordsPath)) {
         throw "Installed builtin password file was not found: $builtinPasswordsPath"
+    }
+    if (-not (Test-Path -LiteralPath $brokerPath)) {
+        throw "Installed Watch Broker executable was not found: $brokerPath"
+    }
+    $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $service) {
+        throw "Installer did not create the Watch Broker service: $serviceName"
+    }
+    if ($service.StartMode -ne "Manual" -or $service.StartName -ne "LocalSystem") {
+        throw "Watch Broker service configuration is incorrect: StartMode=$($service.StartMode), StartName=$($service.StartName)"
+    }
+    $expectedImagePath = '"{0}"' -f $brokerPath
+    if ($service.PathName -ne $expectedImagePath) {
+        throw "Watch Broker ImagePath is incorrect. Expected '$expectedImagePath', got '$($service.PathName)'."
+    }
+    $serviceDacl = (& sc.exe sdshow $serviceName 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $serviceDacl -notmatch '\(A;;LCRP;;;IU\)') {
+        throw "Watch Broker service DACL does not grant only start/query rights to interactive users: $serviceDacl"
     }
     Invoke-Checked -FilePath $appPath -Arguments @("--help")
 
@@ -116,8 +232,9 @@ try {
         throw "Startup Run value is incorrect: $startupCommand"
     }
 
-    $watchRootsPath = Join-Path $installRoot "sunpack_watch_roots.txt"
-    $watchRootsContent = "D:\Archives`nE:\Incoming`n"
+    $watchRoot = Join-Path $testRoot "watch-root"
+    New-Item -ItemType Directory -Path $watchRoot -Force | Out-Null
+    $watchRootsContent = "$watchRoot`n"
     Set-Content -LiteralPath $watchRootsPath -Value $watchRootsContent -Encoding UTF8 -NoNewline
     $builtinPasswordsContent = "installer-smoke-user-password`n"
     Set-Content -LiteralPath $builtinPasswordsPath -Value $builtinPasswordsContent -Encoding UTF8 -NoNewline
@@ -149,9 +266,21 @@ try {
     if (Test-Path -LiteralPath $staleConfigDir) {
         throw "Upgrade install left stale configuration data behind: $staleConfigDir"
     }
+    Invoke-UnelevatedChecked -FilePath $appPath -Arguments @("watch", "start", "--once", "--no-tray")
+    $stopDeadline = (Get-Date).AddSeconds(10)
+    do {
+        $brokerService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($null -ne $brokerService -and $brokerService.Status -eq "Stopped") {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $stopDeadline)
+    if ($null -eq $brokerService -or $brokerService.Status -ne "Stopped") {
+        throw "Watch Broker did not stop after the one-shot Watch client released its lease."
+    }
     Remove-Item -LiteralPath $watchRootsPath -Force
     Remove-Item -LiteralPath $builtinPasswordsPath -Force
-    $watchStateDir = Join-Path $installRoot ".sunpack_watch"
+    $watchStateDir = Join-Path $userDataRoot ".sunpack_watch"
     New-Item -ItemType Directory -Path $watchStateDir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $watchStateDir "watch.stop") -Value "installer-smoke" -Encoding UTF8
     $localSunPackCache = Join-Path $env:LOCALAPPDATA "SunPack\cache"
@@ -163,13 +292,14 @@ try {
     if ($null -eq $uninstaller) {
         throw "Inno Setup uninstaller was not created under: $installRoot"
     }
-    Invoke-Checked -FilePath $uninstaller.FullName -Arguments @(
+    Invoke-UninstallerChecked -FilePath $uninstaller.FullName -Arguments @(
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
         "/LOG=$uninstallLog"
     )
     $uninstaller = $null
+    Wait-UninstallCompletion -InstallRoot $installRoot -ServiceName $serviceName
 
     $userPathAfter = [string](Get-ItemProperty -LiteralPath "HKCU:\Environment" -Name "Path" -ErrorAction SilentlyContinue).Path
     if (Test-PathEntry -PathValue $userPathAfter -Expected $installRoot) {
@@ -189,6 +319,9 @@ try {
     if (Test-Path -LiteralPath $localSunPackCache) {
         throw "Uninstaller left the local SunPack cache behind: $localSunPackCache"
     }
+    if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+        throw "Uninstaller left the Watch Broker service installed: $serviceName"
+    }
     if (Test-Path -LiteralPath $installRoot) {
         throw "Uninstaller left the application directory behind: $installRoot"
     }
@@ -200,6 +333,24 @@ try {
             & $uninstaller.FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART | Out-Null
         } catch {
         }
+    }
+    if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $serviceName | Out-Null
+    }
+    Remove-Item -LiteralPath $userDataRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -ErrorAction SilentlyContinue
+    foreach ($key in @(
+        $folderMenuKey,
+        $backgroundMenuKey,
+        "HKCU:\Software\Classes\SunPack.FolderContextMenu",
+        "HKCU:\Software\Classes\SunPack.BackgroundContextMenu"
+    )) {
+        Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $userDataBackup -and (Test-Path -LiteralPath $userDataBackup)) {
+        Remove-Item -LiteralPath $userDataRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $userDataBackup -Destination $userDataRoot
     }
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

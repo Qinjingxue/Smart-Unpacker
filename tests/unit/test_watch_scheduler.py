@@ -2856,6 +2856,44 @@ def test_watch_scheduler_silently_ignores_metadata_events(tmp_path, monkeypatch)
     assert log_path.read_text(encoding="utf-8") == ""
 
 
+def test_watch_event_handler_keeps_dispatcher_alive_when_native_observation_is_temporarily_blocked():
+    ignored = []
+
+    class Scheduler:
+        config = {}
+
+        @staticmethod
+        def is_builtin_password_file(path):
+            return False
+
+        @staticmethod
+        def should_ignore_event_path(path):
+            return False
+
+        @staticmethod
+        def enqueue(path, **kwargs):
+            raise OSError(f'native resource registration blocked by promotion: ["{path}"]')
+
+        @staticmethod
+        def _log_candidate_ignored(path, reason, **payload):
+            ignored.append((path, reason, payload))
+
+    handler = scheduler_module._WatchEventHandler(Scheduler())
+    handler._handle_path("sample.7z.001", event_type="modified", src_path="source.tmp")
+
+    assert ignored == [
+        (
+            "sample.7z.001",
+            "observation_error",
+            {
+                "event_type": "modified",
+                "src_path": "source.tmp",
+                "error": 'OSError: native resource registration blocked by promotion: ["sample.7z.001"]',
+            },
+        )
+    ]
+
+
 def test_watch_scheduler_does_not_special_case_downloader_suffixes(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     watch_root = tmp_path / "in"

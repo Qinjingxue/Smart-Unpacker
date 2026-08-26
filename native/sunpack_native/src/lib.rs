@@ -95,14 +95,8 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scan::directory::NativeOutputInventory>()?;
     m.add_class::<scan::directory::NativeWorkerManifest>()?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_after_markers, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        filesystem::watch_filesystem_resource_stats,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        filesystem::clear_watch_filesystem_resources,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(filesystem::watch_broker_acquire, m)?)?;
+    m.add_function(wrap_pyfunction!(filesystem::watch_broker_release, m)?)?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
         analysis_native::fuzzy_binary_profile_for_paths,
@@ -230,6 +224,8 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(filesystem::watch_filesystem_type, m)?)?;
     m.add_function(wrap_pyfunction!(filesystem::validate_ntfs_watch_root, m)?)?;
     m.add_function(wrap_pyfunction!(filesystem::watch_file_is_ready, m)?)?;
+    m.add_function(wrap_pyfunction!(filesystem::watch_broker_is_connected, m)?)?;
+    m.add_function(wrap_pyfunction!(filesystem::watch_broker_ping_seconds, m)?)?;
     m.add_function(wrap_pyfunction!(
         postprocess::flatten_single_branch_directories,
         m

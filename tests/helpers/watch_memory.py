@@ -360,7 +360,6 @@ def _known_cache_stats(engine: PipelineEngine | None) -> dict[str, Any]:
         "relation_password": _relation_password_cache_stats(),
         "inspection": _inspection_cache_stats(engine),
         "native_seven_zip": _native_seven_zip_cache_stats(),
-        "watch_filesystem": _watch_filesystem_cache_stats(),
         "native_worker": _native_worker_stats(engine),
     }
 
@@ -370,15 +369,6 @@ def _native_seven_zip_cache_stats() -> dict[str, Any]:
         from sunpack_native import seven_zip_runtime_cache_stats
 
         return dict(seven_zip_runtime_cache_stats())
-    except (ImportError, AttributeError, TypeError):
-        return {}
-
-
-def _watch_filesystem_cache_stats() -> dict[str, Any]:
-    try:
-        from sunpack_native import watch_filesystem_resource_stats
-
-        return dict(watch_filesystem_resource_stats())
     except (ImportError, AttributeError, TypeError):
         return {}
 

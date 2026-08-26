@@ -1777,7 +1777,20 @@ class _WatchEventHandler(FileSystemEventHandler):
         if is_directory_password_file(path, self.scheduler.config):
             self.scheduler.notify_password_table_changed(path)
             return
-        self.scheduler.enqueue(path, event_type=event_type, src_path=src_path)
+        try:
+            self.scheduler.enqueue(path, event_type=event_type, src_path=src_path)
+        except OSError as exc:
+            # File observations race with renames, deletion, and the native
+            # promotion gate.  A single transient miss must not escape the
+            # watchdog callback and terminate its dispatcher thread; a later
+            # event or the active pipeline request will reconcile the path.
+            self.scheduler._log_candidate_ignored(
+                path,
+                "observation_error",
+                event_type=event_type,
+                src_path=src_path,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
 
 def _candidate_for_event_path(path: str, *, since_usn: int = 0) -> WatchCandidate | None:

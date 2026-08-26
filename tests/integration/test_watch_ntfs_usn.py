@@ -17,6 +17,15 @@ from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="NTFS USN tests require Windows")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _watch_broker_lease():
+    sunpack_native.watch_broker_acquire()
+    try:
+        yield
+    finally:
+        sunpack_native.watch_broker_release()
+
+
 def _watcher(root: Path, *, quiet_seconds: float = 0.05) -> WatchScheduler:
     return WatchScheduler(
         {

@@ -64,9 +64,12 @@ test_extract_folder/
 test_targz/
 AGENTS.md
 native/sunpack_native/target/
+native/**/target/
+native/target/
 native/sevenzip_bridge/build-*/
 .sunpack/
 .sunpack_watch_validation/
+.sunpack_test_installer/
 datasets/
 bug.txt
 .deepseek/

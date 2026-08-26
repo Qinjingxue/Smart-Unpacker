@@ -1,12 +1,9 @@
 use super::WatchFileObservation;
-use std::collections::HashMap;
 use std::ffi::{c_void, OsStr};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 type Handle = *mut c_void;
 
@@ -20,66 +17,13 @@ const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FSCTL_READ_FILE_USN_DATA: u32 = 0x0009_00eb;
-const FSCTL_QUERY_USN_JOURNAL: u32 = 0x0009_00f4;
-const FSCTL_READ_USN_JOURNAL: u32 = 0x0009_00bb;
-const ALL_USN_REASONS: u32 = 0xffff_ffff;
-const USN_REASON_CLOSE: u32 = 0x8000_0000;
-const JOURNAL_BUFFER_BYTES: usize = 64 * 1024;
-const MAX_JOURNAL_BYTES_PER_OBSERVATION: usize = 1024 * 1024;
-const MAX_CACHED_VOLUME_CONTEXTS: usize = 64;
-const VOLUME_CONTEXT_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
-// Volume journal reads normally require an elevated token. Cache capability
-// failures per volume so one inaccessible volume does not disable all others.
-static VOLUME_CONTEXTS: OnceLock<Mutex<VolumeContextCache>> = OnceLock::new();
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
-const ERROR_INVALID_HANDLE: i32 = 6;
-const ERROR_NOT_READY: i32 = 21;
-const ERROR_DEVICE_NOT_CONNECTED: i32 = 1167;
-
-#[derive(Default)]
-struct ChangeReasons {
-    all: u32,
-    without_close: u32,
-}
-
-impl ChangeReasons {
-    fn observe(&mut self, reason: u32) {
-        self.all |= reason;
-        // NTFS may defer all accumulated write reasons until the handle-close
-        // record. That record is useful evidence, but treating it as a new
-        // write interval at the quiet boundary creates a feedback loop.
-        if reason & USN_REASON_CLOSE == 0 {
-            self.without_close |= reason;
-        }
-    }
-}
 
 #[repr(C)]
 struct ReadFileUsnData {
     min_major_version: u16,
     max_major_version: u16,
-}
-
-#[repr(C)]
-struct ReadUsnJournalData {
-    start_usn: i64,
-    reason_mask: u32,
-    return_only_on_close: u32,
-    timeout: u64,
-    bytes_to_wait_for: u64,
-    usn_journal_id: u64,
-}
-
-fn read_usn_journal_request(start_usn: i64, usn_journal_id: u64) -> ReadUsnJournalData {
-    ReadUsnJournalData {
-        start_usn,
-        reason_mask: ALL_USN_REASONS,
-        return_only_on_close: 0,
-        timeout: 0,
-        bytes_to_wait_for: 0,
-        usn_journal_id,
-    }
 }
 
 #[link(name = "Kernel32")]
@@ -137,122 +81,6 @@ impl Drop for OwnedHandle {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.raw());
-        }
-    }
-}
-
-struct VolumeContext {
-    handle: Option<OwnedHandle>,
-    reason_read_unavailable_error: Option<i32>,
-    last_used: Instant,
-}
-
-impl VolumeContext {
-    fn new(now: Instant) -> Self {
-        Self {
-            handle: None,
-            reason_read_unavailable_error: None,
-            last_used: now,
-        }
-    }
-}
-
-struct VolumeContextCache {
-    entries: HashMap<String, Arc<Mutex<VolumeContext>>>,
-    capacity: usize,
-    idle_ttl: Duration,
-    evictions: u64,
-    transient_fallbacks: u64,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct VolumeContextStats {
-    pub(crate) count: usize,
-    pub(crate) capacity: usize,
-    pub(crate) evictions: u64,
-    pub(crate) transient_fallbacks: u64,
-}
-
-impl VolumeContextCache {
-    fn new(capacity: usize, idle_ttl: Duration) -> Self {
-        Self {
-            entries: HashMap::new(),
-            capacity: capacity.max(1),
-            idle_ttl,
-            evictions: 0,
-            transient_fallbacks: 0,
-        }
-    }
-
-    fn context_for(&mut self, volume_key: String, now: Instant) -> Arc<Mutex<VolumeContext>> {
-        // Do this on every lookup rather than on a background thread. The
-        // cache stays bounded even during continuous watch activity, and this
-        // keeps the native module free from background-thread lifecycle work.
-        self.prune_expired(now, Some(volume_key.as_str()));
-        if let Some(context) = self.entries.get(volume_key.as_str()) {
-            return Arc::clone(context);
-        }
-
-        if self.entries.len() >= self.capacity {
-            self.evict_lru_inactive();
-        }
-        let context = Arc::new(Mutex::new(VolumeContext::new(now)));
-        if self.entries.len() < self.capacity {
-            self.entries.insert(volume_key, Arc::clone(&context));
-        } else {
-            // All cached contexts are in use. Avoid retaining another volume
-            // indefinitely; this one is released when the operation returns.
-            self.transient_fallbacks += 1;
-        }
-        context
-    }
-
-    fn prune_expired(&mut self, now: Instant, protected_key: Option<&str>) {
-        let mut removed = 0u64;
-        self.entries.retain(|key, context| {
-            if protected_key == Some(key.as_str()) || Arc::strong_count(context) != 1 {
-                return true;
-            }
-            let Ok(context) = context.try_lock() else {
-                return true;
-            };
-            let expired = now.saturating_duration_since(context.last_used) >= self.idle_ttl;
-            if expired {
-                removed += 1;
-            }
-            !expired
-        });
-        self.evictions += removed;
-    }
-
-    fn evict_lru_inactive(&mut self) {
-        let mut lru_key: Option<(String, Instant)> = None;
-        for (key, context) in &self.entries {
-            if Arc::strong_count(context) != 1 {
-                continue;
-            }
-            let Ok(context) = context.try_lock() else {
-                continue;
-            };
-            if lru_key
-                .as_ref()
-                .map_or(true, |(_, last_used)| context.last_used < *last_used)
-            {
-                lru_key = Some((key.clone(), context.last_used));
-            }
-        }
-        if let Some((key, _)) = lru_key {
-            self.entries.remove(&key);
-            self.evictions += 1;
-        }
-    }
-
-    fn stats(&self) -> VolumeContextStats {
-        VolumeContextStats {
-            count: self.entries.len(),
-            capacity: self.capacity,
-            evictions: self.evictions,
-            transient_fallbacks: self.transient_fallbacks,
         }
     }
 }
@@ -469,208 +297,20 @@ fn read_change_reasons(
     expected_file_id: &str,
     previous_usn: i64,
     current_usn: i64,
-) -> io::Result<ChangeReasons> {
-    with_volume_context(path, |volume| {
-        let journal_id = query_journal_id(volume)?;
-        read_change_reasons_from_volume(
-            volume,
-            journal_id,
-            expected_file_id,
-            previous_usn,
-            current_usn,
-        )
-    })
-}
-
-fn read_change_reasons_from_volume(
-    volume: Handle,
-    journal_id: u64,
-    expected_file_id: &str,
-    previous_usn: i64,
-    current_usn: i64,
-) -> io::Result<ChangeReasons> {
-    // StartUsn is a journal byte position and must stay on a record boundary;
-    // adding one produces ERROR_INVALID_PARAMETER. The record filter below
-    // keeps the interval logically exclusive of previous_usn.
-    let mut next_usn = previous_usn;
-    let mut scanned_bytes = 0usize;
-    let mut reasons = ChangeReasons::default();
-    let mut found = false;
-
-    while next_usn <= current_usn {
-        let request = read_usn_journal_request(next_usn, journal_id);
-        let mut output = vec![0u8; JOURNAL_BUFFER_BYTES];
-        let bytes_returned = device_io_control(
-            volume,
-            FSCTL_READ_USN_JOURNAL,
-            &request as *const _ as *const c_void,
-            std::mem::size_of::<ReadUsnJournalData>() as u32,
-            &mut output,
-        )?;
-        if bytes_returned < 8 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated USN journal reply",
-            ));
-        }
-        scanned_bytes = scanned_bytes.saturating_add(bytes_returned);
-        if scanned_bytes > MAX_JOURNAL_BYTES_PER_OBSERVATION {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "USN journal observation exceeded scan budget",
-            ));
-        }
-        let returned_next = i64::from_le_bytes(output[0..8].try_into().unwrap());
-        let mut offset = 8usize;
-        while offset + 8 <= bytes_returned {
-            let record_length =
-                u32::from_le_bytes(output[offset..offset + 4].try_into().unwrap()) as usize;
-            if record_length < 8 || offset + record_length > bytes_returned {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid USN journal record",
-                ));
-            }
-            let record = &output[offset..offset + record_length];
-            if let Some(reason) =
-                record_change_reason(record, expected_file_id, previous_usn, current_usn)?
-            {
-                found = true;
-                reasons.observe(reason);
-            }
-            offset += record_length;
-        }
-        if returned_next <= next_usn || returned_next > current_usn {
-            break;
-        }
-        next_usn = returned_next;
-    }
-    if !found {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "USN journal did not contain the current file record",
-        ));
-    }
-    Ok(reasons)
-}
-
-fn record_change_reason(
-    record: &[u8],
-    expected_file_id: &str,
-    previous_usn: i64,
-    current_usn: i64,
-) -> io::Result<Option<u32>> {
-    if record.len() < 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated USN record",
-        ));
-    }
-    let major = u16::from_le_bytes(record[4..6].try_into().unwrap());
-    let (file_id_end, usn_offset, reason_offset) = match major {
-        2 => (16usize, 24usize, 40usize),
-        3 => (24usize, 40usize, 56usize),
-        4 => (24usize, 40usize, 48usize),
-        _ => return Ok(None),
-    };
-    if record.len() < reason_offset + 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated USN record",
-        ));
-    }
-    let usn = i64::from_le_bytes(record[usn_offset..usn_offset + 8].try_into().unwrap());
-    if usn <= previous_usn
-        || usn > current_usn
-        || !file_ids_equal(&format_file_id(&record[8..file_id_end]), expected_file_id)
-    {
-        return Ok(None);
-    }
-    Ok(Some(u32::from_le_bytes(
-        record[reason_offset..reason_offset + 4].try_into().unwrap(),
-    )))
-}
-
-fn query_journal_id(volume: Handle) -> io::Result<u64> {
-    let mut output = vec![0u8; 80];
-    let bytes_returned =
-        device_io_control(volume, FSCTL_QUERY_USN_JOURNAL, null(), 0, &mut output)?;
-    if bytes_returned < 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated USN journal metadata",
-        ));
-    }
-    Ok(u64::from_le_bytes(output[0..8].try_into().unwrap()))
+) -> io::Result<sunpack_usn_core::ChangeReasons> {
+    sunpack_usn_core::broker_read_change_reasons(
+        &volume_device(path)?,
+        expected_file_id,
+        previous_usn,
+        current_usn,
+    )
 }
 
 pub(super) fn validate_volume_journal(path: &Path) -> io::Result<()> {
-    let result = with_volume_context(path, |volume| {
-        let mut metadata = vec![0u8; 80];
-        let bytes_returned =
-            device_io_control(volume, FSCTL_QUERY_USN_JOURNAL, null(), 0, &mut metadata)?;
-        if bytes_returned < 24 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated USN journal metadata",
-            ));
-        }
-        let journal_id = u64::from_le_bytes(metadata[0..8].try_into().unwrap());
-        let next_usn = i64::from_le_bytes(metadata[16..24].try_into().unwrap());
-        let request = read_usn_journal_request(next_usn, journal_id);
-        let mut output = vec![0u8; JOURNAL_BUFFER_BYTES];
-        let bytes_returned = device_io_control(
-            volume,
-            FSCTL_READ_USN_JOURNAL,
-            &request as *const _ as *const c_void,
-            std::mem::size_of::<ReadUsnJournalData>() as u32,
-            &mut output,
-        )?;
-        if bytes_returned < 8 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated USN journal reply",
-            ));
-        }
-        Ok(())
-    });
-    match result {
-        // A normal user may read per-file USNs without being allowed to open
-        // the volume journal. with_volume_context has already cached that
-        // capability failure for this volume, so watch can safely continue
-        // with conservative change detection and no repeated volume probes.
-        Err(error) if error.raw_os_error() == Some(5) => Ok(()),
-        other => other,
-    }
+    sunpack_usn_core::broker_probe_volume(&volume_device(path)?)
 }
 
-fn device_io_control(
-    handle: Handle,
-    code: u32,
-    input: *const c_void,
-    input_size: u32,
-    output: &mut [u8],
-) -> io::Result<usize> {
-    let mut bytes_returned = 0u32;
-    if unsafe {
-        DeviceIoControl(
-            handle,
-            code,
-            input,
-            input_size,
-            output.as_mut_ptr() as *mut c_void,
-            output.len() as u32,
-            &mut bytes_returned,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(bytes_returned as usize)
-}
-
-fn volume_device(path: &Path) -> io::Result<(String, Vec<u16>)> {
+fn volume_device(path: &Path) -> io::Result<String> {
     let path = canonical_wide(path)?;
     let mut mount_point = vec![0u16; 32768];
     if unsafe {
@@ -694,128 +334,11 @@ fn volume_device(path: &Path) -> io::Result<(String, Vec<u16>)> {
     {
         return Err(io::Error::last_os_error());
     }
-    // Cache by the stable volume GUID rather than by a drive letter, which can
-    // later be assigned to a different removable volume.
     let mut volume = nul_terminated(&volume_name).to_vec();
     if volume.last() == Some(&('\\' as u16)) {
         volume.pop();
     }
-    let volume_key = String::from_utf16_lossy(&volume).to_ascii_lowercase();
-    volume.push(0);
-    Ok((volume_key, volume))
-}
-
-fn with_volume_context<T>(
-    path: &Path,
-    operation: impl FnOnce(Handle) -> io::Result<T>,
-) -> io::Result<T> {
-    let (volume_key, volume) = volume_device(path)?;
-    let contexts = VOLUME_CONTEXTS.get_or_init(|| {
-        Mutex::new(VolumeContextCache::new(
-            MAX_CACHED_VOLUME_CONTEXTS,
-            VOLUME_CONTEXT_IDLE_TTL,
-        ))
-    });
-    let mut contexts = contexts
-        .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume handle cache poisoned"))?;
-    let context = contexts.context_for(volume_key.clone(), Instant::now());
-    drop(contexts);
-    let mut context = context
-        .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume context poisoned"))?;
-    context.last_used = Instant::now();
-    if let Some(error_code) = context.reason_read_unavailable_error {
-        return Err(io::Error::from_raw_os_error(error_code));
-    }
-    if context.handle.is_none() {
-        let resource = crate::io::resource_lifecycle::NativeResourceGuard::register(
-            "volume_device",
-            [PathBuf::from(&volume_key)],
-        )?;
-        let handle = unsafe {
-            CreateFileW(
-                volume.as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                null(),
-                OPEN_EXISTING,
-                0,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            let error = io::Error::last_os_error();
-            if journal_capability_error(&error) {
-                context.reason_read_unavailable_error = error.raw_os_error();
-            }
-            return Err(error);
-        }
-        context.handle = Some(OwnedHandle {
-            raw: handle as isize,
-            _resource: resource,
-        });
-    }
-    let handle = context.handle.as_ref().unwrap().raw();
-    let result = operation(handle);
-    if let Err(error) = &result {
-        if journal_capability_error(error) {
-            context.reason_read_unavailable_error = error.raw_os_error();
-        } else if stale_volume_handle_error(error) {
-            context.handle.take();
-        }
-    }
-    context.last_used = Instant::now();
-    result
-}
-
-pub(crate) fn volume_context_stats() -> VolumeContextStats {
-    VOLUME_CONTEXTS
-        .get()
-        .and_then(|contexts| contexts.lock().ok().map(|contexts| contexts.stats()))
-        .unwrap_or(VolumeContextStats {
-            count: 0,
-            capacity: MAX_CACHED_VOLUME_CONTEXTS,
-            evictions: 0,
-            transient_fallbacks: 0,
-        })
-}
-
-pub(crate) fn clear_volume_contexts() -> usize {
-    let Some(contexts) = VOLUME_CONTEXTS.get() else {
-        return 0;
-    };
-    let Ok(mut contexts) = contexts.lock() else {
-        return 0;
-    };
-    let removed = contexts.entries.len();
-    contexts.entries.clear();
-    removed
-}
-
-fn journal_capability_error(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(1) | Some(5))
-}
-
-fn stale_volume_handle_error(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(ERROR_INVALID_HANDLE) | Some(ERROR_NOT_READY) | Some(ERROR_DEVICE_NOT_CONNECTED)
-    )
-}
-
-fn format_file_id(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .rev()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn file_ids_equal(left: &str, right: &str) -> bool {
-    let left = left.trim_start_matches('0');
-    let right = right.trim_start_matches('0');
-    left == right
+    Ok(String::from_utf16_lossy(&volume).to_ascii_lowercase())
 }
 
 fn canonical_wide(path: &Path) -> io::Result<Vec<u16>> {
@@ -832,120 +355,4 @@ fn nul_terminated(values: &[u16]) -> &[u16] {
         .position(|value| *value == 0)
         .unwrap_or(values.len());
     &values[..length]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_v2_data_reason_and_matches_zero_extended_file_id() {
-        let mut record = vec![0u8; 60];
-        let record_length = record.len() as u32;
-        record[0..4].copy_from_slice(&record_length.to_le_bytes());
-        record[4..6].copy_from_slice(&2u16.to_le_bytes());
-        record[8..16].copy_from_slice(&0x1234u64.to_le_bytes());
-        record[24..32].copy_from_slice(&101i64.to_le_bytes());
-        record[40..44].copy_from_slice(&0x8000_0001u32.to_le_bytes());
-
-        let reason =
-            record_change_reason(&record, "00000000000000000000000000001234", 100, 101).unwrap();
-
-        assert_eq!(reason, Some(0x8000_0001));
-    }
-
-    #[test]
-    fn parses_v4_reason_from_its_own_layout() {
-        let mut record = vec![0u8; 64];
-        let record_length = record.len() as u32;
-        record[0..4].copy_from_slice(&record_length.to_le_bytes());
-        record[4..6].copy_from_slice(&4u16.to_le_bytes());
-        record[8..24].copy_from_slice(&0x1234u128.to_le_bytes());
-        record[40..48].copy_from_slice(&101i64.to_le_bytes());
-        record[48..52].copy_from_slice(&0x8000_0001u32.to_le_bytes());
-        record[56..60].copy_from_slice(&7u32.to_le_bytes());
-
-        let reason =
-            record_change_reason(&record, "00000000000000000000000000001234", 100, 101).unwrap();
-
-        assert_eq!(reason, Some(0x8000_0001));
-    }
-
-    #[test]
-    fn journal_request_preserves_the_record_aligned_start_usn() {
-        let request = read_usn_journal_request(8_192, 42);
-
-        assert_eq!(request.start_usn, 8_192);
-        assert_eq!(request.usn_journal_id, 42);
-    }
-
-    #[test]
-    fn close_record_does_not_become_a_new_content_interval() {
-        let mut reasons = ChangeReasons::default();
-
-        reasons.observe(0x8000_0001);
-
-        assert_eq!(reasons.all, 0x8000_0001);
-        assert_eq!(reasons.without_close, 0);
-    }
-
-    #[test]
-    fn earlier_non_close_data_record_is_preserved_when_close_follows() {
-        let mut reasons = ChangeReasons::default();
-
-        reasons.observe(0x0000_0002);
-        reasons.observe(0x8000_0002);
-
-        assert_eq!(reasons.all, 0x8000_0002);
-        assert_eq!(reasons.without_close, 0x0000_0002);
-    }
-
-    #[test]
-    fn volume_context_cache_evicts_the_least_recently_used_inactive_entry() {
-        let now = Instant::now();
-        let mut cache = VolumeContextCache::new(2, Duration::from_secs(60));
-        drop(cache.context_for("volume-a".to_owned(), now));
-        drop(cache.context_for("volume-b".to_owned(), now + Duration::from_secs(1)));
-
-        drop(cache.context_for("volume-c".to_owned(), now + Duration::from_secs(2)));
-
-        assert_eq!(cache.entries.len(), 2);
-        assert!(!cache.entries.contains_key("volume-a"));
-        assert!(cache.entries.contains_key("volume-b"));
-        assert!(cache.entries.contains_key("volume-c"));
-        assert_eq!(cache.evictions, 1);
-    }
-
-    #[test]
-    fn volume_context_cache_expires_idle_entries() {
-        let now = Instant::now();
-        let ttl = Duration::from_secs(60);
-        let mut cache = VolumeContextCache::new(2, ttl);
-        drop(cache.context_for("expired".to_owned(), now));
-
-        drop(cache.context_for("fresh".to_owned(), now + ttl + Duration::from_secs(1)));
-
-        assert_eq!(cache.entries.len(), 1);
-        assert!(!cache.entries.contains_key("expired"));
-        assert!(cache.entries.contains_key("fresh"));
-        assert_eq!(cache.evictions, 1);
-    }
-
-    #[test]
-    fn volume_context_cache_keeps_active_entries_and_uses_a_transient_overflow_context() {
-        let now = Instant::now();
-        let mut cache = VolumeContextCache::new(2, Duration::from_secs(60));
-        let active_a = cache.context_for("active-a".to_owned(), now);
-        let active_b = cache.context_for("active-b".to_owned(), now + Duration::from_secs(1));
-
-        let transient = cache.context_for("overflow".to_owned(), now + Duration::from_secs(2));
-
-        assert_eq!(cache.entries.len(), 2);
-        assert!(cache.entries.contains_key("active-a"));
-        assert!(cache.entries.contains_key("active-b"));
-        assert!(!cache.entries.contains_key("overflow"));
-        assert_eq!(Arc::strong_count(&transient), 1);
-        assert_eq!(cache.transient_fallbacks, 1);
-        drop((active_a, active_b, transient));
-    }
 }

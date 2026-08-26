@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+import pytest
 
 
 def _load_tool():
@@ -15,7 +16,7 @@ def _load_tool():
     return module
 
 
-def _report(module, *, elevated: bool, known: int, latency: float) -> dict:
+def _report(module, *, known: int, latency: float) -> dict:
     result = module.ScenarioResult(
         name="slow_append",
         description="test",
@@ -26,9 +27,7 @@ def _report(module, *, elevated: bool, known: int, latency: float) -> dict:
         journal_known_deltas=known,
         stable_latency_seconds=latency,
     )
-    report = module.build_report("elevated" if elevated else "non_elevated", [result], "now", 1.0)
-    report["process_elevated"] = elevated
-    return report
+    return module.build_report("broker", [result], "now", 1.0)
 
 
 def test_scenario_matrix_has_unique_names_and_covers_download_patterns():
@@ -50,15 +49,77 @@ def test_scenario_matrix_has_unique_names_and_covers_download_patterns():
     } <= set(names)
 
 
-def test_matrix_report_compares_privilege_coverage_and_latency():
+def test_baseline_report_enforces_journal_coverage_and_latency():
     module = _load_tool()
-    normal = _report(module, elevated=False, known=0, latency=8.0)
-    admin = _report(module, elevated=True, known=2, latency=6.0)
+    current = _report(module, known=2, latency=6.2)
+    baseline = _report(module, known=2, latency=6.0)
 
-    matrix = module.build_matrix_report(normal, admin, elevated_launched=True)
+    comparison = module.build_baseline_comparison(
+        current,
+        baseline,
+        maximum_regression_seconds=0.25,
+        maximum_regression_ratio=0.01,
+    )
 
-    assert matrix["summary"]["all_passed"] is True
-    assert matrix["summary"]["non_elevated_journal_coverage"] == 0.0
-    assert matrix["summary"]["elevated_journal_coverage"] == 1.0
-    assert matrix["summary"]["median_latency_delta_seconds"] == -2.0
-    assert "slow_append" in module.matrix_report_markdown(matrix)
+    assert comparison["passed"] is True
+    assert comparison["journal_coverage_complete"] is True
+    assert comparison["no_premature_processing"] is True
+    assert comparison["premature_attempts_not_regressed"] is True
+    assert comparison["scenarios"][0]["delta_seconds"] == pytest.approx(0.2)
+
+
+def test_baseline_comparison_allows_existing_probe_attempts_but_rejects_regressions():
+    module = _load_tool()
+    current = _report(module, known=2, latency=1.01)
+    baseline = _report(module, known=2, latency=1.0)
+    current["summary"]["premature_attempts"] = 1
+    baseline["summary"]["premature_attempts"] = 1
+
+    comparison = module.build_baseline_comparison(
+        current,
+        baseline,
+        maximum_regression_seconds=0.25,
+        maximum_regression_ratio=0.01,
+    )
+
+    assert comparison["passed"] is True
+    assert comparison["no_premature_processing"] is False
+    assert comparison["premature_attempts_not_regressed"] is True
+
+    current["summary"]["premature_attempts"] = 2
+    regression = module.build_baseline_comparison(
+        current,
+        baseline,
+        maximum_regression_seconds=0.25,
+        maximum_regression_ratio=0.01,
+    )
+    assert regression["passed"] is False
+    assert regression["premature_attempts_not_regressed"] is False
+
+
+def test_detection_scheduler_lifecycle_uses_blocking_targets_without_leaking_coroutines():
+    module = _load_tool()
+
+    class Scheduler:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+
+        def _start_blocking(self):
+            self.started += 1
+
+        def _stop_blocking(self):
+            self.stopped += 1
+
+        async def start(self):
+            raise AssertionError("the synchronous benchmark must not create an unawaited coroutine")
+
+        async def stop(self):
+            raise AssertionError("the synchronous benchmark must not create an unawaited coroutine")
+
+    scheduler = Scheduler()
+    module._start_detection_scheduler(scheduler)
+    module._stop_detection_scheduler(scheduler)
+
+    assert scheduler.started == 1
+    assert scheduler.stopped == 1

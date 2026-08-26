@@ -1,6 +1,5 @@
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -82,41 +81,52 @@ pub(crate) fn validate_ntfs_watch_root(path: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
-pub(crate) fn watch_filesystem_resource_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
-    #[cfg(windows)]
-    let volume_context_stats = windows::volume_context_stats();
-    #[cfg(not(windows))]
-    let volume_context_stats = (0usize, 0usize, 0u64, 0u64);
+pub(crate) fn watch_broker_acquire() -> PyResult<()> {
     #[cfg(windows)]
     {
-        dict.set_item("volume_contexts", volume_context_stats.count)?;
-        dict.set_item("volume_context_capacity", volume_context_stats.capacity)?;
-        dict.set_item("volume_context_evictions", volume_context_stats.evictions)?;
-        dict.set_item(
-            "volume_context_transient_fallbacks",
-            volume_context_stats.transient_fallbacks,
-        )?;
+        return sunpack_usn_core::broker_acquire().map_err(os_error);
     }
     #[cfg(not(windows))]
     {
-        dict.set_item("volume_contexts", volume_context_stats.0)?;
-        dict.set_item("volume_context_capacity", volume_context_stats.1)?;
-        dict.set_item("volume_context_evictions", volume_context_stats.2)?;
-        dict.set_item("volume_context_transient_fallbacks", volume_context_stats.3)?;
+        Err(PyRuntimeError::new_err("watch mode requires Windows NTFS"))
     }
-    Ok(dict.unbind())
 }
 
 #[pyfunction]
-pub(crate) fn clear_watch_filesystem_resources() -> PyResult<usize> {
+pub(crate) fn watch_broker_release() -> PyResult<()> {
     #[cfg(windows)]
     {
-        return Ok(windows::clear_volume_contexts());
+        return sunpack_usn_core::broker_release().map_err(os_error);
     }
     #[cfg(not(windows))]
     {
-        Ok(0)
+        Ok(())
+    }
+}
+
+#[pyfunction]
+pub(crate) fn watch_broker_is_connected() -> bool {
+    #[cfg(windows)]
+    {
+        return sunpack_usn_core::broker_is_connected();
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[pyfunction]
+pub(crate) fn watch_broker_ping_seconds() -> PyResult<f64> {
+    #[cfg(windows)]
+    {
+        return sunpack_usn_core::broker_ping()
+            .map(|elapsed| elapsed.as_secs_f64())
+            .map_err(os_error);
+    }
+    #[cfg(not(windows))]
+    {
+        Err(PyRuntimeError::new_err("watch mode requires Windows NTFS"))
     }
 }
 

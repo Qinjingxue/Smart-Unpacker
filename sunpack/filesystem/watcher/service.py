@@ -48,6 +48,18 @@ WAIT_FAILED = 0xFFFFFFFF
 INFINITE = 0xFFFFFFFF
 
 
+def _acquire_watch_broker() -> None:
+    from sunpack_native import watch_broker_acquire
+
+    watch_broker_acquire()
+
+
+def _release_watch_broker() -> None:
+    from sunpack_native import watch_broker_release
+
+    watch_broker_release()
+
+
 def service_config_from(config: dict) -> dict:
     service = config.get("watch") if isinstance(config.get("watch"), dict) else {}
     result = dict(service)
@@ -325,6 +337,7 @@ class WatchService:
         self._control_queue: asyncio.Queue[str | None] | None = None
         self._control_bridge_stop = threading.Event()
         self._control_bridge_thread: threading.Thread | None = None
+        self._broker_acquired = False
         self.log = WatchLogStore(os.path.join(self.state_dir, "events.jsonl"))
 
     @property
@@ -337,14 +350,17 @@ class WatchService:
         if not self._acquire_lock():
             self.log.write("service_lock_busy", lock_name=self.lock_name)
             return 2
-        self.log.write(
-            "service_started",
-            state_dir=self.state_dir,
-            roots=self.roots,
-            once=once,
-            initial_scan=bool(initial_scan),
-        )
         try:
+            _acquire_watch_broker()
+            self._broker_acquired = True
+            self.log.write("watch_broker_acquired")
+            self.log.write(
+                "service_started",
+                state_dir=self.state_dir,
+                roots=self.roots,
+                once=once,
+                initial_scan=bool(initial_scan),
+            )
             self.control_events.start()
             self._start_control_bridge()
             await self._start_scheduler(initial_scan=bool(initial_scan))
@@ -417,7 +433,26 @@ class WatchService:
         finally:
             self._stop_config_observer()
             self._stop_tray()
-            await self._stop_scheduler()
+            try:
+                await self._stop_scheduler()
+            except Exception as exc:
+                self.log.write(
+                    "scheduler_stop_error",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if self._broker_acquired:
+                try:
+                    _release_watch_broker()
+                    self.log.write("watch_broker_released")
+                except Exception as exc:
+                    self.log.write(
+                        "watch_broker_release_error",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                finally:
+                    self._broker_acquired = False
             self._stop_toast_host()
             self._stop_control_bridge()
             self.control_events.close()
