@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 import sys
 import traceback
@@ -16,9 +15,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = _parse_args(argv)
         os.chdir(runtime_working_directory())
-        from sunpack.platform.windows.process_qos import enter_background_processing
-
-        enter_background_processing()
         return _run_watch_service(
             once=args.once,
             no_tray=args.no_tray,
@@ -38,15 +34,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _run_watch_service(*, once: bool, no_tray: bool, initial_scan: bool = False) -> int:
-    from sunpack.coordinator.watch_runtime import run_watch_service
+    from sunpack.cli.persistent_process import submit_request
 
-    return asyncio.run(
-        run_watch_service(
-            tray_enabled=not no_tray,
-            once=once,
-            initial_scan=initial_scan,
-        )
-    )
+    argv = ["watch", "start"]
+    if once:
+        argv.append("--once")
+    if no_tray:
+        argv.append("--no-tray")
+    if initial_scan:
+        argv.append("--initial-scan")
+    return submit_request(argv)
 def _write_bootstrap_error(exc: BaseException) -> None:
     try:
         state_dir = get_resource_path(".sunpack_watch")

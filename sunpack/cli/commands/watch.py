@@ -6,13 +6,10 @@ from sunpack.cli.cli_types import CliCommandResult
 from sunpack.cli.persistent_runtime import load_request_config
 from sunpack.filesystem.watcher.service import (
     add_watch_roots,
-    is_watch_lock_active,
     list_watch_roots,
     remove_watch_roots,
     request_initial_scan,
     service_state_dir,
-    signal_reload,
-    signal_stop,
 )
 
 
@@ -60,15 +57,15 @@ async def handle(args, ctx):
         if action == "start":
             return await _handle_start(args, ctx)
         if action == "add":
-            return _handle_add(args, ctx)
+            return await _handle_add(args, ctx)
         if action == "remove":
-            return _handle_remove(args, ctx)
+            return await _handle_remove(args, ctx)
         if action == "list":
             return _handle_list()
         if action == "reload":
-            return _handle_reload(ctx)
+            return await _handle_reload(ctx)
         if action == "stop":
-            return _handle_stop(ctx)
+            return await _handle_stop(ctx)
         if action == "status":
             return _handle_status(ctx)
         if action == "startup":
@@ -79,24 +76,22 @@ async def handle(args, ctx):
 
 
 async def _handle_start(args, ctx):
-    from sunpack.coordinator.watch_runtime import run_watch_service
+    from sunpack.cli.runtime_state import require_runtime_host
 
-    code = await run_watch_service(
+    host = require_runtime_host()
+    if bool(getattr(args, "once", False)):
+        code = await host.run_watch_once(initial_scan=bool(getattr(args, "initial_scan", False)))
+        return code, CliCommandResult(command=COMMAND, inputs={"action": "start", "once": True}, summary={"exit_code": code})
+    summary = await host.start_watch(
         tray_enabled=not bool(getattr(args, "no_tray", False)),
-        once=bool(getattr(args, "once", False)),
         initial_scan=bool(getattr(args, "initial_scan", False)),
     )
-    if code == 2:
-        return EXIT_TASK_FAILED, CliCommandResult(
-            command=COMMAND,
-            inputs={"action": "start"},
-            summary={"running": True},
-            errors=[ctx.t("cli.watch.already_running")],
-        )
-    return code, CliCommandResult(command=COMMAND, inputs={"action": "start"}, summary={"exit_code": code})
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "start"}, summary=summary)
 
 
-def _handle_add(args, ctx):
+async def _handle_add(args, ctx):
+    from sunpack.cli.runtime_state import require_runtime_host
+
     start_requested = bool(getattr(args, "start", False))
     initial_scan_requested = bool(getattr(args, "initial_scan", False))
     roots_path, added = add_watch_roots(list(args.paths or []))
@@ -106,14 +101,19 @@ def _handle_add(args, ctx):
         if initial_scan_requested
         else None
     )
-    reload_event = signal_reload(config)
+    host = require_runtime_host()
+    reload_summary = await host.reload_watch() if host.watch_enabled else {"reloaded": False}
+    start_summary = None
+    if start_requested and not host.watch_enabled:
+        start_summary = await host.start_watch(initial_scan=initial_scan_requested)
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "add", "paths": list(args.paths or [])},
         summary={
             "roots_path": str(roots_path),
             "added": added,
-            "reload_event": reload_event,
+            "reload": reload_summary,
+            "start": start_summary,
             "start_requested": start_requested,
             "initial_scan_requested": initial_scan_requested,
             "initial_scan_request_path": str(scan_request_path) if scan_request_path else "",
@@ -122,13 +122,16 @@ def _handle_add(args, ctx):
     )
 
 
-def _handle_remove(args, ctx):
+async def _handle_remove(args, ctx):
+    from sunpack.cli.runtime_state import require_runtime_host
+
     roots_path, removed = remove_watch_roots(list(args.paths or []))
-    reload_event = signal_reload(load_request_config(ctx.cwd))
+    host = require_runtime_host()
+    reload_summary = await host.reload_watch() if host.watch_enabled else {"reloaded": False}
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "remove", "paths": list(args.paths or [])},
-        summary={"roots_path": str(roots_path), "removed": removed, "reload_event": reload_event},
+        summary={"roots_path": str(roots_path), "removed": removed, "reload": reload_summary},
         items=removed,
     )
 
@@ -143,24 +146,30 @@ def _handle_list():
     )
 
 
-def _handle_reload(ctx):
-    path = signal_reload(load_request_config(ctx.cwd))
-    return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary={"reload_event": path})
+async def _handle_reload(ctx):
+    from sunpack.cli.runtime_state import require_runtime_host
+
+    summary = await require_runtime_host().reload_watch()
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary=summary)
 
 
-def _handle_stop(ctx):
-    path = signal_stop(load_request_config(ctx.cwd))
-    return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary={"stop_event": path})
+async def _handle_stop(ctx):
+    from sunpack.cli.runtime_state import require_runtime_host
+
+    summary = await require_runtime_host().stop_watch()
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary=summary)
 
 
 def _handle_status(ctx):
+    from sunpack.cli.runtime_state import require_runtime_host
+
     config = load_request_config(ctx.cwd)
     _, roots = list_watch_roots()
-    running = _watch_running(config)
+    host_status = require_runtime_host().watch_status()
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "status"},
-        summary={"running": running, "count": len(roots), "state_dir": service_state_dir(config)},
+        summary={**host_status, "count": len(roots), "state_dir": service_state_dir(config)},
         items=roots,
     )
 
@@ -176,7 +185,3 @@ def _handle_startup(args):
         return 0, CliCommandResult(command=COMMAND, inputs={"action": "startup", "startup_action": "disable"}, summary={"enabled": False, "changed": changed})
     enabled, command = startup_status()
     return 0, CliCommandResult(command=COMMAND, inputs={"action": "startup", "startup_action": "status"}, summary={"enabled": enabled, "command": command})
-
-
-def _watch_running(config: dict) -> bool:
-    return is_watch_lock_active(config)

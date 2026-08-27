@@ -252,23 +252,20 @@ bool check_runtime_control_warm_start_decays_without_reusing_measurements() {
 
 bool check_native_sizing_scales_linearly_with_cpu() {
     using namespace sunpack::sevenzip;
-    NativeSizingOverrides foreground;
-    NativeSizingOverrides background;
-    background.background = true;
+    NativeSizingOverrides defaults;
     constexpr std::uint64_t abundant_memory = 64ULL << 30;
     struct Expected {
         std::size_t logical_processors;
         std::size_t foreground_jobs;
-        std::size_t background_jobs;
     };
     const Expected cases[] = {
-        {2, 1, 1},
-        {4, 2, 1},
-        {8, 4, 2},
-        {16, 8, 4},
-        {32, 16, 8},
-        {64, 32, 16},
-        {128, 64, 32},
+        {2, 1},
+        {4, 2},
+        {8, 4},
+        {16, 8},
+        {32, 16},
+        {64, 32},
+        {128, 64},
     };
     for (const auto& expected : cases) {
         const NativeMachineResources resources{
@@ -276,10 +273,8 @@ bool check_native_sizing_scales_linearly_with_cpu() {
             abundant_memory,
             abundant_memory,
         };
-        const auto foreground_plan = derive_native_sizing_plan(resources, foreground);
-        const auto background_plan = derive_native_sizing_plan(resources, background);
-        if (foreground_plan.initial_active_jobs != expected.foreground_jobs ||
-            background_plan.initial_active_jobs != expected.background_jobs) {
+        const auto plan = derive_native_sizing_plan(resources, defaults);
+        if (plan.initial_active_jobs != expected.foreground_jobs) {
             return false;
         }
     }

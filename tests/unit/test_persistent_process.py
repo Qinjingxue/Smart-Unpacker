@@ -343,6 +343,7 @@ def test_protocol_incrementally_parses_a_fragmented_request(monkeypatch):
         cwd = b"C:\\work"
         argv = [b"scan", b"archive.zip"]
         wire = bytearray(persistent_process._REQUEST_MAGIC)
+        wire.extend(persistent_process._RUNTIME_BUILD_ID)
         wire.extend(token)
         wire.extend(struct.pack("!III", 6, len(cwd), len(argv)))
         wire.extend(cwd)
@@ -363,9 +364,52 @@ def test_protocol_incrementally_parses_a_fragmented_request(monkeypatch):
         "stdout_tty": True,
         "stdin_tty": True,
     }
-    assert wire == persistent_process._STREAM_MAGIC + struct.pack("!BIi", 0, 4, 9)
+    assert wire == (
+        persistent_process._STREAM_MAGIC
+        + persistent_process._RUNTIME_BUILD_ID
+        + struct.pack("!BIi", 0, 4, 9)
+    )
     assert completed == [True]
     assert closed
+
+
+def test_protocol_rejects_a_different_runtime_build_id():
+    token = b"t" * 32
+
+    async def scenario():
+        protocol = persistent_process._PipeRequestProtocol(
+            token,
+            on_connected=lambda: None,
+            on_closed=lambda: None,
+            on_completed=lambda: None,
+            on_shutdown=lambda: None,
+        )
+
+        class Transport:
+            def __init__(self):
+                self.closed = False
+
+            def write(self, _data):
+                pass
+
+            def get_write_buffer_size(self):
+                return 0
+
+            def close(self):
+                self.closed = True
+
+        transport = Transport()
+        protocol.connection_made(transport)
+        build = b"X" * len(persistent_process._RUNTIME_BUILD_ID)
+        protocol.data_received(
+            persistent_process._REQUEST_MAGIC + build + token + struct.pack("!III", 0, 0, 0)
+        )
+        await asyncio.sleep(0)
+        return transport.closed, protocol._request_task
+
+    closed, task = asyncio.run(scenario())
+    assert closed is True
+    assert task is None
 
 
 def test_persistent_config_snapshot_reuses_a_source_without_mtime_checks(tmp_path, monkeypatch):
@@ -435,6 +479,10 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
         def is_idle(self):
             return True
 
+        def reconfigure_request(self, config):
+            self.config = config
+            events.append(("reconfigure", config["output"]["root"]))
+
         async def aclose(self, *, graceful=True):
             events.append(("close", graceful))
 
@@ -460,6 +508,7 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
             pass
         assert first_engine is second_engine
         assert events[:2] == [("init", "one"), ("start",)]
+        assert ("reconfigure", "two") in events
         assert persistent_runtime.persistent_runtime_is_idle()
         assert persistent_runtime.persistent_server_idle_seconds() == 9
         await persistent_runtime.close_persistent_runtime()

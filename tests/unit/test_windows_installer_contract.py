@@ -31,7 +31,7 @@ def test_installer_optionally_registers_watch_autostart():
     assert "Start SunPack Watch when Windows starts" in script
     assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in script
     assert 'ValueName: "SunPackWatchService"' in script
-    assert 'ValueData: """{app}\\sunpack-runtime.exe"" --_sunpack-mode=watch"' in script
+    assert 'ValueData: """{app}\\sunpack.exe"" watch start"' in script
     assert "Tasks: autostart" in script
     assert "uninsdeletevalue" in script
 

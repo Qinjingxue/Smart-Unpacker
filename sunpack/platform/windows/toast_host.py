@@ -275,6 +275,9 @@ class ToastHostManager:
                 arguments,
                 cwd=str(Path(host_path).parent),
             )
+            from sunpack.platform.windows.process_job import assign_child_process
+
+            assign_child_process(getattr(process, "pid", 0))
             with self._condition:
                 self._process = process
                 self._process_generation += 1

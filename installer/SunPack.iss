@@ -72,7 +72,7 @@ Type: filesandordirs; Name: "{commonappdata}\SunPack\Service"
 Type: dirifempty; Name: "{commonappdata}\SunPack"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-runtime.exe"" --_sunpack-mode=watch"; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"

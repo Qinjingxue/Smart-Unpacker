@@ -1193,9 +1193,7 @@ std::string requested_native_process_mode() {
     return configured && std::string(configured) == "background" ? "background" : "normal";
 }
 
-sunpack::sevenzip::NativeSizingOverrides configured_native_sizing_overrides(
-    bool background
-) noexcept {
+sunpack::sevenzip::NativeSizingOverrides configured_native_sizing_overrides() noexcept {
     sunpack::sevenzip::NativeSizingOverrides overrides;
     overrides.thread_capacity = configured_native_size(
         "SUNPACK_NATIVE_WORKER_THREAD_CAPACITY", 0, 0, 32);
@@ -1203,13 +1201,21 @@ sunpack::sevenzip::NativeSizingOverrides configured_native_sizing_overrides(
         "SUNPACK_NATIVE_INITIAL_ACTIVE_JOBS", 0, 0, 32);
     overrides.memory_budget_bytes = configured_native_size(
         "SUNPACK_NATIVE_MEMORY_BUDGET_BYTES", 0, 0);
-    overrides.background = background;
     return overrides;
 }
 
 bool apply_native_process_mode(const std::string& mode) noexcept {
 #ifdef _WIN32
-    return mode != "background" || SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_BEGIN) != 0;
+    const DWORD requested = mode == "background"
+        ? PROCESS_MODE_BACKGROUND_BEGIN
+        : PROCESS_MODE_BACKGROUND_END;
+    if (SetPriorityClass(GetCurrentProcess(), requested) != 0) {
+        return true;
+    }
+    const DWORD fallback = mode == "background"
+        ? BELOW_NORMAL_PRIORITY_CLASS
+        : NORMAL_PRIORITY_CLASS;
+    return SetPriorityClass(GetCurrentProcess(), fallback) != 0;
 #else
     return mode != "background";
 #endif
@@ -1395,6 +1401,7 @@ public:
 private:
     struct JobMetadata {
         std::string request_id;
+        bool foreground = true;
         std::size_t memory_reserve = 64U << 20;
         std::size_t dictionary_reserve = 0;
     };
@@ -1413,6 +1420,7 @@ private:
         if (metadata.request_id.empty()) {
             metadata.request_id = json_string_field(request, "job_id", "");
         }
+        metadata.foreground = json_string_field(request, "origin", "foreground") != "watch";
         if (json_uint_field_in_object(request, "native_memory_reserve_bytes", &value)) {
             metadata.memory_reserve = (std::max)(
                 std::size_t{1}, static_cast<std::size_t>((std::min)(
@@ -1445,6 +1453,11 @@ private:
 
     std::size_t select_job_locked() const noexcept {
         for (std::size_t index = 0; index < queue_.size(); ++index) {
+            if (queue_[index].metadata.foreground && can_admit_locked(queue_[index])) {
+                return index;
+            }
+        }
+        for (std::size_t index = 0; index < queue_.size(); ++index) {
             if (can_admit_locked(queue_[index])) {
                 return index;
             }
@@ -1466,6 +1479,7 @@ private:
             "{\"type\":\"native_event\",\"job_id\":\"" + json_escape(job_id) +
             "\",\"event\":\"" + event +
             "\",\"request_id\":\"" + json_escape(metadata.request_id) +
+            "\",\"origin\":\"" + std::string(metadata.foreground ? "foreground" : "watch") +
             "\",\"memory_reserve_bytes\":" + std::to_string(metadata.memory_reserve) +
             ",\"dictionary_reserve_bytes\":" + std::to_string(metadata.dictionary_reserve) +
             ",\"active_jobs\":" + std::to_string(active_jobs) +
@@ -1925,6 +1939,15 @@ int run_message(
             "\",\"accepted\":" + std::string(accepted ? "true" : "false") + "}");
         return accepted ? 0 : 1;
     }
+    if (command == "set_process_mode") {
+        const std::string mode = json_string_field(request, "mode", "normal") == "background"
+            ? "background"
+            : "normal";
+        const bool applied = apply_native_process_mode(mode);
+        print_json_line("{\"type\":\"process_mode_ack\",\"mode\":\"" + mode +
+            "\",\"applied\":" + std::string(applied ? "true" : "false") + "}");
+        return applied ? 0 : 1;
+    }
     if (command == "shutdown") {
         return 0;
     }
@@ -1940,7 +1963,7 @@ int main() {
     const auto resources = native_machine_resources();
     const auto sizing = sunpack::sevenzip::derive_native_sizing_plan(
         resources,
-        configured_native_sizing_overrides(requested_process_mode == "background"));
+        configured_native_sizing_overrides());
     const auto runtime_config = configured_native_runtime_config(sizing);
     NativeJobExecutor executor(sizing, runtime_config);
     const bool sizing_overridden = sizing.thread_capacity_overridden ||

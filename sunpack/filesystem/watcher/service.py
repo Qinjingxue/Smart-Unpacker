@@ -5,10 +5,9 @@ import asyncio
 import hashlib
 import json
 import os
-import threading
 import time
 from copy import deepcopy
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 
@@ -31,19 +30,14 @@ SERVICE_STATE = "state.json"
 INITIAL_SCAN_REQUEST = "initial_scan_request.json"
 INITIAL_SCAN_REQUEST_TTL_SECONDS = 60.0
 WATCH_ROOTS_FILENAME = "sunpack_watch_roots.txt"
-CONTROL_EVENT_PREFIX = "Local\\SunPackWatchControl"
 ROOTS_MUTEX_PREFIX = "Local\\SunPackWatchRoots"
-SERVICE_MUTEX_PREFIX = "Local\\SunPackWatchService"
 CONTROL_STOP = "stop"
 CONTROL_RELOAD = "reload"
 CONTROL_SCHEDULER_WAKEUP = "scheduler_wakeup"
 CONFIG_RELOAD_DEBOUNCE_SECONDS = 0.5
 
-MUTEX_ALL_ACCESS = 0x001F0001
 WAIT_ABANDONED = 0x00000080
-EVENT_MODIFY_STATE = 0x0002
 WAIT_OBJECT_0 = 0x00000000
-WAIT_TIMEOUT = 0x00000102
 WAIT_FAILED = 0xFFFFFFFF
 INFINITE = 0xFFFFFFFF
 
@@ -275,69 +269,40 @@ def list_watch_roots() -> tuple[Path, list[str]]:
     return roots_path, read_watch_roots(roots_path)
 
 
-def signal_reload(config: dict | None = None) -> str:
-    config = config or load_config()
-    return _signal_control_event(config, CONTROL_RELOAD)
-
-
-def signal_stop(config: dict | None = None) -> str:
-    config = config or load_config()
-    return _signal_control_event(config, CONTROL_STOP)
-
-
-def is_watch_lock_active(config: dict) -> bool:
-    handle = _open_named_mutex(watch_service_mutex_name(config))
-    if not handle:
-        return False
-    kernel32 = _kernel32()
-    try:
-        result = kernel32.WaitForSingleObject(handle, 0)
-        if result == WAIT_TIMEOUT:
-            return True
-        if result in {WAIT_OBJECT_0, WAIT_ABANDONED}:
-            kernel32.ReleaseMutex(handle)
-            return False
-        if result == WAIT_FAILED:
-            return False
-        return False
-    finally:
-        kernel32.CloseHandle(handle)
-
-
 class WatchService:
     def __init__(
         self,
         *,
         engine_factory=None,
+        pipeline_engine=None,
         tray_factory=None,
         group_coordinator_factory=None,
         toast_manager_factory=None,
     ):
-        if engine_factory is None:
+        if engine_factory is None and pipeline_engine is None:
             raise ValueError("WatchService requires an engine_factory.")
         self.engine_factory = engine_factory
+        self._owns_pipeline_engine = pipeline_engine is None
         self.group_coordinator_factory = group_coordinator_factory
         self.tray_factory = tray_factory
         self.toast_manager_factory = toast_manager_factory
         self.config = load_config()
         self.service_config = service_config_from(self.config)
         self.state_dir = service_state_dir(self.config)
-        self.lock_name = watch_service_mutex_name(self.config)
-        self.control_events = WatchControlEvents(self.config)
         self.scheduler: WatchScheduler | None = None
-        self.pipeline_engine = None
+        self.pipeline_engine = pipeline_engine
         self.config_observer: ConfigFileObserver | None = None
         self.tray = None
         self.toast_host = None
         self.toast_coordinator: WatchToastCoordinator | None = None
         self._stop_requested = False
-        self._lock_handle = None
         self._last_idle_tick_signature = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[str | None] | None = None
-        self._control_bridge_stop = threading.Event()
-        self._control_bridge_thread: threading.Thread | None = None
         self._broker_acquired = False
+        self._ready_event = asyncio.Event()
+        self._reload_lock = asyncio.Lock()
+        self._startup_error: BaseException | None = None
         self.log = WatchLogStore(os.path.join(self.state_dir, "events.jsonl"))
 
     @property
@@ -347,9 +312,6 @@ class WatchService:
     async def run(self, *, once: bool = False, initial_scan: bool = False) -> int:
         self._loop = asyncio.get_running_loop()
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
-        if not self._acquire_lock():
-            self.log.write("service_lock_busy", lock_name=self.lock_name)
-            return 2
         try:
             _acquire_watch_broker()
             self._broker_acquired = True
@@ -361,10 +323,11 @@ class WatchService:
                 once=once,
                 initial_scan=bool(initial_scan),
             )
-            self.control_events.start()
-            self._start_control_bridge()
+            if self._control_queue is None:
+                self._control_queue = asyncio.Queue()
             await self._start_scheduler(initial_scan=bool(initial_scan))
             self._start_tray()
+            self._ready_event.set()
             if once:
                 if self.scheduler is None:
                     return 0
@@ -428,6 +391,8 @@ class WatchService:
                     self._handle_control_event(control_event)
             return 0
         except Exception as exc:
+            self._startup_error = exc
+            self._ready_event.set()
             self.log.write("service_error", error=str(exc), error_type=type(exc).__name__)
             raise
         finally:
@@ -454,53 +419,23 @@ class WatchService:
                 finally:
                     self._broker_acquired = False
             self._stop_toast_host()
-            self._stop_control_bridge()
-            self.control_events.close()
-            self._release_lock()
             self.log.write("service_stopped", state_dir=self.state_dir)
 
-    def _start_control_bridge(self) -> None:
-        if self._loop is None:
-            raise RuntimeError("watch control bridge requires an event loop")
-        self._control_queue = asyncio.Queue()
-        self._control_bridge_stop.clear()
+    async def wait_ready(self) -> None:
+        await self._ready_event.wait()
+        if self._startup_error is not None:
+            raise self._startup_error
 
-        def bridge() -> None:
-            while not self._control_bridge_stop.is_set():
-                event = self.control_events.wait(None)
-                if event is not None and self._loop is not None and self._control_queue is not None:
-                    self._loop.call_soon_threadsafe(self._control_queue.put_nowait, event)
-
-        self._control_bridge_thread = threading.Thread(
-            target=bridge,
-            name="sunpack-watch-control-bridge",
-            daemon=True,
-        )
-        self._control_bridge_thread.start()
-
-    def _stop_control_bridge(self) -> None:
-        self._control_bridge_stop.set()
-        # The bridge waits indefinitely on Windows control events.  Wake it
-        # explicitly so teardown after an unexpected exception cannot leave a
-        # daemon thread blocked in WaitForMultipleObjects.
-        try:
-            self.control_events.wake_stop()
-        except Exception:
-            pass
-        thread = self._control_bridge_thread
-        self._control_bridge_thread = None
-        if thread is not None:
-            thread.join(timeout=1.0)
+    async def reload(self) -> None:
+        await self._reload_config()
 
     def request_stop(self) -> None:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(setattr, self, "_stop_requested", True)
         else:
             self._stop_requested = True
-        try:
-            self.control_events.wake_stop()
-        except Exception as exc:
-            self.log.write("service_stop_wakeup_error", error=str(exc), error_type=type(exc).__name__)
+        if self._loop is not None and self._control_queue is not None:
+            self._loop.call_soon_threadsafe(self._control_queue.put_nowait, CONTROL_STOP)
 
     def request_reload(self) -> None:
         if self._loop is not None:
@@ -528,11 +463,14 @@ class WatchService:
             if self.toast_host is not None
             else None
         )
-        pipeline_engine = None
+        pipeline_engine = self.pipeline_engine if not self._owns_pipeline_engine else None
         scheduler = None
         try:
-            pipeline_engine = self.engine_factory(run_config)
-            await pipeline_engine.__aenter__()
+            if pipeline_engine is None:
+                pipeline_engine = self.engine_factory(run_config)
+                await pipeline_engine.__aenter__()
+            else:
+                pipeline_engine.reconfigure_request(run_config)
             scheduler = WatchScheduler(
                 run_config,
                 roots,
@@ -561,7 +499,7 @@ class WatchService:
                     await scheduler.stop()
                 except Exception:
                     pass
-            if pipeline_engine is not None:
+            if pipeline_engine is not None and self._owns_pipeline_engine:
                 try:
                     await pipeline_engine.aclose(graceful=True)
                 except Exception:
@@ -575,13 +513,16 @@ class WatchService:
     async def _stop_scheduler(self) -> None:
         if self.scheduler is not None:
             await self.scheduler.stop()
+            drain = getattr(self.scheduler, "drain", None)
+            if drain is not None:
+                await drain()
         self.scheduler = None
         if self.toast_coordinator is not None:
             self.toast_coordinator.stop()
         self.toast_coordinator = None
-        if self.pipeline_engine is not None:
+        if self.pipeline_engine is not None and self._owns_pipeline_engine:
             await self.pipeline_engine.aclose(graceful=True)
-        self.pipeline_engine = None
+            self.pipeline_engine = None
         self._last_idle_tick_signature = None
 
     def _restart_toast_host(self, config: dict) -> None:
@@ -625,10 +566,10 @@ class WatchService:
 
     def _handle_control_event(self, event: str | None) -> None:
         if event == CONTROL_STOP:
-            self.request_stop()
+            self._stop_requested = True
             return
         if event == CONTROL_RELOAD:
-            self._reload_config()
+            asyncio.create_task(self._reload_config())
 
     def _should_log_scheduler_tick(self, result) -> bool:
         if result.processed or result.failed or result.errors:
@@ -656,7 +597,11 @@ class WatchService:
         return None
 
     def _wake_scheduler(self) -> None:
-        self.control_events.wake_scheduler()
+        if self._loop is not None and self._control_queue is not None:
+            self._loop.call_soon_threadsafe(
+                self._control_queue.put_nowait,
+                CONTROL_SCHEDULER_WAKEUP,
+            )
 
     def _start_config_observer(self) -> None:
         if self.config_observer is not None:
@@ -688,12 +633,14 @@ class WatchService:
         self.config_observer = None
 
     def _wake_config_reload(self) -> None:
-        try:
-            self.control_events.wake_reload()
-        except Exception as exc:
-            self.log.write("config_reload_wakeup_error", error=str(exc), error_type=type(exc).__name__)
+        if self._loop is not None and self._control_queue is not None:
+            self._loop.call_soon_threadsafe(self._control_queue.put_nowait, CONTROL_RELOAD)
 
     async def _reload_config(self) -> None:
+        async with self._reload_lock:
+            await self._reload_config_unlocked()
+
+    async def _reload_config_unlocked(self) -> None:
         previous = (self.config, self.service_config, self.state_dir, self.log)
         try:
             new_config = load_config()
@@ -728,100 +675,11 @@ class WatchService:
         self._start_tray()
         self.log.write("service_reloaded", state_dir=self.state_dir, roots=self.roots)
 
-    def _acquire_lock(self) -> bool:
-        kernel32 = _kernel32()
-        handle = kernel32.CreateMutexW(None, False, self.lock_name)
-        if not handle:
-            raise OSError(ctypes.GetLastError(), f"CreateMutexW failed for {self.lock_name}")
-        result = kernel32.WaitForSingleObject(handle, 0)
-        if result in {WAIT_OBJECT_0, WAIT_ABANDONED}:
-            self._lock_handle = handle
-            return True
-        kernel32.CloseHandle(handle)
-        if result == WAIT_TIMEOUT:
-            return False
-        if result == WAIT_FAILED:
-            raise OSError(ctypes.GetLastError(), f"WaitForSingleObject failed for {self.lock_name}")
-        raise OSError(result, f"Unexpected WaitForSingleObject result for {self.lock_name}")
-
-    def _release_lock(self) -> None:
-        if self._lock_handle is not None:
-            kernel32 = _kernel32()
-            kernel32.ReleaseMutex(self._lock_handle)
-            kernel32.CloseHandle(self._lock_handle)
-            self._lock_handle = None
-
-
-class WatchControlEvents:
-    def __init__(self, config: dict):
-        self.names = watch_control_event_names(config)
-        self._kernel32 = _kernel32()
-        self._handles: list[int] = []
-
-    def start(self) -> None:
-        if self._handles:
-            return
-        self._handles = [
-            _create_named_event(self._kernel32, self.names[CONTROL_STOP]),
-            _create_named_event(self._kernel32, self.names[CONTROL_RELOAD]),
-            _create_named_event(self._kernel32, self.names[CONTROL_SCHEDULER_WAKEUP]),
-        ]
-
-    def wake_scheduler(self) -> bool:
-        return _set_named_event(self.names[CONTROL_SCHEDULER_WAKEUP])
-
-    def wake_reload(self) -> bool:
-        return _set_named_event(self.names[CONTROL_RELOAD])
-
-    def wake_stop(self) -> bool:
-        return _set_named_event(self.names[CONTROL_STOP])
-
-    def wait(self, timeout_seconds: float | None) -> str | None:
-        if not self._handles:
-            return None
-        timeout_ms = INFINITE if timeout_seconds is None else max(0, int(float(timeout_seconds) * 1000))
-        handle_array = (wintypes.HANDLE * len(self._handles))(*self._handles)
-        result = self._kernel32.WaitForMultipleObjects(len(self._handles), handle_array, False, timeout_ms)
-        if result == WAIT_OBJECT_0:
-            return CONTROL_STOP
-        if result == WAIT_OBJECT_0 + 1:
-            return CONTROL_RELOAD
-        if result == WAIT_OBJECT_0 + 2:
-            return CONTROL_SCHEDULER_WAKEUP
-        if result == WAIT_TIMEOUT:
-            return None
-        if result == WAIT_FAILED:
-            raise OSError(ctypes.GetLastError(), "WaitForMultipleObjects failed")
-        return None
-
-    def close(self) -> None:
-        for handle in self._handles:
-            if handle:
-                self._kernel32.CloseHandle(handle)
-        self._handles = []
-
-
-def watch_control_event_names(config: dict | None = None) -> dict[str, str]:
-    identity = os.path.abspath(str(watch_roots_path())).lower()
-    digest = hashlib.sha256(identity.encode("utf-8", errors="ignore")).hexdigest()[:24]
-    return {
-        CONTROL_STOP: f"{CONTROL_EVENT_PREFIX}-{digest}-stop",
-        CONTROL_RELOAD: f"{CONTROL_EVENT_PREFIX}-{digest}-reload",
-        CONTROL_SCHEDULER_WAKEUP: f"{CONTROL_EVENT_PREFIX}-{digest}-scheduler-wakeup",
-    }
-
-
 def watch_roots_mutex_name(path: Path | None = None) -> str:
     roots_path = path or watch_roots_path()
     identity = os.path.abspath(str(roots_path)).lower()
     digest = hashlib.sha256(identity.encode("utf-8", errors="ignore")).hexdigest()[:24]
     return f"{ROOTS_MUTEX_PREFIX}-{digest}"
-
-
-def watch_service_mutex_name(config: dict | None = None) -> str:
-    identity = os.path.abspath(str(watch_roots_path())).lower()
-    digest = hashlib.sha256(identity.encode("utf-8", errors="ignore")).hexdigest()[:24]
-    return f"{SERVICE_MUTEX_PREFIX}-{digest}"
 
 
 @contextmanager
@@ -844,60 +702,14 @@ def _watch_roots_mutex(path: Path | None = None):
         kernel32.CloseHandle(handle)
 
 
-def _signal_control_event(config: dict, event: str) -> str:
-    name = watch_control_event_names(config)[event]
-    _set_named_event(name)
-    return name
-
-
-def _create_named_event(kernel32, name: str) -> int:
-    handle = kernel32.CreateEventW(None, False, False, name)
-    if not handle:
-        raise OSError(ctypes.GetLastError(), f"CreateEventW failed for {name}")
-    return handle
-
-
-def _set_named_event(name: str) -> bool:
-    kernel32 = _kernel32()
-    handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, name)
-    if not handle:
-        return False
-    try:
-        if not kernel32.SetEvent(handle):
-            raise OSError(ctypes.GetLastError(), f"SetEvent failed for {name}")
-        return True
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _open_named_mutex(name: str) -> int:
-    kernel32 = _kernel32()
-    return kernel32.OpenMutexW(MUTEX_ALL_ACCESS, False, name)
-
-
 def _kernel32():
     kernel32 = ctypes.windll.kernel32
-    kernel32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.CreateEventW.restype = wintypes.HANDLE
     kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
-    kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.OpenEventW.restype = wintypes.HANDLE
-    kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.OpenMutexW.restype = wintypes.HANDLE
-    kernel32.SetEvent.argtypes = [wintypes.HANDLE]
-    kernel32.SetEvent.restype = wintypes.BOOL
     kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
     kernel32.ReleaseMutex.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.WaitForMultipleObjects.argtypes = [
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.HANDLE),
-        wintypes.BOOL,
-        wintypes.DWORD,
-    ]
-    kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
     return kernel32

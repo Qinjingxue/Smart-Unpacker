@@ -21,8 +21,35 @@ from sunpack.support.runtime_identity import (
 
 SERVER_ARG = "--persistent-server"
 SHUTDOWN_ARG = "--persistent-shutdown"
-_REQUEST_MAGIC = b"SPK1"
-_STREAM_MAGIC = b"SPS1"
+_REQUEST_MAGIC = b"SPK2"
+_STREAM_MAGIC = b"SPS2"
+
+
+def _runtime_binary_build_id() -> bytes:
+    value = 0xCBF29CE484222325
+    try:
+        with open_service_file(sys.executable, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                for byte in chunk:
+                    value ^= byte
+                    value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    except OSError:
+        return b"0000000000000000"
+    return f"{value:016x}".encode("ascii")
+
+
+_RUNTIME_BUILD_ID = _runtime_binary_build_id()
+
+
+def _runtime_binary_stamp() -> str:
+    try:
+        metadata = os.stat(sys.executable)
+    except OSError:
+        return "unavailable"
+    return f"{int(metadata.st_size):x}-{int(metadata.st_mtime_ns):x}"
+
+
+_RUNTIME_BINARY_STAMP = _runtime_binary_stamp()
 _MAX_FIELD_BYTES = 16 * 1024 * 1024
 _MAX_REQUEST_BYTES = 64 * 1024 * 1024
 _MAX_ARGC = 4096
@@ -289,11 +316,16 @@ def _open_pipe(name: str) -> _PipeConnection | None:
 def _read_state() -> tuple[str, bytes] | None:
     try:
         with open_service_file(state_path(), "r", encoding="ascii") as stream:
-            pipe, token_hex = stream.read().splitlines()[:2]
+            pipe, token_hex, build_id, _pid, binary_stamp = stream.read().splitlines()[:5]
         token = bytes.fromhex(token_hex)
     except (FileNotFoundError, OSError, ValueError):
         return None
-    if len(token) != 32 or not pipe.startswith(_PIPE_PREFIX):
+    if (
+        len(token) != 32
+        or not pipe.startswith(_PIPE_PREFIX)
+        or build_id != _RUNTIME_BUILD_ID.decode("ascii")
+        or binary_stamp != _RUNTIME_BINARY_STAMP
+    ):
         return None
     return pipe, token
 
@@ -321,11 +353,11 @@ def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
         flags = ((1 if payload.get("shutdown") else 0)
                  | (2 if payload.get("stdout_tty") else 0)
                  | (4 if payload.get("stdin_tty") else 0))
-        body = [token, struct.pack("!III", flags, len(cwd), len(argv)), cwd]
+        body = [_RUNTIME_BUILD_ID, token, struct.pack("!III", flags, len(cwd), len(argv)), cwd]
         for item in argv:
             body.extend((struct.pack("!I", len(item)), item))
         connection.sendall(_REQUEST_MAGIC + b"".join(body))
-        if _recv_exact(connection, 4) != _STREAM_MAGIC:
+        if _recv_exact(connection, 4) != _STREAM_MAGIC or _recv_exact(connection, len(_RUNTIME_BUILD_ID)) != _RUNTIME_BUILD_ID:
             return None
         return _recv_stream(connection)
     except (EOFError, OSError, ValueError):
@@ -367,6 +399,7 @@ class _PipeRequestProtocol(asyncio.Protocol):
         self._write_ready.set()
         self._closed = False
         self._counted_active = False
+        self._connected_at = time.monotonic()
 
     @property
     def output_queue(self) -> asyncio.Queue[bytes | None]:
@@ -415,12 +448,16 @@ class _PipeRequestProtocol(asyncio.Protocol):
 
     def _parse_request(self) -> dict[str, Any] | None:
         if self._stage == "header":
-            header_size = 4 + len(self._token) + 12
+            header_size = 4 + len(_RUNTIME_BUILD_ID) + len(self._token) + 12
             if len(self._buffer) < header_size:
                 return None
             if bytes(self._buffer[:4]) != _REQUEST_MAGIC:
                 raise ValueError("invalid persistent request magic")
-            token_start = 4
+            build_start = 4
+            build_end = build_start + len(_RUNTIME_BUILD_ID)
+            if bytes(self._buffer[build_start:build_end]) != _RUNTIME_BUILD_ID:
+                raise ValueError("invalid persistent runtime build id")
+            token_start = build_end
             token_end = token_start + len(self._token)
             if bytes(self._buffer[token_start:token_end]) != self._token:
                 raise ValueError("invalid persistent request token")
@@ -495,8 +532,24 @@ class _PipeRequestProtocol(asyncio.Protocol):
         waiter.set_result(text)
 
     async def _run_request(self, payload: dict[str, Any]) -> None:
+        from sunpack.cli.runtime_state import runtime_host
+
+        host = runtime_host()
+        foreground_active = False
+        exit_code: int | None = None
+        started_at = time.monotonic()
         try:
-            await self.send_frame(_STREAM_MAGIC)
+            if host is not None and not payload.get("shutdown"):
+                await host.foreground_started()
+                foreground_active = True
+                argv = list(payload.get("argv") or [])
+                host.log_event(
+                    "foreground_request_started",
+                    origin="foreground",
+                    command=str(argv[0] if argv else ""),
+                    queue_ms=max(0.0, (started_at - self._connected_at) * 1000.0),
+                )
+            await self.send_frame(_STREAM_MAGIC + _RUNTIME_BUILD_ID)
             if payload.get("shutdown"):
                 await self.send_frame(struct.pack("!BIi", 0, 4, 0))
                 await self.flush_output()
@@ -511,6 +564,14 @@ class _PipeRequestProtocol(asyncio.Protocol):
         except Exception:
             pass
         finally:
+            if foreground_active:
+                host.log_event(
+                    "foreground_request_finished",
+                    origin="foreground",
+                    exit_code=exit_code,
+                    duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+                )
+                await host.foreground_finished()
             await self._finish_after_output()
 
     async def _pump_output(self) -> None:
@@ -584,10 +645,19 @@ async def run_server() -> int:
         persistent_runtime_is_idle,
         persistent_server_idle_seconds,
     )
+    from sunpack.cli.runtime_host import RuntimeHost
+    from sunpack.cli.runtime_state import set_runtime_host
 
     enable_persistent_runtime()
+    runtime_host = RuntimeHost(log_path=state_path() + ".events.jsonl")
+    set_runtime_host(runtime_host)
     shutdown = asyncio.Event()
-    state = {"served": False, "last_completed": time.monotonic(), "active": 0}
+    state = {
+        "served": False,
+        "last_completed": time.monotonic(),
+        "active": 0,
+        "exit_reason": "shutdown",
+    }
 
     def connected() -> None:
         state["active"] += 1
@@ -599,11 +669,19 @@ async def run_server() -> int:
         state["served"] = True
         state["last_completed"] = time.monotonic()
 
+    def requested_shutdown() -> None:
+        state["exit_reason"] = "cli_shutdown"
+        shutdown.set()
+
     loop = asyncio.get_running_loop()
     start_serving_pipe = getattr(loop, "start_serving_pipe", None)
     if start_serving_pipe is None:
-        await close_persistent_runtime()
-        lock_stream.close()
+        try:
+            await runtime_host.close(exit_reason="pipe_transport_unavailable")
+        finally:
+            set_runtime_host(None)
+            await close_persistent_runtime()
+            lock_stream.close()
         return 1
 
     name = pipe_name()
@@ -614,10 +692,21 @@ async def run_server() -> int:
             on_connected=connected,
             on_closed=closed,
             on_completed=completed,
-            on_shutdown=shutdown.set,
+            on_shutdown=requested_shutdown,
         )
 
-    servers = await start_serving_pipe(protocol_factory, name)
+    from sunpack.platform.windows.secure_pipe import start_serving_current_user_pipe
+
+    try:
+        servers = await start_serving_current_user_pipe(loop, protocol_factory, name)
+    except Exception:
+        try:
+            await runtime_host.close(exit_reason="pipe_create_failed")
+        finally:
+            set_runtime_host(None)
+            await close_persistent_runtime()
+            lock_stream.close()
+        return 1
     _write_state(name, token)
 
     async def monitor_idle() -> None:
@@ -625,12 +714,15 @@ async def run_server() -> int:
             await asyncio.sleep(0.25)
             if state["active"]:
                 continue
+            if runtime_host.watch_enabled:
+                continue
             if _idle_shutdown_due(
                 served_request=bool(state["served"]),
                 last_completed_at=float(state["last_completed"]),
                 idle_seconds=persistent_server_idle_seconds(),
                 runtime_idle=persistent_runtime_is_idle(),
             ):
+                state["exit_reason"] = "idle_timeout"
                 shutdown.set()
 
     monitor = asyncio.create_task(monitor_idle(), name="persistent-idle-monitor")
@@ -642,8 +734,17 @@ async def run_server() -> int:
         await asyncio.gather(monitor, return_exceptions=True)
         _close_pipe_servers(servers)
         _remove_state_if_owned(name, token)
-        await close_persistent_runtime()
-        lock_stream.close()
+        try:
+            await runtime_host.close(exit_reason=str(state["exit_reason"]))
+        finally:
+            set_runtime_host(None)
+            try:
+                await close_persistent_runtime()
+            finally:
+                from sunpack.platform.windows.process_job import close_child_job
+
+                close_child_job()
+                lock_stream.close()
 
 
 def _close_pipe_servers(servers: list[Any]) -> None:
@@ -677,7 +778,11 @@ def _recv_exact(connection, size: int) -> bytes:
 
 
 def _recv_request(connection, token: bytes) -> dict[str, Any] | None:
-    if _recv_exact(connection, 4) != _REQUEST_MAGIC or _recv_exact(connection, len(token)) != token:
+    if (
+        _recv_exact(connection, 4) != _REQUEST_MAGIC
+        or _recv_exact(connection, len(_RUNTIME_BUILD_ID)) != _RUNTIME_BUILD_ID
+        or _recv_exact(connection, len(token)) != token
+    ):
         return None
     flags, cwd_size, argc = struct.unpack("!III", _recv_exact(connection, 12))
     if cwd_size > _MAX_FIELD_BYTES or argc > _MAX_ARGC:
@@ -862,7 +967,10 @@ def _write_state(name: str, token: bytes) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = f"{path}.{os.getpid()}.tmp"
     with open_service_file(temporary, "w", encoding="ascii", newline="\n") as stream:
-        stream.write(f"{name}\n{token.hex()}\n")
+        stream.write(
+            f"{name}\n{token.hex()}\n{_RUNTIME_BUILD_ID.decode('ascii')}\n"
+            f"{os.getpid()}\n{_RUNTIME_BINARY_STAMP}\n"
+        )
     os.replace(temporary, path)
 
 
@@ -870,8 +978,14 @@ def _remove_state_if_owned(name: str, token: bytes) -> bool:
     path = state_path()
     try:
         with open_service_file(path, "r", encoding="ascii") as stream:
-            state_name, token_hex = stream.read().splitlines()[:2]
-        if state_name != name or bytes.fromhex(token_hex) != token:
+            state_name, token_hex, build_id, pid_text, binary_stamp = stream.read().splitlines()[:5]
+        if (
+            state_name != name
+            or bytes.fromhex(token_hex) != token
+            or build_id != _RUNTIME_BUILD_ID.decode("ascii")
+            or int(pid_text) != os.getpid()
+            or binary_stamp != _RUNTIME_BINARY_STAMP
+        ):
             return False
         os.remove(path)
         return True

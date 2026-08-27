@@ -65,6 +65,41 @@ def test_broker_round_robins_requests_instead_of_draining_one_batch():
     asyncio.run(scenario())
 
 
+def test_broker_dispatches_waiting_foreground_before_watch_without_preemption():
+    async def scenario():
+        broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=8)
+        release = threading.Event()
+        started = []
+
+        def operation(label):
+            started.append(label)
+            if label == "active-watch":
+                release.wait(timeout=2)
+            return label
+
+        try:
+            active = asyncio.create_task(
+                broker.run("extract", "active", operation, "active-watch", request_id="watch-1", origin="watch")
+            )
+            while started != ["active-watch"]:
+                await asyncio.sleep(0)
+            waiting_watch = asyncio.create_task(
+                broker.run("extract", "watch", operation, "waiting-watch", request_id="watch-2", origin="watch")
+            )
+            foreground = asyncio.create_task(
+                broker.run("extract", "cli", operation, "foreground", request_id="cli-1", origin="foreground")
+            )
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(active, waiting_watch, foreground)
+            assert started == ["active-watch", "foreground", "waiting-watch"]
+        finally:
+            release.set()
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
 def test_map_unbounded_starts_every_logical_item_without_a_caller_slot_limit():
     async def scenario():
         started = []

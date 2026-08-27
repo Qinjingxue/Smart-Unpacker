@@ -227,9 +227,7 @@ async def async_main(
 def _should_submit_to_persistent_server(argv: list[str]) -> bool:
     if not runtime_id_available() or not argv or any(item in {"-h", "--help"} for item in argv):
         return False
-    # The watch service itself is long-lived and continues to have its own
-    # process lifecycle. Its management subcommands are short requests.
-    return not (len(argv) >= 2 and argv[0] == "watch" and argv[1] == "start")
+    return True
 
 
 if __name__ == "__main__":

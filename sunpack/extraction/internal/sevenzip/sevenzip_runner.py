@@ -115,10 +115,7 @@ def _apply_native_environment(environment: dict[str, str], process_config: dict)
         "SUNPACK_NATIVE_MEMORY_RESUME_AVAILABLE_BYTES",
     )
     set_int("max_queue_jobs", "SUNPACK_NATIVE_MAX_QUEUE_JOBS")
-    process_mode = str(process_config.get("windows_process_mode") or "").strip().lower()
     environment.pop("SUNPACK_NATIVE_PROCESS_MODE", None)
-    if process_mode == "background":
-        environment["SUNPACK_NATIVE_PROCESS_MODE"] = process_mode
     return environment
 
 
@@ -187,6 +184,9 @@ class _NativeWorkerProcess:
             cwd=runtime_working_directory(),
             env=environment,
         )
+        from sunpack.platform.windows.process_job import assign_child_process
+
+        assign_child_process(getattr(self.process, "pid", 0))
         threading.Thread(target=self._dispatch_stdout, args=(self.process.stdout,), daemon=True).start()
         threading.Thread(target=self._pump, args=(self.process.stderr, self.stderr_queue), daemon=True).start()
 
@@ -464,6 +464,7 @@ class _AsyncNativeWorkerProcess:
         self._closing = False
         self.handshake: dict[str, Any] = {}
         self._ready: asyncio.Future | None = None
+        self._process_mode_waiter: asyncio.Future | None = None
 
     async def start(self) -> None:
         if self.is_alive():
@@ -488,6 +489,9 @@ class _AsyncNativeWorkerProcess:
             cwd=runtime_working_directory(),
             env=environment,
         )
+        from sunpack.platform.windows.process_job import assign_child_process
+
+        assign_child_process(getattr(self.process, "pid", 0))
         self._ready = asyncio.get_running_loop().create_future()
         self._stdout_task = asyncio.create_task(self._dispatch_stdout(), name="sunpack-native-stdout")
         self._tasks = [
@@ -544,6 +548,22 @@ class _AsyncNativeWorkerProcess:
     async def cancel(self, job_id: str) -> None:
         await self.send(json.dumps({"worker_command": "cancel", "job_id": job_id}, separators=(",", ":")))
 
+    async def set_process_mode(self, *, background: bool) -> dict[str, Any]:
+        current = self._process_mode_waiter
+        if current is not None and not current.done():
+            await current
+        waiter = asyncio.get_running_loop().create_future()
+        self._process_mode_waiter = waiter
+        mode = "background" if background else "normal"
+        await self.send(json.dumps({"worker_command": "set_process_mode", "mode": mode}, separators=(",", ":")))
+        try:
+            result = dict(await asyncio.wait_for(asyncio.shield(waiter), timeout=2.0))
+            result["worker_pid"] = int(getattr(self.process, "pid", 0) or 0)
+            return result
+        finally:
+            if self._process_mode_waiter is waiter:
+                self._process_mode_waiter = None
+
     def take_stderr(self) -> list[str]:
         lines = self._stderr_lines
         self._stderr_lines = []
@@ -561,8 +581,15 @@ class _AsyncNativeWorkerProcess:
                 job_id = str(payload.get("job_id") or "") if isinstance(payload, dict) else ""
                 if isinstance(payload, dict) and payload.get("type") == "worker_ready":
                     self.handshake = dict(payload)
+                    self.handshake["worker_pid"] = int(getattr(self.process, "pid", 0) or 0)
                     if self._ready is not None and not self._ready.done():
                         self._ready.set_result(self.handshake)
+                    continue
+                if isinstance(payload, dict) and payload.get("type") == "process_mode_ack":
+                    self.handshake["process_mode"] = str(payload.get("mode") or "normal")
+                    waiter = self._process_mode_waiter
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(dict(payload))
                     continue
                 state = self._jobs.get(job_id)
                 if state is None:
@@ -584,6 +611,8 @@ class _AsyncNativeWorkerProcess:
         finally:
             if self._ready is not None and not self._ready.done():
                 self._ready.set_exception(RuntimeError("sevenzip_worker exited before startup completed"))
+            if self._process_mode_waiter is not None and not self._process_mode_waiter.done():
+                self._process_mode_waiter.set_exception(RuntimeError("sevenzip_worker exited during QoS transition"))
             if not self._closing:
                 self._fail_all_jobs("sevenzip_worker exited before job completion")
             self._deadline_changed.set()
@@ -749,6 +778,7 @@ class SevenZipRunner:
         self.progress_callback = None
         self.native_event_callback = None
         self.request_id = ""
+        self.origin = "foreground"
         self.worker_path = None
         self.seven_zip_dll_path = None
         self._worker_holder: _NativeWorkerHolder | None = shared_worker_holder
@@ -772,6 +802,7 @@ class SevenZipRunner:
         runner.seven_zip_dll_path = self.seven_zip_dll_path
         runner.native_event_callback = self.native_event_callback
         runner.request_id = self.request_id
+        runner.origin = self.origin
         return runner
 
     def bind_event_loop(self, loop) -> None:
@@ -780,6 +811,10 @@ class SevenZipRunner:
     async def start_asyncio(self) -> dict[str, Any]:
         worker = await self._async_worker_holder_or_create().get_or_start(None)
         return dict(worker.handshake)
+
+    async def set_process_mode_asyncio(self, *, background: bool) -> dict[str, Any]:
+        worker = await self._async_worker_holder_or_create().get_or_start(None)
+        return await worker.set_process_mode(background=background)
 
     def extract_attempt(
         self,
@@ -1216,6 +1251,7 @@ class SevenZipRunner:
             "job_id": attempt_id,
             "attempt_id": attempt_id,
             "request_id": str(self.request_id or ""),
+            "origin": "watch" if self.origin == "watch" else "foreground",
             "file_id": str(getattr(task, "key", "") or archive_path),
             "stage": "extract",
             "seven_zip_dll_path": self._seven_zip_dll_path(),

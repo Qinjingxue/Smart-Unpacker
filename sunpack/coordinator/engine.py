@@ -35,7 +35,7 @@ from sunpack.support.path_keys import path_key
 from sunpack.support.archive_sessions import release_archive_sessions_under
 from sunpack.support.resource_lifecycle import TaskResourceScope, promotion_barrier
 from sunpack.detection.options import DetectionOptions
-from sunpack.coordinator.async_work import AsyncWorkBroker, CancellationToken, map_bounded
+from sunpack.coordinator.async_work import AsyncWorkBroker, CancellationToken, CURRENT_ORIGIN, map_bounded
 
 
 @dataclass
@@ -46,6 +46,8 @@ class _Submission:
     user_passwords: tuple[str, ...]
     builtin_passwords: tuple[str, ...]
     config: dict
+    origin: str = "foreground"
+    detection_options: DetectionOptions | None = None
     stdout: TextIO | None = None
     stderr: TextIO | None = None
     progress_callback: Callable[[Any, dict[str, Any]], None] | None = None
@@ -160,6 +162,8 @@ class PipelineEngine:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         progress_callback: Callable[[Any, dict[str, Any]], None] | None = None,
+        origin: str = "foreground",
+        detection_options: DetectionOptions | None = None,
     ) -> PipelineResponse:
         if not self._started or self._closed:
             raise RuntimeError("PipelineEngine must be entered before run")
@@ -180,6 +184,8 @@ class PipelineEngine:
             user_passwords=user_passwords,
             builtin_passwords=builtin_passwords,
             config=request_config,
+            origin="watch" if str(origin).lower() == "watch" else "foreground",
+            detection_options=detection_options or self.detection_options,
             stdout=stdout,
             stderr=stderr,
             progress_callback=progress_callback,
@@ -192,8 +198,9 @@ class PipelineEngine:
         task = asyncio.current_task()
         if task is not None:
             self._active_requests[submission.request_id] = task
-        with resource_scope.activate():
-            try:
+        origin_marker = CURRENT_ORIGIN.set(submission.origin)
+        try:
+            with resource_scope.activate():
                 target_paths = [target.path for target in submission.targets]
                 while not self._path_leases.try_acquire(submission.request_id, target_paths):
                     cancellation.raise_if_cancelled()
@@ -201,23 +208,24 @@ class PipelineEngine:
                 runtime = self._request_runtime_factory(
                     self._services,
                     submission,
-                    self.detection_options,
+                    submission.detection_options or self.detection_options,
                     self._path_leases,
                 )
                 response = await runtime.execute_async(self._broker, cancellation)
                 self._remember_recent_passwords(response.recent_passwords)
                 committer = output_committer or DirectOutputCommitter(self._broker, stdout=stdout)
                 return await committer.commit(submission.config, response)
-            except asyncio.CancelledError:
-                cancellation.cancel()
-                raise
+        except asyncio.CancelledError:
+            cancellation.cancel()
+            raise
+        finally:
+            try:
+                await resource_scope.aclose()
             finally:
-                try:
-                    await resource_scope.aclose()
-                finally:
-                    self._services.output_reservations.release(submission.request_id)
-                    self._path_leases.release(submission.request_id)
-                    self._active_requests.pop(submission.request_id, None)
+                self._services.output_reservations.release(submission.request_id)
+                self._path_leases.release(submission.request_id)
+                self._active_requests.pop(submission.request_id, None)
+                CURRENT_ORIGIN.reset(origin_marker)
 
     async def clear_runtime_caches(self) -> dict:
         """Clear process-wide runtime caches only while this engine is idle."""
@@ -248,6 +256,9 @@ class PipelineEngine:
     def reconfigure_request(self, config: dict) -> None:
         """Refresh the snapshot source for future requests only."""
         _replace_mapping_in_place(self.config, config)
+
+    async def set_process_mode(self, *, background: bool) -> dict[str, Any]:
+        return await self._services.sevenzip_runner.set_process_mode_asyncio(background=background)
 
     async def aclose(self, *, graceful: bool = True) -> None:
         if self._closed:
@@ -450,6 +461,7 @@ class _RequestRuntime:
         )
         request_runner = services.sevenzip_runner.fork()
         request_runner.request_id = submission.request_id
+        request_runner.origin = submission.origin
         self.extractor = ExtractionScheduler(
             cli_passwords=submission.user_passwords,
             builtin_passwords=submission.builtin_passwords,

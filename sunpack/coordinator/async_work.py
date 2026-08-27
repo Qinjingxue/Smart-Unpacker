@@ -96,11 +96,17 @@ class WorkContext:
     file_id: str
     stage: str
     attempt_id: int = 0
+    origin: str = "foreground"
 
 
 CURRENT_WORK: contextvars.ContextVar[WorkContext | None] = contextvars.ContextVar(
     "sunpack_current_work",
     default=None,
+)
+
+CURRENT_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "sunpack_current_origin",
+    default="foreground",
 )
 
 
@@ -116,6 +122,7 @@ class _WorkItem(Generic[T]):
 @dataclass
 class _RequestQueue:
     jobs: deque[_WorkItem[Any]] = field(default_factory=deque)
+    origin: str = "foreground"
 
 
 class AsyncWorkBroker:
@@ -183,6 +190,7 @@ class AsyncWorkBroker:
         request_id: str = "",
         attempt_id: int = 0,
         cancellation: CancellationToken | None = None,
+        origin: str | None = None,
         **kwargs: Any,
     ) -> T:
         self.bind()
@@ -204,12 +212,14 @@ class AsyncWorkBroker:
             scope = current_task_resource_scope()
             request_key = str(scope.task_id if scope is not None else file_id or "default")
         self._sequence += 1
+        effective_origin = "watch" if str(origin or CURRENT_ORIGIN.get()).lower() == "watch" else "foreground"
         item = _WorkItem(
             context=WorkContext(
                 request_id=request_key,
                 file_id=str(file_id or request_key),
                 stage=str(stage),
                 attempt_id=max(0, int(attempt_id)),
+                origin=effective_origin,
             ),
             operation=functools.partial(operation, *args, **kwargs),
             future=future,
@@ -218,8 +228,10 @@ class AsyncWorkBroker:
         )
         queue = self._queues.get(request_key)
         if queue is None:
-            queue = self._queues[request_key] = _RequestQueue()
+            queue = self._queues[request_key] = _RequestQueue(origin=effective_origin)
             self._request_order.append(request_key)
+        elif effective_origin == "foreground":
+            queue.origin = "foreground"
         queue.jobs.append(item)
         self._dispatch()
         try:
@@ -304,7 +316,7 @@ class AsyncWorkBroker:
 
     def _dispatch(self) -> None:
         while self._active < self.thread_capacity and self._request_order:
-            request_id = self._request_order.popleft()
+            request_id = self._pop_next_request_id()
             queue = self._queues.get(request_id)
             if queue is None or not queue.jobs:
                 self._queues.pop(request_id, None)
@@ -326,6 +338,18 @@ class AsyncWorkBroker:
                     completed,
                 )
             )
+
+    def _pop_next_request_id(self) -> str:
+        """Choose foreground FIFO before watch FIFO without preemption or aging."""
+
+        for index, request_id in enumerate(self._request_order):
+            queue = self._queues.get(request_id)
+            if queue is not None and queue.origin != "watch":
+                self._request_order.rotate(-index)
+                selected = self._request_order.popleft()
+                self._request_order.rotate(index)
+                return selected
+        return self._request_order.popleft()
 
     def _take_prioritized(self, jobs: deque[_WorkItem[Any]]) -> _WorkItem[Any]:
         if len(jobs) <= 1:

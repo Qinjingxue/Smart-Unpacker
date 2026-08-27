@@ -124,6 +124,7 @@ class _ActivePipelineRequest:
     probe_workspace: str
     predicted_probe_dirs: list[str]
     predicted_final_dirs: list[str]
+    registry_owner: str = ""
 
 
 def _paths_overlap(first: str, second: str) -> bool:
@@ -362,7 +363,20 @@ class WatchScheduler:
             "watch",
             self._stop_blocking,
             request_id="watch",
+            origin="watch",
         )
+
+    async def drain(self) -> WatchRunResult:
+        """Finish already-submitted watch work without admitting new candidates."""
+
+        result = WatchRunResult()
+        while True:
+            with self._lock:
+                active = list(self._inflight_requests)
+            if not active:
+                return result
+            await asyncio.gather(*(request.task for request in active), return_exceptions=True)
+            self._merge_run_result(result, await self._harvest_completed_requests())
 
     def _stop_blocking(self):
         if not self._started:
@@ -418,10 +432,11 @@ class WatchScheduler:
                 missing_reason=snapshot.missing_reason,
                 missing_indices=list(snapshot.missing_indices),
             )
-        active_requests = [
-            await self._submit_candidate(dispatch.candidate, group=dispatch.group)
-            for dispatch in dispatches
-        ]
+        active_requests = []
+        for dispatch in dispatches:
+            request = await self._submit_candidate(dispatch.candidate, group=dispatch.group)
+            if request is not None:
+                active_requests.append(request)
         with self._lock:
             self._inflight_requests.extend(active_requests)
         # Give newly submitted candidate coroutines one scheduling turn.  Fast
@@ -479,26 +494,34 @@ class WatchScheduler:
 
     async def _finish_active_request(self, request: _ActivePipelineRequest) -> WatchRunResult:
         try:
-            single = await self._complete_candidate(request)
-        except Exception as exc:
-            self._notify("aborted", request.notification_id)
-            single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
-            self.log.write(
-                "error",
-                path=request.candidate.path,
-                error=str(exc),
-                error_type=type(exc).__name__,
-                phase="pipeline_completion",
-            )
-            self.enqueue(
-                request.candidate.path,
-                force=True,
-                event_type="pipeline_completion_error",
-            )
-        else:
-            self.state.complete_work_if_matches(request.candidate)
-        self._arm_idle_cache_cleanup()
-        return single
+            try:
+                single = await self._complete_candidate(request)
+            except Exception as exc:
+                self._notify("aborted", request.notification_id)
+                single = WatchRunResult(processed=1, failed=1, errors=[str(exc)])
+                self.log.write(
+                    "error",
+                    path=request.candidate.path,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    phase="pipeline_completion",
+                )
+                self.enqueue(
+                    request.candidate.path,
+                    force=True,
+                    event_type="pipeline_completion_error",
+                )
+            else:
+                self.state.complete_work_if_matches(request.candidate)
+            self._arm_idle_cache_cleanup()
+            return single
+        finally:
+            if request.registry_owner:
+                from sunpack.cli.runtime_state import runtime_host
+
+                host = runtime_host()
+                if host is not None:
+                    host.archive_registry.release(request.registry_owner)
 
     @staticmethod
     def _merge_run_result(target: WatchRunResult, source: WatchRunResult) -> None:
@@ -1084,10 +1107,8 @@ class WatchScheduler:
         candidate: WatchCandidate,
         *,
         group: WatchGroupSnapshot | None = None,
-    ) -> _ActivePipelineRequest:
+    ) -> _ActivePipelineRequest | None:
         notification_id = uuid.uuid4().hex
-        self._notify("submitted", notification_id, candidate.path)
-        self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
         with self._password_source_lock:
             run_config = dict(self.config)
             self.pipeline_engine.update_password_sources(
@@ -1110,16 +1131,40 @@ class WatchScheduler:
             "common_root": final_output_config["output"]["common_root"],
         }
         predicted_probe_dirs = self._predicted_output_dirs(candidate.path, run_config)
-        task = asyncio.create_task(self.pipeline_engine.run(
-            [PipelineTarget(candidate.path, output=run_config["output"])],
-            output_committer=IdentityOutputCommitter(),
-            progress_callback=lambda archive_task, event: self._notify(
-                "progress",
-                notification_id,
-                archive_task,
-                event,
-            ),
-        ))
+        from sunpack.cli.runtime_state import runtime_host
+
+        host = runtime_host()
+        reservation_paths = [candidate.path, *(group.owned_paths if group is not None else ())]
+        if host is not None:
+            conflict = host.archive_registry.reserve(notification_id, "watch", reservation_paths)
+            if conflict is not None:
+                self.log.write(
+                    "processing_deferred_active_owner",
+                    path=candidate.path,
+                    owner_origin=conflict.origin,
+                    owner_paths=list(conflict.paths),
+                )
+                self.enqueue(candidate.path, force=True, event_type="active_owner_deferred")
+                return None
+        self._notify("submitted", notification_id, candidate.path)
+        self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
+        try:
+            task = asyncio.create_task(self.pipeline_engine.run(
+                [PipelineTarget(candidate.path, output=run_config["output"])],
+                output_committer=IdentityOutputCommitter(),
+                progress_callback=lambda archive_task, event: self._notify(
+                    "progress",
+                    notification_id,
+                    archive_task,
+                    event,
+                ),
+                request_config=run_config,
+                origin="watch",
+            ))
+        except BaseException:
+            if host is not None:
+                host.archive_registry.release(notification_id)
+            raise
         self._reset_idle_cache_cleanup()
         task.add_done_callback(lambda _task: self._wake_service())
         return _ActivePipelineRequest(
@@ -1131,6 +1176,7 @@ class WatchScheduler:
             probe_workspace=probe_workspace,
             predicted_probe_dirs=predicted_probe_dirs,
             predicted_final_dirs=predicted_final_dirs,
+            registry_owner=notification_id if host is not None else "",
         )
 
     async def _complete_candidate(self, request: _ActivePipelineRequest) -> WatchRunResult:

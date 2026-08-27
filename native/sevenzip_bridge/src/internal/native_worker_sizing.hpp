@@ -17,14 +17,12 @@ struct NativeSizingOverrides {
     std::size_t thread_capacity = 0;
     std::size_t initial_active_jobs = 0;
     std::size_t memory_budget_bytes = 0;
-    bool background = false;
 };
 
 struct NativeSizingTuning {
     // Zero means no default cap beyond the machine's logical processors.
     std::size_t maximum_thread_capacity = 0;
     std::size_t foreground_cpu_divisor = 2;
-    std::size_t background_cpu_divisor = 4;
     std::uint64_t memory_budget_numerator = 7;
     std::uint64_t memory_budget_denominator = 10;
 };
@@ -99,9 +97,7 @@ inline NativeSizingPlan derive_native_sizing_plan(
         plan.initial_active_jobs = (std::max)(std::size_t{1}, (std::min)(
             overrides.initial_active_jobs, plan.thread_capacity));
     } else {
-        const std::size_t divisor = overrides.background
-            ? tuning.background_cpu_divisor
-            : tuning.foreground_cpu_divisor;
+        const std::size_t divisor = tuning.foreground_cpu_divisor;
         const std::size_t cpu_seed = native_sizing_ceil_div(
             resources.logical_processors,
             divisor);

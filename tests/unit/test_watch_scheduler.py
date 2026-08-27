@@ -349,8 +349,10 @@ class _DeferredPipelineEngine:
         targets,
         *,
         direct=False,
+        request_config=None,
         output_committer=None,
         progress_callback=None,
+        origin="foreground",
     ):
         handle = _DeferredHandle(targets[0].path)
         self.handles.append(handle)

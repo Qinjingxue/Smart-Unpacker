@@ -23,12 +23,13 @@ from sunpack.cli.cli_runtime import (
     result_for_missing,
 )
 from sunpack.cli.cli_types import CliCommandResult
-from sunpack.cli.persistent_runtime import load_request_config, pipeline_engine, request_config_source_key
-from sunpack.cli.runtime_state import server_runtime_active
+from sunpack.cli.persistent_runtime import load_request_config, pipeline_engine
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
 from sunpack.support.collections import dedupe_values
 from sunpack.detection.options import DetectionOptions
+import asyncio
+import uuid
 
 COMMAND = "extract"
 ORDER = 10
@@ -52,6 +53,30 @@ async def handle(args, ctx):
     target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
+
+    from sunpack.cli.runtime_state import runtime_host
+
+    host = runtime_host()
+    lease_owner = uuid.uuid4().hex
+    if host is not None:
+        conflict = host.archive_registry.reserve(lease_owner, "foreground", target_paths)
+        if conflict is not None and conflict.origin == "watch":
+            return EXIT_TASK_FAILED, CliCommandResult(
+                command=COMMAND,
+                inputs={"paths": target_paths},
+                summary={"status": "watch_busy", "conflicts": list(conflict.paths)},
+                errors=[ctx.t("cli.watch_busy")],
+            )
+        if conflict is not None:
+            return EXIT_TASK_FAILED, CliCommandResult(
+                command=COMMAND,
+                inputs={"paths": target_paths},
+                summary={"status": "busy", "conflicts": list(conflict.paths)},
+                errors=[ctx.t("cli.watch_busy")],
+            )
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            current_task.add_done_callback(lambda _task: host.archive_registry.release(lease_owner))
 
     config = load_request_config(ctx.cwd)
     config_overrides = apply_runtime_config_overrides(config, args, base_dir=ctx.cwd)
@@ -91,16 +116,7 @@ async def handle(args, ctx):
         verbose=bool(getattr(reporter, "verbose", False)),
     )
     deep_detect = bool(getattr(args, "deep_detect", False))
-    engine_options = {"source_key": request_config_source_key(ctx.cwd)} if server_runtime_active() else {}
-    engine_context = (
-        pipeline_engine(
-            run_config,
-            detection_options=DetectionOptions(deep_scan=True),
-            **engine_options,
-        )
-        if deep_detect
-        else pipeline_engine(run_config, **engine_options)
-    )
+    engine_context = pipeline_engine(run_config)
     async with engine_context as engine:
         while True:
             password_summary = build_password_summary(
@@ -118,6 +134,8 @@ async def handle(args, ctx):
                 request_config=run_config,
                 stdout=ctx.stderr if args.json else ctx.stdout,
                 stderr=ctx.stderr,
+                origin="foreground",
+                detection_options=DetectionOptions(deep_scan=deep_detect),
             )
             summary = response.summary
             failed_tasks = list(summary.failed_tasks)

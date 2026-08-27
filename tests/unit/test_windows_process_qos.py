@@ -13,7 +13,7 @@ class _FakeFunction:
         return self.callback(*args)
 
 
-def test_background_mode_is_preferred_on_windows(monkeypatch):
+def test_processing_mode_switches_background_and_normal_on_windows(monkeypatch):
     calls = []
     kernel32 = type(
         "Kernel32",
@@ -25,12 +25,17 @@ def test_background_mode_is_preferred_on_windows(monkeypatch):
     )()
     monkeypatch.setattr(process_qos.sys, "platform", "win32")
     monkeypatch.setattr(process_qos.ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(process_qos, "_BACKGROUND", False)
 
-    assert process_qos.enter_background_processing() == "background"
-    assert calls == [(123, process_qos.PROCESS_MODE_BACKGROUND_BEGIN)]
+    assert process_qos.set_processing_mode(background=True) == "background"
+    assert process_qos.set_processing_mode(background=False) == "normal"
+    assert calls == [
+        (123, process_qos.PROCESS_MODE_BACKGROUND_BEGIN),
+        (123, process_qos.PROCESS_MODE_BACKGROUND_END),
+    ]
 
 
-def test_background_mode_falls_back_to_below_normal(monkeypatch):
+def test_processing_mode_falls_back_to_priority_classes(monkeypatch):
     calls = []
     kernel32 = type(
         "Kernel32",
@@ -38,21 +43,26 @@ def test_background_mode_falls_back_to_below_normal(monkeypatch):
         {
             "GetCurrentProcess": _FakeFunction(lambda: 123),
             "SetPriorityClass": _FakeFunction(
-                lambda process, priority: calls.append((process, priority)) or priority == process_qos.BELOW_NORMAL_PRIORITY_CLASS
+                lambda process, priority: calls.append((process, priority))
+                or priority in {process_qos.BELOW_NORMAL_PRIORITY_CLASS, process_qos.NORMAL_PRIORITY_CLASS}
             ),
         },
     )()
     monkeypatch.setattr(process_qos.sys, "platform", "win32")
     monkeypatch.setattr(process_qos.ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(process_qos, "_BACKGROUND", False)
 
-    assert process_qos.enter_background_processing() == "below_normal"
+    assert process_qos.set_processing_mode(background=True) == "below_normal"
+    assert process_qos.set_processing_mode(background=False) == "normal"
     assert calls == [
         (123, process_qos.PROCESS_MODE_BACKGROUND_BEGIN),
         (123, process_qos.BELOW_NORMAL_PRIORITY_CLASS),
+        (123, process_qos.PROCESS_MODE_BACKGROUND_END),
+        (123, process_qos.NORMAL_PRIORITY_CLASS),
     ]
 
 
-def test_background_mode_is_noop_off_windows(monkeypatch):
+def test_processing_mode_is_noop_off_windows(monkeypatch):
     monkeypatch.setattr(process_qos.sys, "platform", "linux")
 
-    assert process_qos.enter_background_processing() == "unsupported"
+    assert process_qos.set_processing_mode(background=True) == "unsupported"

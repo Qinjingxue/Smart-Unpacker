@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import copy
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -11,19 +10,8 @@ from sunpack.config.loader import config_source_key, load_config, load_effective
 from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.cli.runtime_state import server_runtime_active, set_server_runtime_active
-from sunpack.detection.options import DetectionOptions
 
 
-_MUTABLE_PATHS = {
-    ("user_passwords",),
-    ("builtin_passwords",),
-    ("cli", "quiet"),
-    ("cli", "verbose"),
-    ("extraction", "quiet"),
-    ("output", "root"),
-    ("output", "common_root"),
-    ("performance", "persistent_server_idle_seconds"),
-}
 ConfigSourceKey = tuple[str | None, str | None, str | None]
 
 
@@ -35,7 +23,7 @@ class _ConfigSnapshot:
     normalized_config: dict[str, Any]
 
 
-_ENGINES: dict[tuple[ConfigSourceKey, str, bool], PipelineEngine] = {}
+_ENGINE: PipelineEngine | None = None
 _CONFIG_SNAPSHOTS: dict[ConfigSourceKey, _ConfigSnapshot] = {}
 _LATEST_IDLE_SECONDS: float | None = None
 
@@ -45,25 +33,28 @@ def enable_persistent_runtime() -> None:
 
 
 async def close_persistent_runtime() -> None:
-    global _LATEST_IDLE_SECONDS
-    engines = tuple(_ENGINES.values())
-    _ENGINES.clear()
+    global _ENGINE, _LATEST_IDLE_SECONDS
+    engine, _ENGINE = _ENGINE, None
     _CONFIG_SNAPSHOTS.clear()
     _LATEST_IDLE_SECONDS = None
     set_server_runtime_active(False)
-    for engine in engines:
+    if engine is not None:
         await engine.aclose(graceful=True)
 
 
 def persistent_runtime_is_idle() -> bool:
-    return all(engine.is_idle() for engine in _ENGINES.values())
+    return _ENGINE is None or _ENGINE.is_idle()
+
+
+def current_pipeline_engine() -> PipelineEngine | None:
+    return _ENGINE
 
 
 def persistent_server_idle_seconds() -> float:
     default = advanced_config_value(("performance", "persistent_server_idle_seconds"))
     if _LATEST_IDLE_SECONDS is not None:
         return _LATEST_IDLE_SECONDS
-    engine = next(iter(_ENGINES.values()), None)
+    engine = _ENGINE
     config = engine.config if engine is not None else {}
     performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
     try:
@@ -102,22 +93,14 @@ def load_request_config_payload(request_cwd: str | Path | None = None) -> tuple[
     return snapshot.config_path, copy.deepcopy(snapshot.raw_payload)
 
 
-def request_config_source_key(request_cwd: str | Path | None = None) -> ConfigSourceKey:
-    return config_source_key(request_cwd)
-
-
 @asynccontextmanager
 async def pipeline_engine(
     config: dict,
-    detection_options: DetectionOptions | None = None,
-    *,
-    source_key: ConfigSourceKey | None = None,
 ) -> AsyncIterator[PipelineEngine]:
     if not server_runtime_active():
         raise RuntimeError("extract pipeline is only available inside the persistent server")
 
-    global _LATEST_IDLE_SECONDS
-    options = detection_options or DetectionOptions()
+    global _ENGINE, _LATEST_IDLE_SECONDS
     performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
     try:
         _LATEST_IDLE_SECONDS = max(
@@ -126,30 +109,21 @@ async def pipeline_engine(
         )
     except (TypeError, ValueError):
         pass
-    key = (source_key or config_source_key(), _stable_config_key(config), options.deep_scan)
-    engine = _ENGINES.get(key)
+    engine = _ENGINE
     if engine is None:
         engine_config = copy.deepcopy(config)
-        created = (
-            PipelineEngine(engine_config, detection_options=options)
-            if options.deep_scan
-            else PipelineEngine(engine_config)
-        )
+        created = PipelineEngine(engine_config)
         engine = await created.__aenter__()
-        _ENGINES[key] = engine
+        _ENGINE = engine
+    else:
+        engine.reconfigure_request(copy.deepcopy(config))
     yield engine
 
 
-def _stable_config_key(config: dict) -> str:
-    stable = copy.deepcopy(config)
-    for path in _MUTABLE_PATHS:
-        current = stable
-        for key in path[:-1]:
-            value = current.get(key)
-            if not isinstance(value, dict):
-                current = None
-                break
-            current = value
-        if current is not None:
-            current.pop(path[-1], None)
-    return json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+async def shared_pipeline_engine(
+    config: dict,
+) -> PipelineEngine:
+    """Return the RuntimeHost-owned engine, creating it exactly once."""
+
+    async with pipeline_engine(config) as engine:
+        return engine

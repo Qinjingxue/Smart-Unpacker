@@ -228,7 +228,7 @@ try {
         throw "Context menu command does not reference the installed executable: $directCommand"
     }
     $startupCommand = [string](Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName).$startupValueName
-    if ($startupCommand -ne ('"{0}" --_sunpack-mode=watch' -f $runtimeAppPath)) {
+    if ($startupCommand -ne ('"{0}" watch start' -f $appPath)) {
         throw "Startup Run value is incorrect: $startupCommand"
     }
 
@@ -286,7 +286,7 @@ try {
     $localSunPackCache = Join-Path $env:LOCALAPPDATA "SunPack\cache"
     New-Item -ItemType Directory -Path $localSunPackCache -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $localSunPackCache "machine_probe.json") -Value "{}" -Encoding UTF8
-    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}" --_sunpack-mode=watch' -f $runtimeAppPath)
+    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}" watch start' -f $appPath)
 
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {

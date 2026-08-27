@@ -582,12 +582,12 @@ def test_native_environment_configures_activity_warm_start():
     assert environment["SUNPACK_NATIVE_WARM_START_CONFIRMATIONS"] == "2"
 
 
-def test_native_environment_marks_background_worker_mode_explicitly():
+def test_native_environment_does_not_freeze_worker_process_mode_at_startup():
     environment = {"SUNPACK_NATIVE_PROCESS_MODE": "background"}
 
     _apply_native_environment(environment, {"windows_process_mode": "background"})
 
-    assert environment["SUNPACK_NATIVE_PROCESS_MODE"] == "background"
+    assert "SUNPACK_NATIVE_PROCESS_MODE" not in environment
 
     _apply_native_environment(environment, {})
 

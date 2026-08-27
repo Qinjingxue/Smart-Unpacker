@@ -36,6 +36,12 @@ class FakePipelineEngine:
     def is_idle(self):
         return True
 
+    def reconfigure_request(self, config):
+        self.config = dict(config)
+
+    async def set_process_mode(self, *, background):
+        self.background = bool(background)
+
     async def clear_runtime_caches(self):
         return {"fake": True}
 
@@ -49,6 +55,8 @@ class FakePipelineEngine:
         stderr=None,
         output_committer=None,
         progress_callback=None,
+        origin="foreground",
+        detection_options=None,
     ):
         paths = [target.path if hasattr(target, "path") else str(target) for target in targets]
         output = dict(targets[0].output) if targets and hasattr(targets[0], "output") else {}
@@ -84,4 +92,5 @@ class _InlineBroker:
     async def run(self, _stage, _file_id, operation, *args, **kwargs):
         kwargs.pop("request_id", None)
         kwargs.pop("cancellation", None)
+        kwargs.pop("origin", None)
         return operation(*args, **kwargs)
