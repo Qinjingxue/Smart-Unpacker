@@ -783,6 +783,45 @@ def test_watch_roots_are_stored_in_program_txt(tmp_path, monkeypatch):
     assert roots_path.read_text(encoding="utf-8").splitlines() == [str(second.resolve())]
 
 
+def test_remove_watch_root_cleans_service_owned_artifacts(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    watched = tmp_path / "watched"
+    other_root = tmp_path / "other"
+    watched.mkdir()
+    other_root.mkdir()
+    (watched / ".sunpack-passwords.txt").write_text("watch-password\n", encoding="utf-8")
+    (other_root / ".sunpack-passwords.txt").write_text("keep-me\n", encoding="utf-8")
+    (watched / ".sunpack_watch_probes" / "probe" / "work").mkdir(parents=True)
+    (other_root / ".sunpack_watch_probes" / "probe").mkdir(parents=True)
+    roots_path.write_text(f"{watched}\n{other_root}\n", encoding="utf-8")
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+
+    _, removed = service_module.remove_watch_roots([str(watched)])
+
+    assert removed == [str(watched.resolve())]
+    assert not (watched / ".sunpack-passwords.txt").exists()
+    assert not (watched / ".sunpack_watch_probes").exists()
+    assert (other_root / ".sunpack-passwords.txt").read_text(encoding="utf-8") == "keep-me\n"
+    assert (other_root / ".sunpack_watch_probes").exists()
+
+
+def test_remove_unmonitored_root_skips_artifact_cleanup(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    target = tmp_path / "not-watched"
+    target.mkdir()
+    password_file = target / ".sunpack-passwords.txt"
+    password_file.write_text("", encoding="utf-8")
+    (target / ".sunpack_watch_probes" / "probe").mkdir(parents=True)
+    roots_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+
+    _, removed = service_module.remove_watch_roots([str(target)])
+
+    assert removed == []
+    assert password_file.exists()
+    assert (target / ".sunpack_watch_probes").exists()
+
+
 def test_relative_watch_state_path_uses_program_directory_not_process_working_directory(tmp_path, monkeypatch):
     program_dir = tmp_path / "program"
     working_dir = tmp_path / "windows-system-directory"

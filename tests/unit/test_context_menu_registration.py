@@ -66,6 +66,17 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         assert "'--initial-scan'" in command_text
         assert "--pause" not in command_text
 
+    for key in ("folder_unwatch", "background_unwatch"):
+        expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")
+        argv = _windows_argv(expanded)
+        assert ntpath.basename(argv[0]).lower() == "powershell.exe"
+        command_text = argv[argv.index("-Command") + 1]
+        assert "Start-Process" in command_text
+        assert "-WindowStyle Hidden" in command_text
+        assert "'watch','remove'," in command_text
+        assert "D:" in command_text
+        assert "\\." in command_text
+
 
 def test_context_menu_directory_token_is_stable_for_normal_paths():
     command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --pause'

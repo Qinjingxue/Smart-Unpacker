@@ -4,6 +4,7 @@ import ctypes
 import asyncio
 import hashlib
 import os
+import shutil
 from copy import deepcopy
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -17,6 +18,7 @@ from sunpack.filesystem.watcher.config_observer import ConfigFileObserver
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.filesystem.watcher.toast import WatchToastCoordinator
+from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME
 from sunpack.support.resources import get_resource_path
 from sunpack.support.resource_lifecycle import (
     read_task_text,
@@ -236,7 +238,7 @@ def add_watch_roots(paths: list[str]) -> tuple[Path, list[str]]:
     return roots_path, added
 
 
-def remove_watch_roots(paths: list[str]) -> tuple[Path, list[str]]:
+def remove_watch_roots(paths: list[str], *, cleanup: bool = True) -> tuple[Path, list[str]]:
     roots_path = watch_roots_path()
     with _watch_roots_mutex(roots_path):
         expected = {os.path.normcase(normalize_root(path)) for path in paths}
@@ -251,7 +253,35 @@ def remove_watch_roots(paths: list[str]) -> tuple[Path, list[str]]:
                 kept.append(root)
         if removed:
             _write_watch_roots_unlocked(kept, roots_path)
+    if cleanup:
+        _cleanup_removed_watch_root_artifacts(removed)
     return roots_path, removed
+
+
+def _cleanup_removed_watch_root_artifacts(roots: list[str]) -> None:
+    """Remove service-owned artifacts for roots that were actually removed.
+
+    The scheduler creates the directory password file on first use and keeps
+    probe extraction workspaces in a hidden ``.sunpack_watch_probes``
+    directory.  The password file remains a watch-owned input even after the
+    user populates it, so removing the watch root removes it as requested.
+    """
+
+    for root in roots:
+        normalized = normalize_root(root)
+        password_file = Path(normalized) / DIRECTORY_PASSWORD_FILE_NAME
+        try:
+            if password_file.is_file() or password_file.is_symlink():
+                password_file.unlink()
+        except OSError:
+            pass
+
+        probe_root = Path(normalized) / ".sunpack_watch_probes"
+        try:
+            if probe_root.is_dir():
+                shutil.rmtree(probe_root)
+        except OSError:
+            pass
 
 
 def list_watch_roots() -> tuple[Path, list[str]]:
@@ -461,7 +491,9 @@ class WatchService:
 
     async def remove_roots(self, paths: list[str]) -> dict:
         async with self._reload_lock:
-            roots_path, removed = remove_watch_roots(paths)
+            # Stop/reconcile the running scheduler before deleting probe
+            # workspaces, so an in-flight extraction cannot race cleanup.
+            roots_path, removed = remove_watch_roots(paths, cleanup=False)
             if not removed:
                 self.log.write("watch_roots_remove_skipped", requested=_normalize_scan_roots(paths))
                 return {
@@ -470,11 +502,14 @@ class WatchService:
                     "applied": False,
                 }
             new_service_config = service_config_from(self.config)
-            applied = await self._apply_configuration(
-                self.config,
-                new_service_config,
-                service_state_dir(self.config),
-            )
+            try:
+                applied = await self._apply_configuration(
+                    self.config,
+                    new_service_config,
+                    service_state_dir(self.config),
+                )
+            finally:
+                _cleanup_removed_watch_root_artifacts(removed)
             return {
                 "roots_path": str(roots_path),
                 "removed": removed,

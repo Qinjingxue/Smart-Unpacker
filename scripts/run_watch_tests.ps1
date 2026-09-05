@@ -12,14 +12,18 @@ param(
     [switch]$SkipBuild,
     [switch]$FullAcceptance,
     [string]$BaselinePath = "",
-    [ValidateRange(1, 32)]
-    [int]$ParallelWorkers = 8,
+    [ValidateRange(0, 32)]
+    [int]$ParallelWorkers = 0,
     [int]$TimeoutSeconds = 900
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+
+if ($ParallelWorkers -le 0) {
+    $ParallelWorkers = [math]::Max(1, [math]::Floor([Environment]::ProcessorCount / 4))
+}
 
 . (Join-Path $PSScriptRoot "test_elevation.ps1")
 $elevatedExitCode = Invoke-TestScriptElevated -ScriptPath $PSCommandPath -BoundParameters $PSBoundParameters

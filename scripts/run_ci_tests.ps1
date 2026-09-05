@@ -1,13 +1,17 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(1, 32)]
-    [int]$ParallelWorkers = 8
+    [ValidateRange(0, 32)]
+    [int]$ParallelWorkers = 0
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
+
+if ($ParallelWorkers -le 0) {
+    $ParallelWorkers = [math]::Max(1, [math]::Floor([Environment]::ProcessorCount / 4))
+}
 
 $script:StepResults = @()
 
