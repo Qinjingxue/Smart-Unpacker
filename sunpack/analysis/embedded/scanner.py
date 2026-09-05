@@ -11,6 +11,38 @@ from sunpack.support.global_cache_manager import GLOBAL_CACHE, file_identity
 _CACHE_NAMESPACE = "embedded_archive_scan_v3"
 _SCAN_LOCKS = tuple(threading.Lock() for _ in range(32))
 
+_RESULT_FIELDS = frozenset({
+    "complete",
+    "signature_scan_complete",
+    "logical_resolution_complete",
+    "raw_hit_count",
+    "budget_exhausted",
+    "candidates",
+    "hits",
+    "read_bytes",
+    "file_size",
+})
+_CANDIDATE_FIELDS = frozenset({
+    "format",
+    "detected_ext",
+    "offset",
+    "end_offset",
+    "confidence",
+    "validation",
+    "candidate_kind",
+    "boundary_kind",
+    "range_end_offset",
+    "extractable",
+    "contained_anchor_count",
+})
+_HIT_FIELDS = frozenset({"name", "offset"})
+
+
+def _require_fields(value: dict[str, Any], required: frozenset[str], context: str) -> None:
+    missing = sorted(required.difference(value))
+    if missing:
+        raise TypeError(f"{context} missing required fields: {', '.join(missing)}")
+
 
 def scan_embedded_archives(
     path: str,
@@ -39,7 +71,8 @@ def scan_embedded_archives(
 def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResult:
     if not isinstance(value, dict):
         raise TypeError("Native scan_embedded_archives returned a non-dict result")
-    rows = value.get("candidates")
+    _require_fields(value, _RESULT_FIELDS, "Native scan_embedded_archives result")
+    rows = value["candidates"]
     if not isinstance(rows, list):
         raise TypeError("Native scan_embedded_archives returned invalid candidates")
 
@@ -47,32 +80,29 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
     for row in rows:
         if not isinstance(row, dict):
             raise TypeError("Native scan_embedded_archives returned a non-dict candidate")
-        archive_format = str(row.get("format") or "")
-        detected_ext = str(row.get("detected_ext") or "")
-        offset = int(row.get("offset") or 0)
+        _require_fields(row, _CANDIDATE_FIELDS, "Native scan_embedded_archives candidate")
+        archive_format = str(row["format"] or "")
+        detected_ext = str(row["detected_ext"] or "")
+        offset = int(row["offset"])
         if not archive_format or not detected_ext or offset < 0:
             raise TypeError("Native scan_embedded_archives returned an invalid candidate")
-        end_offset = row.get("end_offset")
-        range_end_offset = row.get("range_end_offset")
-        validation = str(row.get("validation") or "")
-        legacy_anchor = end_offset is None and (
-            "local_header" in validation or validation == "ustar_checksum"
-        )
+        end_offset = row["end_offset"]
+        range_end_offset = row["range_end_offset"]
         candidates.append(EmbeddedCandidate(
             format=archive_format,
             detected_ext=detected_ext,
             offset=offset,
             end_offset=None if end_offset is None else int(end_offset),
-            confidence=float(row.get("confidence") or 0.0),
-            validation=validation,
-            candidate_kind=str(row.get("candidate_kind") or ("anchor" if legacy_anchor else "logical_archive")),
-            boundary_kind=str(row.get("boundary_kind") or ("exact" if end_offset is not None else "unresolved")),
+            confidence=float(row["confidence"]),
+            validation=str(row["validation"]),
+            candidate_kind=str(row["candidate_kind"]),
+            boundary_kind=str(row["boundary_kind"]),
             range_end_offset=None if range_end_offset is None else int(range_end_offset),
-            extractable=bool(row.get("extractable", end_offset is not None)),
-            contained_anchor_count=int(row.get("contained_anchor_count") or 0),
+            extractable=bool(row["extractable"]),
+            contained_anchor_count=int(row["contained_anchor_count"]),
         ))
 
-    raw_hits = value.get("hits")
+    raw_hits = value["hits"]
     if not isinstance(raw_hits, list):
         raise TypeError("Native scan_embedded_archives returned invalid hits")
     validated_formats = {item.format for item in candidates}
@@ -85,60 +115,65 @@ def _normalize_native_result(value: Any, expected_size: int) -> EmbeddedScanResu
     for row in raw_hits:
         if not isinstance(row, dict):
             raise TypeError("Native scan_embedded_archives returned a non-dict hit")
-        name = str(row.get("name") or "")
-        offset = int(row.get("offset") or 0)
+        _require_fields(row, _HIT_FIELDS, "Native scan_embedded_archives hit")
+        name = str(row["name"] or "")
+        offset = int(row["offset"])
         if name and offset >= 0 and hit_formats.get(name) in validated_formats:
             hits.append(SignatureHit(name=name, offset=offset))
 
+    file_size = int(value["file_size"])
+    if expected_size and file_size != int(expected_size):
+        raise ValueError(
+            f"Native scan_embedded_archives file_size mismatch: expected {expected_size}, got {file_size}"
+        )
+
     return EmbeddedScanResult(
-        complete=bool(value.get("complete")),
+        complete=bool(value["complete"]),
         candidates=tuple(sorted(candidates, key=lambda item: (item.offset, item.format))),
         hits=tuple(sorted(hits, key=lambda item: (item.offset, item.name))),
-        read_bytes=int(value.get("read_bytes") or 0),
-        file_size=int(value.get("file_size") or expected_size or 0),
-        logical_resolution_complete=bool(
-            value.get("logical_resolution_complete", value.get("complete"))
-        ),
-        raw_hit_count=int(value.get("raw_hit_count") or len(raw_hits)),
-        budget_exhausted=bool(value.get("budget_exhausted")),
+        read_bytes=int(value["read_bytes"]),
+        file_size=file_size,
+        logical_resolution_complete=bool(value["logical_resolution_complete"]),
+        raw_hit_count=int(value["raw_hit_count"]),
+        budget_exhausted=bool(value["budget_exhausted"]),
     )
 
 
 def embedded_result_from_dict(value: dict[str, Any]) -> EmbeddedScanResult:
+    _require_fields(value, _RESULT_FIELDS, "Embedded scan cache result")
+    for item in value["candidates"]:
+        if not isinstance(item, dict):
+            raise TypeError("Embedded scan cache contains a non-dict candidate")
+        _require_fields(item, _CANDIDATE_FIELDS, "Embedded scan cache candidate")
+    for item in value["hits"]:
+        if not isinstance(item, dict):
+            raise TypeError("Embedded scan cache contains a non-dict hit")
+        _require_fields(item, _HIT_FIELDS, "Embedded scan cache hit")
     return EmbeddedScanResult(
-        complete=bool(value.get("complete")),
+        complete=bool(value["complete"]),
         candidates=tuple(
             EmbeddedCandidate(
                 format=str(item["format"]),
                 detected_ext=str(item["detected_ext"]),
                 offset=int(item["offset"]),
-                end_offset=None if item.get("end_offset") is None else int(item["end_offset"]),
-                confidence=float(item.get("confidence") or 0.0),
-                validation=str(item.get("validation") or ""),
-                candidate_kind=str(item.get("candidate_kind") or (
-                    "anchor"
-                    if item.get("end_offset") is None and (
-                        "local_header" in str(item.get("validation") or "")
-                        or str(item.get("validation") or "") == "ustar_checksum"
-                    )
-                    else "logical_archive"
-                )),
-                boundary_kind=str(item.get("boundary_kind") or ("exact" if item.get("end_offset") is not None else "unresolved")),
-                range_end_offset=None if item.get("range_end_offset") is None else int(item["range_end_offset"]),
-                extractable=bool(item.get("extractable", item.get("end_offset") is not None)),
-                contained_anchor_count=int(item.get("contained_anchor_count") or 0),
+                end_offset=None if item["end_offset"] is None else int(item["end_offset"]),
+                confidence=float(item["confidence"]),
+                validation=str(item["validation"]),
+                candidate_kind=str(item["candidate_kind"]),
+                boundary_kind=str(item["boundary_kind"]),
+                range_end_offset=None if item["range_end_offset"] is None else int(item["range_end_offset"]),
+                extractable=bool(item["extractable"]),
+                contained_anchor_count=int(item["contained_anchor_count"]),
             )
-            for item in value.get("candidates", [])
+            for item in value["candidates"]
         ),
         hits=tuple(
             SignatureHit(name=str(item["name"]), offset=int(item["offset"]))
-            for item in value.get("hits", [])
+            for item in value["hits"]
         ),
-        read_bytes=int(value.get("read_bytes") or 0),
-        file_size=int(value.get("file_size") or 0),
-        logical_resolution_complete=bool(
-            value.get("logical_resolution_complete", value.get("complete"))
-        ),
-        raw_hit_count=int(value.get("raw_hit_count") or len(value.get("hits", []))),
-        budget_exhausted=bool(value.get("budget_exhausted")),
+        read_bytes=int(value["read_bytes"]),
+        file_size=int(value["file_size"]),
+        logical_resolution_complete=bool(value["logical_resolution_complete"]),
+        raw_hit_count=int(value["raw_hit_count"]),
+        budget_exhausted=bool(value["budget_exhausted"]),
     )

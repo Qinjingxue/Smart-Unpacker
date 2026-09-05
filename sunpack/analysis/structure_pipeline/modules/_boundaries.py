@@ -11,7 +11,7 @@ def next_archive_boundary(prepass: dict, start_offset: int, file_size: int) -> i
     offsets = [
         int(item.get("offset") or 0)
         for item in prepass.get("embedded_candidates", [])
-        if item.get("candidate_kind", "logical_archive") == "logical_archive"
+        if item["candidate_kind"] == "logical_archive"
         and int(item.get("offset") or 0) > start
     ]
     if offsets:

@@ -6,8 +6,8 @@ import pytest
 
 from sunpack.analysis.volume_anchor import probe_volume_anchor_paths
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
-from sunpack.coordinator.watch_group_coordinator import WatchPasswordProber
 from sunpack.passwords.internal.store import PasswordStore
+from sunpack.passwords.relation_prober import RelationsPasswordProber
 from sunpack.relations.scheduler import RelationsScheduler
 from tests.helpers.real_archives import create_encrypted_rar_archive
 
@@ -165,7 +165,7 @@ def test_split_hp_rar_group_accepts_camouflage_around_contiguous_part_token(tmp_
     }
 
 
-def test_watch_password_prober_remembers_success_and_skips_second_probe(tmp_path):
+def test_relations_password_prober_remembers_success_and_skips_second_probe(tmp_path):
     first = _write_hex(tmp_path / "vol.part1.rar", PART1_HP_HEX)
     _write_hex(tmp_path / "vol.part2.rar", PART2_HP_HEX)
     snapshot = _snapshot(tmp_path, ["vol.part1.rar", "vol.part2.rar"])
@@ -176,7 +176,7 @@ def test_watch_password_prober_remembers_success_and_skips_second_probe(tmp_path
         cli_passwords=["secret"],
         builtin_passwords=[],
     )
-    prober = WatchPasswordProber(store)
+    prober = RelationsPasswordProber(store)
     calls = {"count": 0}
     original_verify = prober.scheduler.verifier.verify_fast_batch
 
@@ -185,17 +185,17 @@ def test_watch_password_prober_remembers_success_and_skips_second_probe(tmp_path
         return original_verify(archive_path, passwords, **kwargs)
 
     prober.scheduler.verifier.verify_fast_batch = counting_verify
-    assert prober.resolve_for_group(group) == "secret"
+    assert prober.resolve_file(group.head_path) == "secret"
     assert calls["count"] == 1
     assert store.recent_passwords == ["secret"]
 
     # The second probe hits the PasswordAttemptCache without touching the
     # fast verifier again (same bytes, same fingerprint).
-    assert prober.resolve_for_group(group) == "secret"
+    assert prober.resolve_file(group.head_path) == "secret"
     assert calls["count"] == 1
 
 
-def test_watch_password_prober_returns_none_without_candidates(tmp_path):
+def test_relations_password_prober_returns_none_without_candidates(tmp_path):
     first = _write_hex(tmp_path / "vol.part1.rar", PART1_HP_HEX)
     _write_hex(tmp_path / "vol.part2.rar", PART2_HP_HEX)
     snapshot = _snapshot(tmp_path, ["vol.part1.rar", "vol.part2.rar"])
@@ -204,5 +204,5 @@ def test_watch_password_prober_returns_none_without_candidates(tmp_path):
         for group in RelationsScheduler().build_candidate_groups(snapshot)
         if group.kind == "split_archive"
     )
-    prober = WatchPasswordProber(PasswordStore.from_sources())
-    assert prober.resolve_for_group(group) is None
+    prober = RelationsPasswordProber(PasswordStore.from_sources())
+    assert prober.resolve_file(group.head_path) is None

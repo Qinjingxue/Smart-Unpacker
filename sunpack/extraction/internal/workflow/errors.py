@@ -49,21 +49,6 @@ def should_retry_extract_failure(
     return False
 
 
-def classify_extract_error(
-    run_result: Optional[subprocess.CompletedProcess],
-    err_text: str,
-    archive: str = None,
-    is_split_archive: bool = False,
-) -> str:
-    failure = classify_extract_failure(
-        run_result,
-        err_text,
-        archive=archive,
-        is_split_archive=is_split_archive,
-    )
-    return failure.message
-
-
 def classify_extract_failure(
     run_result: Optional[subprocess.CompletedProcess],
     err_text: str,

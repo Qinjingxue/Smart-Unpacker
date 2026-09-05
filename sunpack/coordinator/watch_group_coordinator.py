@@ -7,22 +7,12 @@ from collections import defaultdict
 
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.passwords.internal.store import PasswordStore
-from sunpack.passwords.relation_prober import RelationsPasswordProber
 from sunpack.relations.scheduler import RelationsScheduler
 from sunpack.support.path_keys import path_key
 
 from sunpack.filesystem.watcher.group_models import WatchGroupSnapshot
 from sunpack.filesystem.watcher.scanner import watch_candidate_for_path
 
-
-class WatchPasswordProber(RelationsPasswordProber):
-    """Backward-compatible alias used by watch tests."""
-
-    def resolve_for_group(self, group, *, directory_passwords=None) -> str | None:
-        return self.resolve_file(
-            str(getattr(group, "head_path", "") or ""),
-            directory_passwords=directory_passwords,
-        )
 
 class WatchGroupCoordinator:
     """Resolve stable file events to canonical split-archive groups."""

@@ -14,7 +14,7 @@ class TarAnalysisModule:
         embedded = [
             item for item in prepass.get("embedded_candidates", [])
             if item.get("format") == "tar"
-            and item.get("candidate_kind", "logical_archive") == "logical_archive"
+            and item["candidate_kind"] == "logical_archive"
         ]
         if embedded:
             candidates = []
@@ -23,8 +23,8 @@ class TarAnalysisModule:
                 end = item.get("end_offset")
                 exact = (
                     end is not None
-                    and item.get("boundary_kind", "exact") == "exact"
-                    and item.get("extractable", True)
+                    and item["boundary_kind"] == "exact"
+                    and item["extractable"]
                 )
                 confidence = float(item.get("confidence") or 0.0)
                 candidates.append(ArchiveFormatEvidence(
@@ -41,7 +41,7 @@ class TarAnalysisModule:
                     details={
                         "source": "embedded_scan",
                         "candidate": item,
-                        "boundary_kind": item.get("boundary_kind") or "unresolved",
+                        "boundary_kind": item["boundary_kind"],
                     },
                 ))
             return combine_format_candidates("tar", candidates, preserve_multiple=True)

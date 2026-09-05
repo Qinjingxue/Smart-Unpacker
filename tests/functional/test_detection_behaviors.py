@@ -125,9 +125,13 @@ class DetectionBehaviorTests(unittest.TestCase):
         bag.set("embedded_archive.analysis", {
             "found": True,
             "complete": True,
+            "signature_scan_complete": True,
+            "logical_resolution_complete": True,
+            "raw_hit_count": 1,
+            "budget_exhausted": False,
             "read_bytes": 8192,
             "file_size": 8192,
-            "hits": [{"name": "7z", "offset": 2048}],
+            "hits": [{"name": "7z", "offset": 2048, "source": "embedded_scan"}],
             "candidates": [{
                 "format": "7z",
                 "detected_ext": ".7z",
@@ -135,6 +139,11 @@ class DetectionBehaviorTests(unittest.TestCase):
                 "end_offset": 6144,
                 "confidence": 1.0,
                 "validation": "next-header-crc",
+                "candidate_kind": "logical_archive",
+                "boundary_kind": "exact",
+                "range_end_offset": 6144,
+                "extractable": True,
+                "contained_anchor_count": 0,
             }],
         })
 

@@ -344,10 +344,6 @@ def _normalize_glob(pattern: str) -> str:
     return str(pattern or "").strip().replace("\\", "/").strip("/")
 
 
-def _glob_segment_to_regex(pattern: str) -> str:
-    return "".join(_glob_char_to_regex(char, slash=False) for char in pattern)
-
-
 def _glob_path_to_regex(pattern: str) -> str:
     return "".join(_glob_char_to_regex(char, slash=True) for char in pattern)
 

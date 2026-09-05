@@ -4,10 +4,6 @@ from typing import Any
 
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.repair.candidate import (
-    RepairCandidate,
-    candidate_feature_payload,
-)
 from sunpack.repair.job import RepairJob
 from sunpack.repair.search.recovery import RecoveryEvaluator
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -139,87 +135,6 @@ def build_damage_analysis_request(
     return knowledge_payload
 
 
-def candidate_snapshot(
-    candidate: RepairCandidate,
-    *,
-    index: int = 0,
-    damage_analysis: dict[str, Any] | None = None,
-    current_recovery: dict[str, Any] | None = None,
-    recovery_snapshot: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload = candidate_feature_payload(candidate)
-    state = candidate.repaired_state
-    patch_plan = candidate.patch_plan
-    validations = [
-        {
-            "name": validation.name,
-            "accepted": bool(validation.accepted),
-            "score": float(validation.score or 0.0),
-            "warning_count": len(validation.warnings),
-            "details": dict(validation.details or {}),
-        }
-        for validation in candidate.validations
-    ]
-    snapshot = {
-        "schema_version": POLICY_TRAINING_RUNTIME_SCHEMA_VERSION,
-        "candidate_id": _unique_candidate_id(payload.get("candidate_id"), index),
-        "module_name": payload.get("module_name") or payload.get("module") or candidate.module_name,
-        "module": payload.get("module") or candidate.module_name,
-        "format": candidate.format,
-        "action_type": _graph_candidate_action_type(candidate.action_type or payload.get("action_type")),
-        "current_rank": int(index or 0),
-        "patch_depth": state.patch_depth() if state is not None else 0,
-        "patch_count": state.patch_depth() if state is not None else 0,
-        "patch_operation_count": _patch_operation_count(patch_plan),
-        "last_patch_module": _last_patch_module(state),
-        "patch_digest": state.effective_patch_digest() if state is not None else "",
-        "confidence": float(candidate.confidence or 0.0),
-        "score_hint": float(candidate.score_hint or 0.0),
-        "status": candidate.status,
-        "partial": bool(candidate.partial),
-        "lazy": bool(candidate.is_lazy),
-        "materialized": bool(candidate.materialized),
-        "requires_native_validation": bool(candidate.requires_native_validation),
-        "control_action": bool(payload.get("control_action")),
-        "noop": bool(payload.get("noop")),
-        "validation_summary": {
-            "count": len(validations),
-            "accepted": all(item["accepted"] for item in validations),
-            "score": max([float(item["score"]) for item in validations], default=0.0),
-            "items": validations,
-        },
-        "has_archive_state_plan": state is not None,
-        "branchable": _candidate_branchable(payload),
-    }
-    if damage_analysis is not None:
-        snapshot["damage_analysis"] = dict(damage_analysis or {})
-    return snapshot
-
-
-def _unique_candidate_id(candidate_id: object, index: int) -> str:
-    base = str(candidate_id or "")
-    suffix = f"#{max(0, int(index or 0)):04d}"
-    return f"{base}{suffix}" if base else suffix
-
-
-def _graph_candidate_action_type(value: Any) -> str:
-    text = str(value or "").strip()
-    if text in {"module", "undo", "stop"}:
-        return text
-    return "module"
-
-
-def candidate_snapshots(
-    candidates: list[RepairCandidate],
-    *,
-    damage_analysis: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    return [
-        candidate_snapshot(candidate, index=index, damage_analysis=damage_analysis)
-        for index, candidate in enumerate(candidates)
-    ]
-
-
 def recovery_score_from_job(job: RepairJob) -> float:
     return float(RecoveryEvaluator().evaluate_state(job, archive_state_for_job(job), mode="policy_light").score or 0.0)
 
@@ -269,35 +184,6 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
         if str(flag):
             probe[f"route_evidence_{flag}"] = 1
     return probe
-
-
-def _patch_operation_count(patch_plan: Any) -> int:
-    if patch_plan is None:
-        return 0
-    operations = getattr(patch_plan, "operations", None)
-    return len(operations) if isinstance(operations, list) else 0
-
-
-def _last_patch_module(state: ArchiveState | None) -> str:
-    if state is None:
-        return ""
-    patch = state.last_patch()
-    if patch is None:
-        return ""
-    if patch.module:
-        return str(patch.module)
-    provenance = patch.provenance if isinstance(patch.provenance, dict) else {}
-    return str(provenance.get("module") or "")
-
-
-def _candidate_branchable(payload: dict[str, Any]) -> bool:
-    if payload.get("noop") or payload.get("control_action"):
-        return False
-    if payload.get("has_archive_state_plan"):
-        return True
-    if payload.get("materialized") is False and payload.get("lazy"):
-        return False
-    return True
 
 
 def _missing_runtime_paths(knowledge: ArchiveKnowledge) -> list[str]:

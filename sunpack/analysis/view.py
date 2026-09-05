@@ -5,7 +5,6 @@ from binascii import crc32
 from dataclasses import dataclass
 from collections import Counter
 
-from sunpack_native import AnalysisBinaryView as _NativeAnalysisBinaryView
 from sunpack_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
 from sunpack_native import probe_rar_bytes as _probe_rar_bytes
 from sunpack.support.archive_sessions import get_archive_session
@@ -128,23 +127,6 @@ class SharedBinaryView:
             int(ngram_top_k),
             int(max_ngram_sample_bytes),
         ))
-
-    def _reserve_read_budget(self, size: int) -> None:
-        if self.max_read_bytes is None:
-            return
-        if self._read_bytes + size > self.max_read_bytes:
-            raise RuntimeError("archive analysis read budget exceeded")
-
-    def _store_cache_entry(self, key: tuple[int, int], data: bytes) -> None:
-        if self.cache_bytes <= 0 or len(data) > self.cache_bytes:
-            return
-        self._cache[key] = data
-        self._cache.move_to_end(key)
-        self._cache_size += len(data)
-        while self._cache_size > self.cache_bytes and self._cache:
-            _, old = self._cache.popitem(last=False)
-            self._cache_size -= len(old)
-
 
 class MultiVolumeBinaryView:
     """Random-access logical view over ordered split-volume files."""
@@ -404,10 +386,6 @@ def _normalize_volume_entries(paths) -> list[dict]:
         for index, item in enumerate(entries)
         if str(item)
     ]
-
-
-def _normalize_volume_paths(paths) -> list[str]:
-    return [entry["path"] for entry in _normalize_volume_entries(paths)]
 
 
 def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict:

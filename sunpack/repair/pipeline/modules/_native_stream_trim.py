@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import bz2
-import gzip
 import io
 import lzma
 from pathlib import Path

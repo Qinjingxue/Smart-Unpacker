@@ -26,11 +26,11 @@ class EmbeddedCandidate:
     end_offset: int | None
     confidence: float
     validation: str
-    candidate_kind: str = "logical_archive"
-    boundary_kind: str = "unresolved"
-    range_end_offset: int | None = None
-    extractable: bool = False
-    contained_anchor_count: int = 0
+    candidate_kind: str
+    boundary_kind: str
+    range_end_offset: int | None
+    extractable: bool
+    contained_anchor_count: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,9 +64,9 @@ class EmbeddedScanResult:
     hits: tuple[SignatureHit, ...]
     read_bytes: int
     file_size: int
-    logical_resolution_complete: bool = False
-    raw_hit_count: int = 0
-    budget_exhausted: bool = False
+    logical_resolution_complete: bool
+    raw_hit_count: int
+    budget_exhausted: bool
 
     @property
     def found(self) -> bool:

@@ -16,7 +16,7 @@ class RarAnalysisModule:
         embedded = [
             item for item in prepass.get("embedded_candidates", [])
             if item.get("format") == "rar"
-            and item.get("candidate_kind", "logical_archive") == "logical_archive"
+            and item["candidate_kind"] == "logical_archive"
         ]
         if not hits and not embedded:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
@@ -25,7 +25,7 @@ class RarAnalysisModule:
         for item in embedded:
             start = int(item.get("offset") or 0)
             end = item.get("end_offset")
-            if end is None or item.get("boundary_kind", "exact") != "exact":
+            if end is None or item["boundary_kind"] != "exact":
                 continue
             exact_starts.add(start)
             confidence = float(item.get("confidence") or 0.0)

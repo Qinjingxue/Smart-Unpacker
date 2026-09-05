@@ -491,7 +491,7 @@ fn verify_rar4_stored_data(
     if probe.method != 0 {
         return status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             -1,
             0,
             "rar3/rar4 -p compressed data requires the full RAR decoder",
@@ -518,7 +518,7 @@ fn verify_rar4_stored_data(
     if probe.data_end > MAX_RAR_PREFIX_SCAN {
         return status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             -1,
             0,
             "rar3/rar4 -p stored data exceeds the fast verifier read bound",
@@ -668,7 +668,7 @@ fn verify_rar4(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
     if decrypt_len == 0 {
         return status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             -1,
             0,
             "rar3/rar4 encrypted header data has no complete AES block",
@@ -782,7 +782,7 @@ fn verify_rar5(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
     let Some(header) = find_rar5_encryption_header(data) else {
         return status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             -1,
             0,
             "rar5 password check header not found",
@@ -791,7 +791,7 @@ fn verify_rar5(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
     if !header.has_password_check {
         return status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             -1,
             0,
             "rar5 encryption header has no password check",

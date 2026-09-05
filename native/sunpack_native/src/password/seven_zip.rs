@@ -111,7 +111,7 @@ fn seven_zip_fast_verify_passwords_impl(
         } => {
             return status(
                 py,
-                "unknown_need_fallback",
+                "unknown_needs_final_verifier",
                 -1,
                 0,
                 "7z header is readable but payload uses AES encryption",
@@ -119,7 +119,7 @@ fn seven_zip_fast_verify_passwords_impl(
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
         HeaderRead::Unsupported(message) => {
-            return status(py, "unknown_need_fallback", -1, 0, &message);
+            return status(py, "unknown_needs_final_verifier", -1, 0, &message);
         }
         HeaderRead::Damaged(message) => {
             return status(py, "damaged", -1, 0, &message);
@@ -211,7 +211,7 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         } => {
             return status(
                 py,
-                "unknown_need_fallback",
+                "unknown_needs_final_verifier",
                 -1,
                 0,
                 "7z header is readable but payload uses AES encryption",
@@ -219,7 +219,7 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
         HeaderRead::Unsupported(message) => {
-            return status(py, "unknown_need_fallback", -1, 0, &message);
+            return status(py, "unknown_needs_final_verifier", -1, 0, &message);
         }
         HeaderRead::Damaged(message) => {
             return status(py, "damaged", -1, 0, &message);
@@ -385,7 +385,7 @@ fn conclusive_status(py: Python<'_>, index: usize, outcome: HeaderRead) -> PyRes
             "7z encrypted header opened",
         ),
         HeaderRead::Unsupported(message) => {
-            status(py, "unknown_need_fallback", -1, index as i32, &message)
+            status(py, "unknown_needs_final_verifier", -1, index as i32, &message)
         }
         HeaderRead::Damaged(message) => status(py, "damaged", -1, index as i32, &message),
         HeaderRead::WrongPasswordOrPasswordRequired => unreachable!("filtered outcome"),

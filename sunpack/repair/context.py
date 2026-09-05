@@ -195,27 +195,6 @@ def _normalized_failure_classes(
     return ["structure_recognition", "corrupted_data"] if flags & structural else []
 
 
-def runtime_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
-    fmt = _format_from_payload(payload)
-    if fmt in {"7z", "seven_zip"}:
-        return seven_zip_route_evidence_flags(payload)
-    if fmt == "zip" or not fmt:
-        return zip_route_evidence_flags(payload)
-    return _dedupe([str(item) for item in payload.get("damage_flags") or [] if str(item)])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -43,12 +43,6 @@ def discover_command_modules(command: str | None = None) -> list[ModuleType]:
     return modules
 
 
-def clear_command_module_cache() -> None:
-    global _COMMAND_MODULE_CACHE
-    with _COMMAND_CACHE_LOCK:
-        _COMMAND_MODULE_CACHE = None
-
-
 def command_map(modules: list[ModuleType] | None = None) -> dict[str, ModuleType]:
     return {module.COMMAND: module for module in (modules or discover_command_modules())}
 

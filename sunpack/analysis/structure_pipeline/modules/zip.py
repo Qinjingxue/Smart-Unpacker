@@ -19,7 +19,7 @@ class ZipAnalysisModule:
         if not hits and not embedded:
             return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
 
-        logical = [item for item in embedded if item.get("candidate_kind", "logical_archive") == "logical_archive"]
+        logical = [item for item in embedded if item["candidate_kind"] == "logical_archive"]
         evidences = [self._from_embedded_candidate(view, item, logical) for item in logical]
         if evidences:
             return combine_format_candidates("zip", evidences, preserve_multiple=True)
@@ -66,8 +66,8 @@ class ZipAnalysisModule:
         )
         confidence = float(item.get("confidence") or 0.0)
         validation = str(item.get("validation") or "validated_structure")
-        boundary_kind = str(item.get("boundary_kind") or ("exact" if explicit_end is not None else "unresolved"))
-        extractable = bool(item.get("extractable", explicit_end is not None)) and end is not None and end > start
+        boundary_kind = str(item["boundary_kind"])
+        extractable = bool(item["extractable"]) and end is not None and end > start
         status = "extractable" if confidence >= 0.85 and extractable else "damaged"
         return ArchiveFormatEvidence(
             format="zip",

@@ -184,12 +184,6 @@ def apply_config_overrides(config: dict[str, Any], overrides: dict[str, Any]) ->
     return config
 
 
-def _load_layered_config(request_cwd: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
-    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME, request_cwd)
-    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME, request_cwd)
-    return _load_layered_config_paths(simple_path, advanced_path, request_cwd=request_cwd)
-
-
 def _load_layered_config_paths(
     simple_path: Path | None,
     advanced_path: Path | None,

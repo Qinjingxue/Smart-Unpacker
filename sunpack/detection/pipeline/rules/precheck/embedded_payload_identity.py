@@ -89,7 +89,7 @@ class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
         candidates = [
             item
             for item in (analysis.get("candidates") or [])
-            if item.get("candidate_kind", "logical_archive") == "logical_archive"
+            if item["candidate_kind"] == "logical_archive"
         ]
         if not analysis.get("complete") or not candidates:
             return RuleEffect.pass_()

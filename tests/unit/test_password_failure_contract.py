@@ -10,7 +10,7 @@ from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
 from sunpack.passwords.verifier import PasswordBatchVerification
-from sunpack.passwords.verifier.base import normalize_verifier_status
+from sunpack.passwords.verifier.base import VERIFIER_STATUSES, normalize_verifier_status
 from sunpack.passwords.verifier.sevenzip_dll import SevenZipDllVerifier
 from sunpack.passwords.verifier.registry import PasswordVerifierChain
 from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
@@ -26,20 +26,26 @@ from sunpack.verification import VerificationScheduler
 from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, CONTENT_INTEGRITY_UNKNOWN
 
 
+@pytest.mark.parametrize("status", sorted(VERIFIER_STATUSES))
+def test_verifier_statuses_accept_only_canonical_values(status):
+    assert normalize_verifier_status(status) == status
+
+
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    "status",
     [
-        ("no_match", "no_match"),
-        ("unencrypted", "not_required"),
-        ("unknown_need_fallback", "unknown_needs_final_verifier"),
-        ("unknown_needs_fallback", "unknown_needs_final_verifier"),
-        ("unsupported", "unsupported_method"),
-        ("needs_volume_or_tail_damaged", "needs_volume_or_tail_damaged"),
-        ("unexpected_backend_value", "unknown_needs_final_verifier"),
+        "unencrypted",
+        "not_encrypted",
+        "unknown_need_fallback",
+        "unknown_needs_fallback",
+        "inconclusive",
+        "unsupported",
+        "unexpected_backend_value",
     ],
 )
-def test_verifier_statuses_are_normalized_at_adapter_boundary(raw, expected):
-    assert normalize_verifier_status(raw) == expected
+def test_verifier_statuses_reject_legacy_and_unknown_values(status):
+    with pytest.raises(ValueError, match="invalid verifier status"):
+        normalize_verifier_status(status)
 
 
 def test_scheduler_uses_no_match_status_not_backend_message(tmp_path):

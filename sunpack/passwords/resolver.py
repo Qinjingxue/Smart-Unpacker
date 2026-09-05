@@ -175,14 +175,6 @@ def archive_structure_requires_password(fact_bag: FactBag | None) -> bool:
     return archive_structure_password_state(fact_bag) == "required"
 
 
-def rar_structure_requires_password(fact_bag: FactBag | None) -> bool:
-    """Compatibility name for callers that specifically route RAR facts."""
-    return any(
-        fmt == "rar" and _validated_format_password_state(fmt, structure) == "required"
-        for fmt, structure in _structure_facts(fact_bag)
-    )
-
-
 class PasswordResolver:
     """Plan bounded password checks and hand ambiguous candidates to extraction.
 

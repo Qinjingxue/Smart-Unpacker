@@ -126,7 +126,7 @@ fn verify_zip_volumes(
     {
         return simple_status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             0,
             "zip64 spanned password probing is not supported",
         );
@@ -134,7 +134,7 @@ fn verify_zip_volumes(
     if central_size > MAX_CENTRAL_SCAN {
         return simple_status(
             py,
-            "unknown_need_fallback",
+            "unknown_needs_final_verifier",
             0,
             "zip central directory exceeds bounded probe budget",
         );
@@ -174,7 +174,7 @@ fn verify_zip_volumes(
             if entry_disk == u16::MAX as usize || local_offset == u32::MAX as u64 {
                 return simple_status(
                     py,
-                    "unknown_need_fallback",
+                    "unknown_needs_final_verifier",
                     0,
                     "zip64 encrypted entry location requires fallback",
                 );

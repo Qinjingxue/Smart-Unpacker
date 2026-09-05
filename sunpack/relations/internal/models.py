@@ -1,8 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
-
-from sunpack.contracts.filesystem import FileEntry
-
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class FileRelation:
@@ -72,10 +69,3 @@ class CandidateGroup:
     def owned_paths(self) -> List[str]:
         """Return data inputs plus non-input companions owned by this group."""
         return list(dict.fromkeys([*self.input_paths, *(self.companion_paths or [])]))
-
-@dataclass
-class DirectoryFileIndex:
-    entries: List[FileEntry]
-    lower_names: Set[str]
-    by_norm_path: Dict[str, FileEntry]
-    by_lower_name: Dict[str, List[FileEntry]]

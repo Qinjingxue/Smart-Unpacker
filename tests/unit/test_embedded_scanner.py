@@ -1,6 +1,8 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from sunpack.analysis import scan_embedded_archives
 from sunpack.support.global_cache_manager import clear_cache_namespace
 
@@ -14,7 +16,12 @@ def test_shared_embedded_scanner_is_single_flight_per_file_identity(monkeypatch)
             calls += 1
             time.sleep(0.03)
             return {
+                "found": True,
                 "complete": True,
+                "signature_scan_complete": True,
+                "logical_resolution_complete": True,
+                "raw_hit_count": 1,
+                "budget_exhausted": False,
                 "candidates": [{
                     "format": "zip",
                     "detected_ext": ".zip",
@@ -22,6 +29,11 @@ def test_shared_embedded_scanner_is_single_flight_per_file_identity(monkeypatch)
                     "end_offset": 512,
                     "confidence": 0.99,
                     "validation": "zip_structure",
+                    "candidate_kind": "logical_archive",
+                    "boundary_kind": "exact",
+                    "range_end_offset": 512,
+                    "extractable": True,
+                    "contained_anchor_count": 0,
                 }],
                 "hits": [{"name": "zip_local", "offset": 128}],
                 "read_bytes": 1024,
@@ -45,6 +57,7 @@ def test_embedded_scanner_preserves_native_budget_exhaustion(monkeypatch):
     class Session:
         def scan_embedded_archives(self):
             return {
+                "found": False,
                 "complete": False,
                 "signature_scan_complete": False,
                 "logical_resolution_complete": False,
@@ -70,3 +83,21 @@ def test_embedded_scanner_preserves_native_budget_exhaustion(monkeypatch):
     assert result.budget_exhausted is True
     assert result.raw_hit_count == 1_000_001
     assert result.candidates == ()
+
+
+def test_embedded_scanner_rejects_legacy_native_schema(monkeypatch):
+    class Session:
+        def scan_embedded_archives(self):
+            return {
+                "complete": True,
+                "candidates": [],
+                "hits": [],
+                "read_bytes": 0,
+                "file_size": 0,
+            }
+
+    clear_cache_namespace("embedded_archive_scan_v3")
+    monkeypatch.setattr("sunpack.analysis.embedded.scanner.get_archive_session", lambda path: Session())
+
+    with pytest.raises(TypeError, match="missing required fields"):
+        scan_embedded_archives("legacy.bin", identity=("legacy", 0, 1))

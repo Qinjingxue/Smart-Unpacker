@@ -22,13 +22,13 @@ class _CompressionModule:
         embedded = [
             item for item in prepass.get("embedded_candidates", [])
             if item.get("format") == self.fmt
-            and item.get("candidate_kind", "logical_archive") == "logical_archive"
+            and item["candidate_kind"] == "logical_archive"
         ]
         if embedded:
             complete = all(
                 item.get("end_offset") is not None
-                and item.get("boundary_kind", "exact") == "exact"
-                and item.get("extractable", True)
+                and item["boundary_kind"] == "exact"
+                and item["extractable"]
                 for item in embedded
             )
             confidence = min(float(max(item.get("confidence") or 0.0 for item in embedded)), 0.99)
