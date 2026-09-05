@@ -8,10 +8,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = [Security.Principal.WindowsPrincipal]::new($identity)
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "The installer lifecycle test must run from an elevated PowerShell because it installs a real LocalSystem service."
+. (Join-Path $PSScriptRoot "test_elevation.ps1")
+$elevatedExitCode = Invoke-TestScriptElevated -ScriptPath $PSCommandPath -BoundParameters $PSBoundParameters
+if ($null -ne $elevatedExitCode) {
+    exit $elevatedExitCode
 }
 
 function Invoke-Checked {

@@ -12,7 +12,6 @@ import statistics
 import sys
 import time
 import types
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.harness.reporting import report_from_payload, render_report
 from benchmarks.harness.workspace import BenchmarkWorkspace
+from benchmarks.watch_broker import watch_broker_lease
 from benchmarks.scenarios.extraction_large_archive import RequestRuntimeProfiler, _timing_totals
 from sunpack.config.loader import load_config
 from sunpack.coordinator.engine import PipelineEngine
@@ -41,17 +41,6 @@ DEFAULT_MODES = (
     "interleaved_direct",
     "head_first_rename",
 )
-
-
-@contextmanager
-def _watch_broker_lease():
-    from sunpack_native import watch_broker_acquire, watch_broker_release
-
-    watch_broker_acquire()
-    try:
-        yield
-    finally:
-        watch_broker_release()
 
 
 def _now() -> float:
@@ -504,7 +493,7 @@ def main() -> int:
     delay_seconds = max(0.0, args.chunk_delay_ms / 1000.0)
 
     samples: list[dict[str, Any]] = []
-    with _watch_broker_lease(), BenchmarkWorkspace("watch.split-arrival", results_root=args.results_root) as workspace:
+    with watch_broker_lease() as broker_metadata, BenchmarkWorkspace("watch.split-arrival", results_root=args.results_root) as workspace:
         for run_index in range(args.runs):
             for quiet_index, quiet_seconds in enumerate(quiet_values):
                 for mode in modes:
@@ -554,6 +543,7 @@ def main() -> int:
             for mode, quiet_groups in grouped.items()
         }
         report = {
+            "watch_broker": broker_metadata,
             "parameters": {
                 "sources": [str(path) for path in sources],
                 "modes": list(modes),

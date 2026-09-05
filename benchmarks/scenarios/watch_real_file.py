@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.harness.reporting import report_from_payload, render_report
 from benchmarks.harness.workspace import BenchmarkWorkspace
+from benchmarks.watch_broker import watch_broker_lease
 from benchmarks.scenarios.extraction_large_archive import (
     RequestRuntimeProfiler,
     _timing_totals,
@@ -263,7 +264,7 @@ def main() -> int:
     passwords.extend(args.password)
 
     samples: list[dict[str, Any]] = []
-    with BenchmarkWorkspace(
+    with watch_broker_lease() as broker_metadata, BenchmarkWorkspace(
         "watch.real-file",
         results_root=args.results_root,
         keep_workdir=args.keep_workdir,
@@ -278,6 +279,7 @@ def main() -> int:
             )))
         end_to_end = [row["timings_seconds"]["end_to_end_copy_start_to_promotion"] for row in samples]
         report = {
+            "watch_broker": broker_metadata,
             "parameters": {
                 "source": str(source),
                 "runs": args.runs,

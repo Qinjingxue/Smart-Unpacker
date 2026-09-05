@@ -1,5 +1,9 @@
 use crate::protocol::{parse_file_id, Opcode, Request, Response, Status, RESPONSE_BYTES};
-use crate::{ChangeReasons, PIPE_NAME, SERVICE_NAME};
+use crate::{
+    ChangeReasons, PIPE_NAME, PIPE_NAME_ENV, SERVICE_NAME, SERVICE_NAME_ENV, TEST_PIPE_NAME_PREFIX,
+    TEST_SERVICE_NAME_PREFIX,
+};
+use std::env;
 use std::io;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -249,7 +253,11 @@ fn start_service() -> io::Result<()> {
     if manager.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let service_name = wide(SERVICE_NAME);
+    let service_name = wide(&configured_name(
+        SERVICE_NAME_ENV,
+        SERVICE_NAME,
+        TEST_SERVICE_NAME_PREFIX,
+    ));
     let service = unsafe {
         OpenServiceW(
             manager,
@@ -356,7 +364,11 @@ fn query_service_status(
 }
 
 fn connect_pipe() -> io::Result<BrokerConnection> {
-    let pipe_name = wide(PIPE_NAME);
+    let pipe_name = wide(&configured_name(
+        PIPE_NAME_ENV,
+        PIPE_NAME,
+        TEST_PIPE_NAME_PREFIX,
+    ));
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
         let handle = unsafe {
@@ -446,6 +458,13 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn configured_name(variable: &str, default: &str, test_prefix: &str) -> String {
+    env::var(variable)
+        .ok()
+        .filter(|value| value.starts_with(test_prefix))
+        .unwrap_or_else(|| default.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +472,32 @@ mod tests {
     #[test]
     fn disconnected_client_is_not_reported_as_connected() {
         assert!(!broker_is_connected());
+    }
+
+    #[test]
+    fn empty_runtime_identity_uses_the_production_default() {
+        let variable = "SUNPACK_TEST_EMPTY_BROKER_IDENTITY";
+        std::env::set_var(variable, "");
+        assert_eq!(
+            configured_name(variable, SERVICE_NAME, TEST_SERVICE_NAME_PREFIX),
+            SERVICE_NAME
+        );
+        std::env::remove_var(variable);
+    }
+
+    #[test]
+    fn runtime_identity_accepts_only_the_test_namespace() {
+        let variable = "SUNPACK_TEST_BROKER_IDENTITY_NAMESPACE";
+        std::env::set_var(variable, "SunPackWatchBroker");
+        assert_eq!(
+            configured_name(variable, SERVICE_NAME, TEST_SERVICE_NAME_PREFIX),
+            SERVICE_NAME
+        );
+        std::env::set_var(variable, "SunPackWatchBrokerTest_example");
+        assert_eq!(
+            configured_name(variable, SERVICE_NAME, TEST_SERVICE_NAME_PREFIX),
+            "SunPackWatchBrokerTest_example"
+        );
+        std::env::remove_var(variable);
     }
 }

@@ -14,7 +14,10 @@ from sunpack.filesystem.watcher.scanner import _candidate_for
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="NTFS USN tests require Windows")
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "win32", reason="NTFS USN tests require Windows"),
+    pytest.mark.requires_watch_broker,
+]
 
 
 @pytest.fixture(scope="module", autouse=True)

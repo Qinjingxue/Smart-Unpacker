@@ -9,6 +9,7 @@ class Scenario:
     name: str
     module: str
     description: str
+    requires_watch_broker: bool = False
 
 
 _ROWS = [
@@ -39,4 +40,13 @@ _ROWS = [
     ("extraction", "split-pressure", "benchmarks.scenarios.extraction_split_pressure", "Split and carrier archive matrix."),
 ]
 
-SCENARIOS = {(group, name): Scenario(group, name, module, description) for group, name, module, description in _ROWS}
+SCENARIOS = {
+    (group, name): Scenario(
+        group,
+        name,
+        module,
+        description,
+        requires_watch_broker=(group == "watch"),
+    )
+    for group, name, module, description in _ROWS
+}

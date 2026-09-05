@@ -114,6 +114,10 @@ def pytest_configure(config):
         "markers",
         "large_archive_performance: opt-in large archive performance tests that generate multi-GB fixtures",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_watch_broker: requires the isolated, ephemeral Watch Broker test service",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -125,7 +129,21 @@ def pytest_collection_modifyitems(config, items):
         skip_large = pytest.mark.skip(
             reason="use --run-large-archive-performance to run multi-GB performance tests"
         )
+    isolated_broker = (
+        os.environ.get("SUNPACK_WATCH_BROKER_SERVICE_NAME", "").startswith("SunPackWatchBrokerTest_")
+        and os.environ.get("SUNPACK_WATCH_BROKER_PIPE_NAME", "").startswith(
+            r"\\.\pipe\SunPack.WatchBroker.Test."
+        )
+    )
+    skip_broker = pytest.mark.skip(
+        reason="run through scripts/run_watch_tests.ps1 to provision an isolated Watch Broker"
+    )
     for item in items:
+        item_path = Path(str(item.path)).as_posix()
+        if "/tests/real/plan7_watch_downloads/" in f"/{item_path}":
+            item.add_marker(pytest.mark.requires_watch_broker)
+        if "requires_watch_broker" in item.keywords and not isolated_broker:
+            item.add_marker(skip_broker)
         if skip_performance and "performance" in item.keywords and "large_archive_performance" not in item.keywords:
             item.add_marker(skip_performance)
         if skip_large and "large_archive_performance" in item.keywords:

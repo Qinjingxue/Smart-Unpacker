@@ -6,7 +6,7 @@ use std::ffi::{c_void, OsString};
 use std::io;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use sunpack_usn_core::protocol::{
@@ -51,11 +51,50 @@ const LAST_CLIENT_DEBOUNCE: Duration = Duration::from_secs(1);
 const MAX_VOLUME_CONTEXTS: usize = 64;
 const VOLUME_CONTEXT_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
+
+#[derive(Debug)]
+struct BrokerConfig {
+    service_name: String,
+    pipe_name: String,
+}
+
+impl BrokerConfig {
+    fn from_args(mut arguments: impl Iterator<Item = String>) -> Self {
+        let mut config = Self {
+            service_name: SERVICE_NAME.to_owned(),
+            pipe_name: PIPE_NAME.to_owned(),
+        };
+        while let Some(argument) = arguments.next() {
+            let target = match argument.as_str() {
+                "--service-name" => &mut config.service_name,
+                "--pipe-name" => &mut config.pipe_name,
+                _ => panic!("unknown Watch Broker argument: {argument}"),
+            };
+            *target = arguments
+                .next()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| panic!("missing value for Watch Broker argument: {argument}"));
+        }
+        config
+    }
+}
+
+fn broker_config() -> &'static BrokerConfig {
+    CONFIG
+        .get()
+        .expect("Watch Broker configuration was not initialized")
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
 fn main() -> windows_service::Result<()> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+    let config = BrokerConfig::from_args(std::env::args().skip(1));
+    let service_name = config.service_name.clone();
+    CONFIG
+        .set(config)
+        .expect("Watch Broker configuration was initialized twice");
+    service_dispatcher::start(service_name, ffi_service_main)
 }
 
 fn service_main(_arguments: Vec<OsString>) {
@@ -75,7 +114,8 @@ fn run_service() -> windows_service::Result<()> {
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+    let status_handle =
+        service_control_handler::register(&broker_config().service_name, event_handler)?;
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
@@ -392,7 +432,7 @@ fn create_pipe(first_instance: bool) -> io::Result<OwnedHandle> {
         lpSecurityDescriptor: descriptor.raw(),
         bInheritHandle: 0,
     };
-    let name = wide(PIPE_NAME);
+    let name = wide(&broker_config().pipe_name);
     let open_mode = PIPE_ACCESS_DUPLEX
         | FILE_FLAG_OVERLAPPED
         | if first_instance {
@@ -624,6 +664,32 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_identity_defaults_to_production_names() {
+        let config = BrokerConfig::from_args(std::iter::empty());
+        assert_eq!(config.service_name, SERVICE_NAME);
+        assert_eq!(config.pipe_name, PIPE_NAME);
+    }
+
+    #[test]
+    fn broker_identity_can_be_isolated_for_tests() {
+        let config = BrokerConfig::from_args(
+            [
+                "--service-name",
+                "SunPackWatchBrokerTest_example",
+                "--pipe-name",
+                r"\\.\pipe\SunPack.WatchBroker.Test.example",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(config.service_name, "SunPackWatchBrokerTest_example");
+        assert_eq!(
+            config.pipe_name,
+            r"\\.\pipe\SunPack.WatchBroker.Test.example"
+        );
+    }
 
     #[test]
     fn only_minimal_shapes_are_accepted_for_non_journal_operations() {

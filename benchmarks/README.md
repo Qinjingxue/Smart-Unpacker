@@ -10,6 +10,13 @@ python -m benchmarks --list
 
 Run a scenario by group and name. Arguments after the scenario are passed to that scenario:
 
+The `watch` group automatically builds and installs a uniquely named ephemeral
+Watch Broker test service, launches the benchmark with an ordinary user token,
+and removes only that service afterward. It never reuses, stops, or deletes an
+installed release `SunPackWatchBroker` service. CI must already run with an
+elevated account; interactive UAC is deliberately disabled there. Watch reports
+include the test service/pipe identity, Broker binary SHA-256, and connection state.
+
 ```powershell
 python -m benchmarks reader password-fast-path --rounds 5
 python -m benchmarks reader volume-anchor --files 128 --logical-mib 64 --rounds 5

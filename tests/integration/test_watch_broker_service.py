@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import statistics
 import subprocess
 import sys
@@ -9,7 +10,10 @@ import zipfile
 import pytest
 
 
-pytestmark = pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows-only service test")
+pytestmark = [
+    pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows-only service test"),
+    pytest.mark.requires_watch_broker,
+]
 
 
 def test_installed_broker_lifecycle_usn_roundtrip_and_hot_ipc(tmp_path):
@@ -28,8 +32,11 @@ def test_installed_broker_lifecycle_usn_roundtrip_and_hot_ipc(tmp_path):
     try:
         assert cold_start_seconds < 2.0
         assert sunpack_native.watch_broker_is_connected()
+        service_name = os.environ["SUNPACK_WATCH_BROKER_SERVICE_NAME"]
+        assert service_name.startswith("SunPackWatchBrokerTest_")
+        assert service_name != "SunPackWatchBroker"
         denied_stop = subprocess.run(
-            ["sc.exe", "stop", "SunPackWatchBroker"],
+            ["sc.exe", "stop", service_name],
             capture_output=True,
             text=True,
             check=False,

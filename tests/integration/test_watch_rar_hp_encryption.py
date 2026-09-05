@@ -17,6 +17,7 @@ from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 
 MAX_SETTLE_SECONDS = 45.0
 PAYLOAD_SIZE = 256 * 1024
+pytestmark = pytest.mark.requires_watch_broker
 
 
 @pytest.fixture(scope="module", autouse=True)

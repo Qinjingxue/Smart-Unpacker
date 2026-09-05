@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.harness.reporting import report_from_payload, render_report
 from benchmarks.harness.workspace import BenchmarkWorkspace
+from benchmarks.watch_broker import watch_broker_lease
 from benchmarks.scenarios.extraction_large_archive import RequestRuntimeProfiler, _timing_totals
 from sunpack.config.loader import load_config
 from sunpack.coordinator.engine import PipelineEngine
@@ -392,7 +393,7 @@ def main() -> int:
     delay_seconds = max(0.0, args.chunk_delay_ms / 1000.0)
 
     samples: list[dict[str, Any]] = []
-    with BenchmarkWorkspace("watch.arrival-matrix", results_root=args.results_root) as workspace:
+    with watch_broker_lease() as broker_metadata, BenchmarkWorkspace("watch.arrival-matrix", results_root=args.results_root) as workspace:
         for run_index in range(args.runs):
             for quiet_index, quiet_seconds in enumerate(quiet_values):
                 for mode in modes:
@@ -438,6 +439,7 @@ def main() -> int:
             for mode, quiet_groups in grouped.items()
         }
         report = {
+            "watch_broker": broker_metadata,
             "parameters": {
                 "source": str(source),
                 "modes": list(modes),

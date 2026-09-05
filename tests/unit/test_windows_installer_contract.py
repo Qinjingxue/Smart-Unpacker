@@ -251,6 +251,51 @@ def test_installer_smoke_uses_process_exit_code_for_started_processes():
     assert "Command failed with exit code" in script
 
 
+def test_service_test_entries_relaunch_themselves_elevated():
+    helper = (ROOT / "scripts" / "test_elevation.ps1").read_text(encoding="utf-8")
+    entry_paths = (
+        ROOT / "scripts" / "test_windows_installer.ps1",
+        ROOT / "scripts" / "run_watch_tests.ps1",
+    )
+
+    assert "-Verb RunAs" in helper
+    assert "-EncodedCommand" in helper
+    assert "-Wait" in helper
+    assert "-PassThru" in helper
+    assert "return [int]$process.ExitCode" in helper
+    assert "$env:CI" in helper
+    assert "$env:GITHUB_ACTIONS" in helper
+    assert "interactive UAC relaunch is disabled in CI" in helper
+    assert helper.index("interactive UAC relaunch is disabled in CI") < helper.index("Start-Process")
+    for path in entry_paths:
+        script = path.read_text(encoding="utf-8")
+        assert "test_elevation.ps1" in script, path
+        assert "Invoke-TestScriptElevated" in script, path
+        assert "-BoundParameters $PSBoundParameters" in script, path
+        assert "exit $elevatedExitCode" in script, path
+
+    service_entry = (ROOT / "scripts" / "test_watch_broker_service.ps1").read_text(encoding="utf-8")
+    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+    assert "run_watch_tests.ps1" in service_entry
+    assert 'Mode = "service-suite"' in service_entry
+    assert "run_watch_tests.ps1" in acceptance
+    assert '"-Mode", "acceptance"' in acceptance
+
+
+def test_watch_test_runner_never_reuses_or_removes_the_release_service():
+    runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
+    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+
+    assert '"SunPackWatchBrokerTest_$runId"' in runner
+    assert '"\\\\.\\pipe\\SunPack.WatchBroker.Test.$runId"' in runner
+    assert 'if ($serviceName -eq "SunPackWatchBroker"' in runner
+    assert "Stop-Service -Name $serviceName" in runner
+    assert "sc.exe delete $serviceName" in runner
+    assert 'Get-Service -Name "SunPackWatchBroker"' not in acceptance
+    assert 'Stop-Service -Name "SunPackWatchBroker"' not in acceptance
+    assert "sc.exe delete SunPackWatchBroker" not in acceptance
+
+
 def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 

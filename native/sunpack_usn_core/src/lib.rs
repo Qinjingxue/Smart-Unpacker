@@ -18,3 +18,7 @@ pub use types::ChangeReasons;
 
 pub const SERVICE_NAME: &str = "SunPackWatchBroker";
 pub const PIPE_NAME: &str = r"\\.\pipe\SunPack.WatchBroker.v1";
+pub const SERVICE_NAME_ENV: &str = "SUNPACK_WATCH_BROKER_SERVICE_NAME";
+pub const PIPE_NAME_ENV: &str = "SUNPACK_WATCH_BROKER_PIPE_NAME";
+pub const TEST_SERVICE_NAME_PREFIX: &str = "SunPackWatchBrokerTest_";
+pub const TEST_PIPE_NAME_PREFIX: &str = r"\\.\pipe\SunPack.WatchBroker.Test.";

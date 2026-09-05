@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +16,7 @@ from .registry import SCENARIOS
 BENCHMARKS_ROOT = Path(__file__).resolve().parent
 BENCHMARK_CACHE_ROOT = BENCHMARKS_ROOT / ".cache"
 BENCHMARK_WORK_ROOT = BENCHMARKS_ROOT / ".work"
+REPO_ROOT = BENCHMARKS_ROOT.parent
 
 # A scenario that makes a stale API call must fail loudly instead of hanging the
 # whole benchmark run.  Every scenario therefore runs in a child process under
@@ -63,6 +67,35 @@ def _run_scenario_in_subprocess(module: str, scenario_args: list[str], timeout: 
     return int(completed.returncode)
 
 
+def _isolated_watch_broker_is_configured() -> bool:
+    return (
+        os.environ.get("SUNPACK_WATCH_BROKER_SERVICE_NAME", "").startswith("SunPackWatchBrokerTest_")
+        and os.environ.get("SUNPACK_WATCH_BROKER_PIPE_NAME", "").startswith(
+            r"\\.\pipe\SunPack.WatchBroker.Test."
+        )
+    )
+
+
+def _run_with_isolated_watch_broker(arguments: list[str], timeout: float) -> int:
+    payload = base64.b64encode(json.dumps(arguments).encode("utf-8")).decode("ascii")
+    runner = REPO_ROOT / "scripts" / "run_watch_tests.ps1"
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        "-Mode",
+        "benchmark",
+        "-ArgumentsBase64",
+        payload,
+        "-TimeoutSeconds",
+        str(max(1, math.ceil(timeout) + 300)),
+    ]
+    return int(subprocess.run(command, cwd=REPO_ROOT, check=False).returncode)
+
+
 def _clean_benchmark_artifacts(args: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Remove regenerable benchmark artifacts.")
     parser.add_argument("--cache", action="store_true", help="Remove benchmarks/.cache.")
@@ -106,4 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         _parser().error(f"unknown {args.group} scenario {args.scenario!r}; choose one of: {names}")
     if args.timeout <= 0:
         _parser().error("--timeout must be positive")
+    if selected.requires_watch_broker and not _isolated_watch_broker_is_configured():
+        return _run_with_isolated_watch_broker(
+            ["--timeout", str(args.timeout), args.group, args.scenario, *args.scenario_args],
+            args.timeout,
+        )
     return _run_scenario_in_subprocess(selected.module, list(args.scenario_args), args.timeout)
