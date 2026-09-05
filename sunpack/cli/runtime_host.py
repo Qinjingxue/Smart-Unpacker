@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Callable
 
 from sunpack.cli.persistent_runtime import shared_pipeline_engine
 from sunpack.config.loader import load_config
@@ -18,7 +19,12 @@ _LOG = logging.getLogger(__name__)
 class RuntimeHost:
     """Own the one engine and optional watch lifecycle for one installed executable."""
 
-    def __init__(self, *, log_path: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        log_path: str | None = None,
+        state_changed: Callable[[], None] | None = None,
+    ) -> None:
         self._lock = asyncio.Lock()
         self._qos_lock = asyncio.Lock()
         self._watch_service: WatchService | None = None
@@ -28,6 +34,7 @@ class RuntimeHost:
         self._foreground_requests = 0
         self._background = False
         self._demote_task: asyncio.Task | None = None
+        self._state_changed = state_changed
         self.archive_registry = ActiveArchiveRegistry()
         self._event_log = None
         if log_path:
@@ -35,6 +42,10 @@ class RuntimeHost:
 
             self._event_log = WatchLogStore(log_path)
         self.log_event("host_started", host_pid=os.getpid())
+
+    def _notify_state_changed(self) -> None:
+        if self._state_changed is not None:
+            self._state_changed()
 
     def log_event(self, event: str, **payload) -> None:
         if self._event_log is not None:
@@ -94,6 +105,7 @@ class RuntimeHost:
             self._watch_generation += 1
             generation = self._watch_generation
             self.log_event("watch_starting", initial_scan=bool(initial_scan), tray_enabled=bool(tray_enabled))
+            self._notify_state_changed()
         try:
             await service.wait_ready()
         except BaseException as exc:
@@ -103,6 +115,7 @@ class RuntimeHost:
                 if self._watch_task is task:
                     self._watch_service = None
                     self._watch_task = None
+            self._notify_state_changed()
             raise
         task.add_done_callback(
             lambda completed: asyncio.create_task(
@@ -144,6 +157,7 @@ class RuntimeHost:
             if self._watch_task is task:
                 self._watch_service = None
                 self._watch_task = None
+        self._notify_state_changed()
         if error is not None:
             await self._set_process_mode(background=False)
             raise error
@@ -258,5 +272,6 @@ class RuntimeHost:
             if generation == self._watch_generation and self._watch_task is task:
                 self._watch_service = None
                 self._watch_task = None
+        self._notify_state_changed()
         if not self.watch_enabled:
             await self._set_process_mode(background=False)

@@ -97,7 +97,8 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
     monkeypatch.setattr(process_qos, "set_processing_mode", lambda *, background: events.append(("host_qos", background)))
 
     async def scenario():
-        host = RuntimeHost()
+        state_changes = []
+        host = RuntimeHost(state_changed=lambda: state_changes.append(host.watch_enabled))
         started = await host.start_watch(tray_enabled=False, initial_scan=True)
         assert started["started"] is True
         assert host.watch_enabled is True
@@ -109,6 +110,8 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
         assert stopped["stopped"] is True
         assert host.watch_enabled is False
         await host.close()
+        assert True in state_changes
+        assert state_changes[-1] is False
 
     asyncio.run(scenario())
     assert ("worker_qos", True) in events

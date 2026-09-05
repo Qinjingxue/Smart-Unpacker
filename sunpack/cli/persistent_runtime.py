@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from sunpack.config.loader import config_source_key, load_config, load_effective_config_payload
 from sunpack.config.advanced_defaults import advanced_config_value
@@ -26,20 +26,30 @@ class _ConfigSnapshot:
 _ENGINE: PipelineEngine | None = None
 _CONFIG_SNAPSHOTS: dict[ConfigSourceKey, _ConfigSnapshot] = {}
 _LATEST_IDLE_SECONDS: float | None = None
+_STATE_CHANGED_CALLBACK: Callable[[], None] | None = None
 
 
-def enable_persistent_runtime() -> None:
+def enable_persistent_runtime(*, state_changed: Callable[[], None] | None = None) -> None:
+    global _STATE_CHANGED_CALLBACK
+    _STATE_CHANGED_CALLBACK = state_changed
     set_server_runtime_active(True)
 
 
 async def close_persistent_runtime() -> None:
-    global _ENGINE, _LATEST_IDLE_SECONDS
+    global _ENGINE, _LATEST_IDLE_SECONDS, _STATE_CHANGED_CALLBACK
     engine, _ENGINE = _ENGINE, None
     _CONFIG_SNAPSHOTS.clear()
     _LATEST_IDLE_SECONDS = None
     set_server_runtime_active(False)
-    if engine is not None:
-        await engine.aclose(graceful=True)
+    try:
+        if engine is not None:
+            await engine.aclose(graceful=True)
+    finally:
+        if engine is not None:
+            setter = getattr(engine, "set_state_changed_callback", None)
+            if setter is not None:
+                setter(None)
+        _STATE_CHANGED_CALLBACK = None
 
 
 def persistent_runtime_is_idle() -> bool:
@@ -113,6 +123,9 @@ async def pipeline_engine(
     if engine is None:
         engine_config = copy.deepcopy(config)
         created = PipelineEngine(engine_config)
+        setter = getattr(created, "set_state_changed_callback", None)
+        if setter is not None:
+            setter(_STATE_CHANGED_CALLBACK)
         engine = await created.__aenter__()
         _ENGINE = engine
     else:

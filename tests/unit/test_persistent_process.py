@@ -4,6 +4,7 @@ import os
 import socket
 import struct
 import threading
+import time
 
 from sunpack.cli import persistent_process
 from sunpack.support import runtime_identity
@@ -278,6 +279,75 @@ def test_server_idle_shutdown_requires_completed_request_and_idle_runtime():
     )
 
 
+def test_idle_shutdown_monitor_waits_for_events_and_one_deadline():
+    async def scenario():
+        shutdown = asyncio.Event()
+        state_changed = asyncio.Event()
+        state = {
+            "served": False,
+            "last_completed": time.monotonic(),
+            "active": 0,
+            "exit_reason": "shutdown",
+        }
+        task = asyncio.create_task(
+            persistent_process._monitor_idle_shutdown(
+                shutdown=shutdown,
+                state_changed=state_changed,
+                state=state,
+                watch_active=lambda: False,
+                idle_seconds=lambda: 0.02,
+                runtime_idle=lambda: True,
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not shutdown.is_set()
+
+        state["served"] = True
+        state["last_completed"] = time.monotonic()
+        state_changed.set()
+        await asyncio.wait_for(shutdown.wait(), timeout=0.5)
+        await task
+
+        assert state["exit_reason"] == "idle_timeout"
+
+    asyncio.run(scenario())
+
+
+def test_idle_shutdown_monitor_cancels_deadline_when_runtime_becomes_busy():
+    async def scenario():
+        shutdown = asyncio.Event()
+        state_changed = asyncio.Event()
+        state = {
+            "served": True,
+            "last_completed": time.monotonic(),
+            "active": 0,
+            "exit_reason": "shutdown",
+        }
+        task = asyncio.create_task(
+            persistent_process._monitor_idle_shutdown(
+                shutdown=shutdown,
+                state_changed=state_changed,
+                state=state,
+                watch_active=lambda: False,
+                idle_seconds=lambda: 0.04,
+                runtime_idle=lambda: True,
+            )
+        )
+        await asyncio.sleep(0.01)
+        state["active"] = 1
+        state_changed.set()
+        await asyncio.sleep(0.05)
+        assert not shutdown.is_set()
+
+        state["active"] = 0
+        state["last_completed"] = time.monotonic()
+        state_changed.set()
+        await asyncio.wait_for(shutdown.wait(), timeout=0.5)
+        await task
+
+    asyncio.run(scenario())
+
+
 def test_pipe_server_cleanup_only_requires_close():
     closed = []
 
@@ -466,6 +536,7 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
     from sunpack.cli import persistent_runtime
 
     events = []
+    callbacks = []
 
     class FakeEngine:
         def __init__(self, config):
@@ -482,6 +553,9 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
         def reconfigure_request(self, config):
             self.config = config
             events.append(("reconfigure", config["output"]["root"]))
+
+        def set_state_changed_callback(self, callback):
+            callbacks.append(callback)
 
         async def aclose(self, *, graceful=True):
             events.append(("close", graceful))
@@ -501,7 +575,11 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
     }
     async def scenario():
         await persistent_runtime.close_persistent_runtime()
-        persistent_runtime.enable_persistent_runtime()
+
+        def state_changed():
+            pass
+
+        persistent_runtime.enable_persistent_runtime(state_changed=state_changed)
         async with persistent_runtime.pipeline_engine(first) as first_engine:
             pass
         async with persistent_runtime.pipeline_engine(second) as second_engine:
@@ -511,6 +589,8 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
         assert ("reconfigure", "two") in events
         assert persistent_runtime.persistent_runtime_is_idle()
         assert persistent_runtime.persistent_server_idle_seconds() == 9
+        assert callbacks == [state_changed]
         await persistent_runtime.close_persistent_runtime()
+        assert callbacks[-1] is None
 
     asyncio.run(scenario())

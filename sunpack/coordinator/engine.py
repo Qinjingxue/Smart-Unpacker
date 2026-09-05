@@ -125,6 +125,8 @@ class PipelineEngine:
         self._started = False
         self._closed = False
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._state_changed_callback: Callable[[], None] | None = None
+        self._broker.set_state_changed_callback(self._notify_state_changed)
 
     @property
     def recent_passwords(self) -> list[str]:
@@ -136,6 +138,14 @@ class PipelineEngine:
 
     def is_idle(self) -> bool:
         return not self._active_requests and self._broker.pending_jobs == 0 and self._broker.active_jobs == 0
+
+    def set_state_changed_callback(self, callback: Callable[[], None] | None) -> None:
+        self._state_changed_callback = callback
+
+    def _notify_state_changed(self) -> None:
+        callback = self._state_changed_callback
+        if callback is not None:
+            callback()
 
     async def __aenter__(self) -> "PipelineEngine":
         if self._closed:
@@ -198,6 +208,7 @@ class PipelineEngine:
         task = asyncio.current_task()
         if task is not None:
             self._active_requests[submission.request_id] = task
+            self._notify_state_changed()
         origin_marker = CURRENT_ORIGIN.set(submission.origin)
         try:
             with resource_scope.activate():
@@ -226,6 +237,7 @@ class PipelineEngine:
                 self._path_leases.release(submission.request_id)
                 self._active_requests.pop(submission.request_id, None)
                 CURRENT_ORIGIN.reset(origin_marker)
+                self._notify_state_changed()
 
     async def clear_runtime_caches(self) -> dict:
         """Clear process-wide runtime caches only while this engine is idle."""

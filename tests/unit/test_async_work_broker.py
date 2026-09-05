@@ -65,6 +65,24 @@ def test_broker_round_robins_requests_instead_of_draining_one_batch():
     asyncio.run(scenario())
 
 
+def test_broker_reports_busy_and_idle_state_changes():
+    async def scenario():
+        broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=2)
+        states = []
+        broker.set_state_changed_callback(
+            lambda: states.append((broker.pending_jobs, broker.active_jobs))
+        )
+        try:
+            assert await broker.run("verify", "item", lambda: "done") == "done"
+        finally:
+            await broker.close()
+
+        assert any(pending or active for pending, active in states)
+        assert states[-1] == (0, 0)
+
+    asyncio.run(scenario())
+
+
 def test_broker_dispatches_waiting_foreground_before_watch_without_preemption():
     async def scenario():
         broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=8)

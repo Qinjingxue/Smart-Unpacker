@@ -649,10 +649,8 @@ async def run_server() -> int:
     from sunpack.cli.runtime_host import RuntimeHost
     from sunpack.cli.runtime_state import set_runtime_host
 
-    enable_persistent_runtime()
-    runtime_host = RuntimeHost(log_path=state_path() + ".events.jsonl")
-    set_runtime_host(runtime_host)
     shutdown = asyncio.Event()
+    state_changed = asyncio.Event()
     state = {
         "served": False,
         "last_completed": time.monotonic(),
@@ -660,19 +658,33 @@ async def run_server() -> int:
         "exit_reason": "shutdown",
     }
 
+    def notify_state_changed() -> None:
+        state_changed.set()
+
+    enable_persistent_runtime(state_changed=notify_state_changed)
+    runtime_host = RuntimeHost(
+        log_path=state_path() + ".events.jsonl",
+        state_changed=notify_state_changed,
+    )
+    set_runtime_host(runtime_host)
+
     def connected() -> None:
         state["active"] += 1
+        notify_state_changed()
 
     def closed() -> None:
         state["active"] = max(0, state["active"] - 1)
+        notify_state_changed()
 
     def completed() -> None:
         state["served"] = True
         state["last_completed"] = time.monotonic()
+        notify_state_changed()
 
     def requested_shutdown() -> None:
         state["exit_reason"] = "cli_shutdown"
         shutdown.set()
+        notify_state_changed()
 
     loop = asyncio.get_running_loop()
     start_serving_pipe = getattr(loop, "start_serving_pipe", None)
@@ -711,20 +723,14 @@ async def run_server() -> int:
     _write_state(name, token)
 
     async def monitor_idle() -> None:
-        while not shutdown.is_set():
-            await asyncio.sleep(0.25)
-            if state["active"]:
-                continue
-            if runtime_host.watch_enabled:
-                continue
-            if _idle_shutdown_due(
-                served_request=bool(state["served"]),
-                last_completed_at=float(state["last_completed"]),
-                idle_seconds=persistent_server_idle_seconds(),
-                runtime_idle=persistent_runtime_is_idle(),
-            ):
-                state["exit_reason"] = "idle_timeout"
-                shutdown.set()
+        await _monitor_idle_shutdown(
+            shutdown=shutdown,
+            state_changed=state_changed,
+            state=state,
+            watch_active=lambda: runtime_host.watch_enabled,
+            idle_seconds=persistent_server_idle_seconds,
+            runtime_idle=persistent_runtime_is_idle,
+        )
 
     monitor = asyncio.create_task(monitor_idle(), name="persistent-idle-monitor")
     try:
@@ -766,6 +772,56 @@ def _idle_shutdown_due(
     if now is None:
         now = time.monotonic()
     return now - last_completed_at >= max(0.0, float(idle_seconds))
+
+
+async def _monitor_idle_shutdown(
+    *,
+    shutdown: asyncio.Event,
+    state_changed: asyncio.Event,
+    state: dict[str, Any],
+    watch_active: Callable[[], bool],
+    idle_seconds: Callable[[], float],
+    runtime_idle: Callable[[], bool],
+) -> None:
+    """Wait for lifecycle changes and one idle deadline without fixed polling."""
+
+    while not shutdown.is_set():
+        state_changed.clear()
+        if (
+            not state.get("served")
+            or int(state.get("active") or 0) > 0
+            or watch_active()
+            or not runtime_idle()
+        ):
+            await state_changed.wait()
+            continue
+
+        timeout = max(
+            0.0,
+            float(state.get("last_completed") or 0.0)
+            + max(0.0, float(idle_seconds()))
+            - time.monotonic(),
+        )
+        if timeout > 0.0:
+            try:
+                await asyncio.wait_for(state_changed.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                continue
+
+        if (
+            not state.get("active")
+            and not watch_active()
+            and _idle_shutdown_due(
+                served_request=bool(state.get("served")),
+                last_completed_at=float(state.get("last_completed") or 0.0),
+                idle_seconds=idle_seconds(),
+                runtime_idle=runtime_idle(),
+            )
+        ):
+            state["exit_reason"] = "idle_timeout"
+            shutdown.set()
 
 
 def _recv_exact(connection, size: int) -> bytes:

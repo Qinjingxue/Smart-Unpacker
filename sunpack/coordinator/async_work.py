@@ -156,6 +156,15 @@ class AsyncWorkBroker:
         self._closed = False
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_thread_id: int | None = None
+        self._state_changed_callback: Callable[[], None] | None = None
+
+    def set_state_changed_callback(self, callback: Callable[[], None] | None) -> None:
+        self._state_changed_callback = callback
+
+    def _notify_state_changed(self) -> None:
+        callback = self._state_changed_callback
+        if callback is not None:
+            callback()
 
     def configure_thread_capacity(self, value: int) -> None:
         """Apply the native startup capacity before request work is admitted."""
@@ -338,6 +347,7 @@ class AsyncWorkBroker:
                     completed,
                 )
             )
+        self._notify_state_changed()
 
     def _pop_next_request_id(self) -> str:
         """Choose foreground FIFO before watch FIFO without preemption or aging."""
