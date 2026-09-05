@@ -77,6 +77,36 @@ function Wait-ExecutableExit {
     throw "Packaged runtime did not exit within $TimeoutSeconds seconds: $ExecutablePath (PID: $processIds)"
 }
 
+function Wait-FileReadyForPromotion {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    do {
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open(
+                $LiteralPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+            return
+        } catch [System.IO.IOException] {
+        } catch [System.UnauthorizedAccessException] {
+        } finally {
+            if ($null -ne $stream) {
+                $stream.Dispose()
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Compiled installer remained locked for $TimeoutSeconds seconds: $LiteralPath"
+}
+
 function Reset-StaleCMakeBuildDir {
     param(
         [Parameter(Mandatory = $true)]
@@ -667,7 +697,8 @@ function Invoke-WithRetry {
                 throw
             }
             Write-Warning ("{0} failed on attempt {1}/{2}: {3}" -f $Description, $attempt, $MaxAttempts, $_.Exception.Message)
-            Start-Sleep -Seconds $DelaySeconds
+            $retryDelaySeconds = [Math]::Min(30, [Math]::Max(1, $DelaySeconds) * $attempt)
+            Start-Sleep -Seconds $retryDelaySeconds
         }
     }
 }
@@ -1241,17 +1272,36 @@ if ($processArch -eq $buildArch) {
 
 Write-Step "Creating Windows installer"
 $installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
-Invoke-WithRetry -Description "Inno Setup installer compilation" -ScriptBlock {
-    Invoke-Native -FilePath $innoCompiler -Arguments @(
-        "/Qp",
-        "/DAppVersion=$versionValue",
-        "/DSourceDir=$distAppRoot",
-        "/DOutputDir=$releaseRoot",
-        "/DOutputBaseFilename=$installerBaseName",
-        "/DTargetArch=$buildArch",
-        "/DRepairSystem=$repairSystemMode",
-        $installerScriptPath
-    )
+$installerStagingBase = Join-Path $buildRoot "inno-staging"
+$installerStagingRoot = Join-Path $installerStagingBase ([guid]::NewGuid().ToString("N"))
+$normalizedStagingBase = (ConvertTo-NormalizedFullPath -Path $installerStagingBase) + "\"
+$normalizedStagingRoot = ConvertTo-NormalizedFullPath -Path $installerStagingRoot
+if (-not $normalizedStagingRoot.StartsWith($normalizedStagingBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to use installer staging directory outside its expected root: $installerStagingRoot"
+}
+New-Item -ItemType Directory -Path $installerStagingRoot -Force | Out-Null
+try {
+    Invoke-WithRetry -Description "Inno Setup installer compilation" -ScriptBlock {
+        # Never retry against the same output file. EndUpdateResource can leave a
+        # failed output briefly locked by the filesystem indexer or shell.
+        $attemptBaseName = "{0}-attempt-{1}" -f $installerBaseName, [guid]::NewGuid().ToString("N")
+        $attemptInstallerPath = Join-Path $installerStagingRoot ($attemptBaseName + ".exe")
+        Invoke-Native -FilePath $innoCompiler -Arguments @(
+            "/Qp",
+            "/DAppVersion=$versionValue",
+            "/DSourceDir=$distAppRoot",
+            "/DOutputDir=$installerStagingRoot",
+            "/DOutputBaseFilename=$attemptBaseName",
+            "/DTargetArch=$buildArch",
+            "/DRepairSystem=$repairSystemMode",
+            $installerScriptPath
+        )
+        Assert-PathExists -LiteralPath $attemptInstallerPath -Description "Staged Windows installer"
+        Wait-FileReadyForPromotion -LiteralPath $attemptInstallerPath
+        Move-Item -LiteralPath $attemptInstallerPath -Destination $releaseInstallerPath -Force
+    }
+} finally {
+    Remove-Item -LiteralPath $installerStagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
 

@@ -172,6 +172,22 @@ def test_local_build_requires_inno_setup():
     assert "Install JRSoftware.InnoSetup or pass -InnoCompilerPath" in build_script
 
 
+def test_installer_build_uses_unique_staging_output_before_publishing():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert 'Join-Path $buildRoot "inno-staging"' in build_script
+    assert '[guid]::NewGuid().ToString("N")' in build_script
+    assert '"/DOutputDir=$installerStagingRoot"' in build_script
+    assert '"/DOutputBaseFilename=$attemptBaseName"' in build_script
+    assert '"/DOutputDir=$releaseRoot"' not in build_script
+    assert "Wait-FileReadyForPromotion -LiteralPath $attemptInstallerPath" in build_script
+    assert (
+        "Move-Item -LiteralPath $attemptInstallerPath "
+        "-Destination $releaseInstallerPath -Force"
+    ) in build_script
+    assert "[Math]::Max(1, $DelaySeconds) * $attempt" in build_script
+
+
 def test_build_notes_handles_recreated_tags_and_noninteractive_log_output():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
