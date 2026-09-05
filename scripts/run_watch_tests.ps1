@@ -12,6 +12,8 @@ param(
     [switch]$SkipBuild,
     [switch]$FullAcceptance,
     [string]$BaselinePath = "",
+    [ValidateRange(1, 32)]
+    [int]$ParallelWorkers = 8,
     [int]$TimeoutSeconds = 900
 )
 
@@ -95,10 +97,16 @@ function Invoke-OrdinaryPython {
         $unelevatedRunner,
         "--cwd", $repoRoot,
         "--timeout-seconds", [string][Math]::Max(1, $CommandTimeoutSeconds),
+        "--env", ("SUNPACK_WATCH_BROKER_SERVICE_NAME=" + $env:SUNPACK_WATCH_BROKER_SERVICE_NAME),
+        "--env", ("SUNPACK_WATCH_BROKER_PIPE_NAME=" + $env:SUNPACK_WATCH_BROKER_PIPE_NAME),
+        "--env", ("SUNPACK_WATCH_BROKER_BINARY_PATH=" + $env:SUNPACK_WATCH_BROKER_BINARY_PATH),
+        "--env", ("SUNPACK_WATCH_BROKER_BINARY_SHA256=" + $env:SUNPACK_WATCH_BROKER_BINARY_SHA256),
         "--",
         $PythonPath
     ) + $PythonArguments
-    & $PythonPath @runnerArguments
+    # Keep child output visible without mixing it into the function's return
+    # value. Assigning this function's result must yield exactly one exit code.
+    & $PythonPath @runnerArguments | Out-Host
     $exitCode = [int]$LASTEXITCODE
     return $exitCode
 }
@@ -110,6 +118,26 @@ function Assert-CommandSucceeded {
     )
     if ($ExitCode -ne 0) {
         throw "$Description failed with exit code $ExitCode"
+    }
+}
+
+function Assert-PytestReportComplete {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+    if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
+        throw "$Description did not produce a JUnit report: $ReportPath"
+    }
+    [xml]$report = Get-Content -LiteralPath $ReportPath -Raw
+    $suites = @($report.SelectNodes("//testsuite"))
+    $testCount = [int](($suites | Measure-Object -Property tests -Sum).Sum)
+    $skippedCount = [int](($suites | Measure-Object -Property skipped -Sum).Sum)
+    if ($testCount -lt 1) {
+        throw "$Description collected no correctness tests"
+    }
+    if ($skippedCount -ne 0) {
+        throw "$Description skipped $skippedCount of $testCount correctness tests"
     }
 }
 
@@ -146,15 +174,40 @@ try {
             $commandExitCode = Invoke-OrdinaryPython -PythonArguments (@("-m", "benchmarks") + $Arguments)
         }
         "acceptance" {
-            $integration = Invoke-OrdinaryPython -PythonArguments @(
-                "-m", "pytest", "-q", "tests/integration", "--durations=20",
-                ("--junitxml=" + (Join-Path $resultRoot "acceptance-integration.xml"))
+            $integrationParallelReport = Join-Path $resultRoot "acceptance-integration-parallel.xml"
+            $integrationParallel = Invoke-OrdinaryPython -PythonArguments @(
+                "-m", "pytest", "-q",
+                "-n", [string]$ParallelWorkers, "--dist", "worksteal",
+                "-m", "not requires_watch_broker", "tests/integration", "--durations=20",
+                ("--junitxml=" + $integrationParallelReport)
             )
-            Assert-CommandSucceeded -ExitCode $integration -Description "Integration tests"
+            Assert-CommandSucceeded -ExitCode $integrationParallel -Description "Parallel integration tests"
+            Assert-PytestReportComplete -ReportPath $integrationParallelReport -Description "Parallel integration tests"
+            $integrationBrokerReport = Join-Path $resultRoot "acceptance-integration-broker.xml"
+            $integrationBroker = Invoke-OrdinaryPython -PythonArguments @(
+                "-m", "pytest", "-q", "-n", "0",
+                "-m", "requires_watch_broker", "tests/integration", "--durations=20",
+                ("--junitxml=" + $integrationBrokerReport)
+            )
+            Assert-CommandSucceeded -ExitCode $integrationBroker -Description "Broker integration tests"
+            Assert-PytestReportComplete -ReportPath $integrationBrokerReport -Description "Broker integration tests"
+            $realParallelReport = Join-Path $resultRoot "acceptance-real-parallel.xml"
+            $realParallel = Invoke-OrdinaryPython -PythonArguments @(
+                "-m", "pytest", "-q",
+                "-n", [string]$ParallelWorkers, "--dist", "worksteal",
+                "-m", "not requires_watch_broker", "tests/real", "--durations=20",
+                ("--junitxml=" + $realParallelReport)
+            )
+            Assert-CommandSucceeded -ExitCode $realParallel -Description "Parallel real archive tests"
+            Assert-PytestReportComplete -ReportPath $realParallelReport -Description "Parallel real archive tests"
+            $realWatchReport = Join-Path $resultRoot "acceptance-real-watch.xml"
             $commandExitCode = Invoke-OrdinaryPython -PythonArguments @(
-                "-m", "pytest", "-q", "tests/real", "--durations=20",
-                ("--junitxml=" + (Join-Path $resultRoot "acceptance-real.xml"))
+                "-m", "pytest", "-q", "-n", "0",
+                "tests/real/plan7_watch_downloads", "--durations=20",
+                ("--junitxml=" + $realWatchReport)
             )
+            Assert-CommandSucceeded -ExitCode $commandExitCode -Description "Real watch tests"
+            Assert-PytestReportComplete -ReportPath $realWatchReport -Description "Real watch tests"
         }
         "service-suite" {
             $serviceTests = Invoke-OrdinaryPython -PythonArguments @(

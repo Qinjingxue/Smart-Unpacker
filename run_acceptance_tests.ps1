@@ -7,6 +7,8 @@ param(
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
     [string]$RepairSystem = "full",
+    [ValidateRange(1, 32)]
+    [int]$ParallelWorkers = 8,
     [int]$StepTimeoutSeconds = 900
 )
 
@@ -519,9 +521,14 @@ Assert-AcceptanceTestTools -RepoRoot $repoRoot
 $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
-Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
-Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit", "--durations=20")
-Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional", "--durations=20")
+Invoke-TestStep -Label "Parallel CLI, unit, and functional tests" -Command @(
+    $python,
+    "-m", "pytest", "-q",
+    "-n", [string]$ParallelWorkers,
+    "--dist", "worksteal",
+    "tests/cli", "tests/unit", "tests/functional",
+    "--durations=20"
+)
 $rustTarget = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $brokerPath = Join-Path $repoRoot (".cache\rust-target\{0}\{1}\release\sunpack-watch-broker.exe" -f $Arch, $rustTarget)
 if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
@@ -531,7 +538,9 @@ $watchRunner = Join-Path $repoRoot "scripts\run_watch_tests.ps1"
 $watchCommand = @(
     "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watchRunner,
     "-Mode", "acceptance", "-PythonPath", $python, "-BrokerPath", $brokerPath,
-    "-Arch", $Arch, "-SkipBuild", "-TimeoutSeconds", [string]$StepTimeoutSeconds
+    "-Arch", $Arch, "-SkipBuild",
+    "-ParallelWorkers", [string]$ParallelWorkers,
+    "-TimeoutSeconds", [string]$StepTimeoutSeconds
 )
 Invoke-TestStep `
     -Label "Integration and real watch tests (isolated ordinary-user Broker)" `

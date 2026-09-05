@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -15,13 +16,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=600.0)
     parser.add_argument("--capture-directory", help=argparse.SUPPRESS)
+    parser.add_argument("--env", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
     if not args.command:
         parser.error("a command is required after --")
+    environment_overrides = {}
+    for assignment in args.env:
+        name, separator, value = assignment.partition("=")
+        if not separator or not name:
+            parser.error("--env requires NAME=VALUE")
+        environment_overrides[name] = value
+    args.environment_overrides = environment_overrides
     return args
+
+
+def _child_environment(args: argparse.Namespace) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(args.environment_overrides)
+    return environment
 
 
 def _run_captured_child(args: argparse.Namespace, cwd: str) -> int:
@@ -37,6 +52,7 @@ def _run_captured_child(args: argparse.Namespace, cwd: str) -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
+                env=_child_environment(args),
                 timeout=max(0.1, args.timeout_seconds),
                 check=False,
             )
@@ -66,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
                 subprocess.run(
                     args.command,
                     cwd=cwd,
+                    env=_child_environment(args),
                     timeout=max(0.1, args.timeout_seconds),
                     check=False,
                 ).returncode
@@ -85,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         str(args.timeout_seconds),
         "--capture-directory",
         str(capture_root),
+        *(item for assignment in args.env for item in ("--env", assignment)),
         "--",
         *args.command,
     ]

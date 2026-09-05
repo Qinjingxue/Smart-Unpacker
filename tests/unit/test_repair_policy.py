@@ -18,7 +18,14 @@ from tests.helpers.edition import is_lite_edition
 
 @pytest.fixture(autouse=True)
 def _skip_module_discovery(monkeypatch):
+    # These policy tests supply their own candidates/modules. Keep scheduler
+    # validation independent from whichever repair modules another test happened
+    # to import first; xdist workers intentionally execute files in different orders.
     monkeypatch.setattr("sunpack.repair.scheduler.discover_repair_modules", lambda: None)
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.get_repair_module_registry",
+        lambda: _FakeRegistry({}),
+    )
 
 
 def test_model_runtime_uses_paired_diagnosis_and_graph_models(tmp_path, monkeypatch):

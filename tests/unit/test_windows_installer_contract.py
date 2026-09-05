@@ -260,6 +260,9 @@ def test_service_test_entries_relaunch_themselves_elevated():
 
     assert "-Verb RunAs" in helper
     assert "-EncodedCommand" in helper
+    assert '"-NonInteractive"' in helper
+    assert "-WindowStyle Hidden" in helper
+    assert "'; exit 0'" in helper
     assert "-Wait" in helper
     assert "-PassThru" in helper
     assert "return [int]$process.ExitCode" in helper
@@ -273,6 +276,11 @@ def test_service_test_entries_relaunch_themselves_elevated():
         assert "Invoke-TestScriptElevated" in script, path
         assert "-BoundParameters $PSBoundParameters" in script, path
         assert "exit $elevatedExitCode" in script, path
+
+    watch_runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
+    assert "Assert-PytestReportComplete" in watch_runner
+    assert "collected no correctness tests" in watch_runner
+    assert "correctness tests" in watch_runner and "skipped" in watch_runner
 
     service_entry = (ROOT / "scripts" / "test_watch_broker_service.ps1").read_text(encoding="utf-8")
     acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")

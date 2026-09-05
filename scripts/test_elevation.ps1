@@ -63,15 +63,22 @@ function Invoke-TestScriptElevated {
         $commandParts += ConvertTo-PowerShellValueLiteral -Value $parameterValue
     }
 
+    $elevatedCommand = (
+        '$ErrorActionPreference = ''Stop''; ' +
+        'trap { Write-Error $_; exit 1 }; ' +
+        ($commandParts -join " ") +
+        '; exit 0'
+    )
     $encodedCommand = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes(($commandParts -join " "))
+        [Text.Encoding]::Unicode.GetBytes($elevatedCommand)
     )
     $hostPath = (Get-Process -Id $PID).Path
     $process = Start-Process `
         -FilePath $hostPath `
-        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
+        -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
         -WorkingDirectory (Split-Path -Parent $ScriptPath) `
         -Verb RunAs `
+        -WindowStyle Hidden `
         -Wait `
         -PassThru
     return [int]$process.ExitCode

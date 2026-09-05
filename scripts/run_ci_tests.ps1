@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateRange(1, 32)]
+    [int]$ParallelWorkers = 8
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -64,9 +67,13 @@ Invoke-TestStep -Label "Native extension smoke test" -Command @(
     "-c",
     "import sunpack_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from sunpack.support.sevenzip_bridge import NativePasswordTester; assert NativePasswordTester().available()"
 )
-Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
-Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")
-Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli")
+Invoke-TestStep -Label "Parallel unit, functional, and CLI tests" -Command @(
+    $python,
+    "-m", "pytest", "-q",
+    "-n", [string]$ParallelWorkers,
+    "--dist", "worksteal",
+    "tests/unit", "tests/functional", "tests/cli"
+)
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")

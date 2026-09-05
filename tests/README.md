@@ -21,8 +21,14 @@ pytest 收集。pytest 中只保留行为断言；资源或时序稳定性断言
 
 ```powershell
 uv sync --locked --extra test
-uv run --locked pytest
+uv run --locked pytest -n 8 --dist worksteal
 ```
+
+8 个 worker 是 Windows 本地测试的默认建议值：它能并行摊开 Python、原生 worker
+和真实归档用例，同时避免 `-n auto` 在高核心数机器上造成过多进程与磁盘竞争。
+性能、内存稳定性以及需要 Watch Broker 的测试必须使用 `-n 0`。Acceptance runner
+会自动将 Broker/Plan 7 独占测试与普通并行测试分开；直接运行性能或内存测试时仍需
+显式传入 `-n 0`。
 
 列出性能场景：
 
@@ -41,6 +47,9 @@ python -m benchmarks --list
 ```powershell
 .\scripts\run_ci_tests.ps1
 ```
+
+CI 和 acceptance runner 默认使用 8 个 worker，也可通过 `-ParallelWorkers` 调整，
+例如 `.\scripts\run_ci_tests.ps1 -ParallelWorkers 4`。
 
 `run_acceptance_tests.ps1` 会运行 CLI、unit、functional、integration 和完整 `tests/real` 真实归档/watch 矩阵，并执行 CLI smoke checks；暂不包含 `tests/training/`。模型张量化、训练边界和其他专项脚本仍留在 pytest/CI 专项路径中运行。
 

@@ -26,13 +26,14 @@ build = [
     "maturin>=1.8,<2",
     "cmake>=3.25",
 ]
-test = ["pytest>=9", "zstandard>=0.22.0"]
+test = ["pytest>=9", "pytest-xdist>=3.8", "zstandard>=0.22.0"]
 training = ["numpy>=2"]
 dev = [
     "nuitka>=2",
     "maturin>=1.8,<2",
     "cmake>=3.25",
     "pytest>=9",
+    "pytest-xdist>=3.8",
     "numpy>=2",
     "zstandard>=0.22.0",
 ]
