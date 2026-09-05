@@ -342,8 +342,11 @@ def test_watch_test_runner_never_reuses_or_removes_the_release_service():
 
 def test_watch_test_runner_uses_an_ephemeral_local_standard_user():
     runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
+    account_description = "Ephemeral SunPack Broker test user"
 
     assert "New-LocalUser" in runner
+    assert f'-Description "{account_description}"' in runner
+    assert len(account_description) <= 48
     assert 'Get-LocalGroup -SID "S-1-5-32-545"' in runner
     assert "[Diagnostics.ProcessStartInfo]::new()" in runner
     assert "$startInfo.UserName = $script:standardUserName" in runner

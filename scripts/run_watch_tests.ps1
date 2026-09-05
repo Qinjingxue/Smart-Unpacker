@@ -110,7 +110,7 @@ function Initialize-StandardTestUser {
         -AccountNeverExpires `
         -PasswordNeverExpires `
         -UserMayNotChangePassword `
-        -Description "Ephemeral standard user for SunPack Watch Broker tests"
+        -Description "Ephemeral SunPack Broker test user"
     $script:standardUserSid = $script:standardUser.SID.Value
 
     $usersGroup = Get-LocalGroup -SID "S-1-5-32-545"
