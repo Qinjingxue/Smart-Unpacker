@@ -1,42 +1,31 @@
 from pathlib import Path
 
-
-def _toast_host_source() -> str:
-    root = Path(__file__).resolve().parents[2]
-    return (root / "native" / "toast_host" / "src" / "main.cpp").read_text(encoding="utf-8")
+from sunpack.platform.windows.toast_host import _check_hresult, _load_library
 
 
-def test_toast_host_keeps_one_winrt_apartment_for_the_host_lifetime():
-    source = _toast_host_source()
-    run_host = source[source.index("int run_host(") : source.index("int self_test()")]
-    release_presenter = run_host[
-        run_host.index("const auto release_presenter") : run_host.index("const auto expire")
-    ]
-
-    assert run_host.count("WinrtApartmentScope apartment;") == 1
-    assert "init_apartment" not in run_host
-    assert "uninit_apartment" not in release_presenter
+ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_toast_host_clears_cppwinrt_factories_before_apartment_shutdown():
-    source = _toast_host_source()
-    apartment_scope = source[
-        source.index("class WinrtApartmentScope") : source.index("enum class MessageType")
-    ]
-
-    clear_at = apartment_scope.index("winrt::clear_factory_cache();")
-    uninit_at = apartment_scope.index("winrt::uninit_apartment();")
-    assert clear_at < uninit_at
+def test_built_toast_dll_self_test():
+    # Executes real WinRT apartment, XML and payload validation in this process.
+    library = _load_library()
+    _check_hresult(library.sunpack_toast_self_test())
 
 
-def test_toast_host_signals_named_ready_event_after_pipe_creation():
-    source = _toast_host_source()
-    connect_pipe = source[
-        source.index("HANDLE connect_server_pipe(") : source.index("int run_host(")
-    ]
+def test_native_context_releases_presenter_and_activation_before_apartment():
+    source = (ROOT / "native/toast_host/src/main.cpp").read_text(encoding="utf-8")
+    context = source[source.index("struct ToastContext"):source.index("template <typename Work>")]
+    assert context.index("WinrtApartmentScope apartment") < context.index("ActivationRegistration activation")
+    assert context.index("ActivationRegistration activation") < context.index("std::unique_ptr<ToastPresenter>")
+    assert source.index("winrt::clear_factory_cache();") < source.index("winrt::uninit_apartment();")
+    assert "CreateNamedPipeW" not in source
+    assert "wWinMain" not in source
 
-    assert 'argument_value(argc, argv, L"--ready-event")' in source
-    assert "!ready_event" in source
-    assert 'OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str())' in source
-    assert connect_pipe.index("CreateNamedPipeW(") < connect_pipe.index("signal_ready_event(ready_event_name)")
-    assert connect_pipe.index("signal_ready_event(ready_event_name)") < connect_pipe.index("ConnectNamedPipe(")
+
+def test_build_produces_library_and_only_packages_library():
+    cmake = (ROOT / "native/toast_host/CMakeLists.txt").read_text(encoding="utf-8")
+    assert "SHARED src/main.cpp" in cmake
+    for filename in ("scripts/build_windows.ps1", "scripts/setup_windows_dev.ps1", "scripts/verify_windows_package_arch.ps1"):
+        script = (ROOT / filename).read_text(encoding="utf-8")
+        assert "sunpack_toast.dll" in script
+        assert "sunpack_toast_host.exe" not in script

@@ -6,18 +6,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 
-PROTOCOL_MAGIC = 0x4E545053  # "SPTN" in a little-endian frame.
-PROTOCOL_VERSION = 1
-MAX_FRAME_BYTES = 64 * 1024
-_HEADER = struct.Struct("<IHHIQ")
-
-
-class ToastMessageType(IntEnum):
-    HELLO = 1
-    SNAPSHOT = 2
-    CLEAR = 3
-    PING = 4
-    SHUTDOWN = 5
+# Keep the existing snapshot size limit when passing data directly to the DLL.
+MAX_SNAPSHOT_BYTES = 64 * 1024 - 20
 
 
 class ToastSnapshotKind(IntEnum):
@@ -60,11 +50,7 @@ class ToastSnapshot:
     ttl_ms: int = 0
 
 
-def encode_hello(session_token: str, sequence: int) -> bytes:
-    return encode_frame(ToastMessageType.HELLO, _encode_string(session_token), sequence)
-
-
-def encode_snapshot(snapshot: ToastSnapshot, sequence: int) -> bytes:
+def encode_snapshot(snapshot: ToastSnapshot) -> bytes:
     actions = tuple(snapshot.actions[:2])
     progress = float(snapshot.progress_value)
     if not math.isfinite(progress):
@@ -92,25 +78,13 @@ def encode_snapshot(snapshot: ToastSnapshot, sequence: int) -> bytes:
         payload.append(int(action.kind))
         payload.extend(_encode_string(action.label))
         payload.extend(_encode_string(action.target))
-    return encode_frame(ToastMessageType.SNAPSHOT, bytes(payload), sequence)
-
-
-def encode_frame(message_type: ToastMessageType, payload: bytes, sequence: int) -> bytes:
-    body = bytes(payload)
-    if len(body) > MAX_FRAME_BYTES - _HEADER.size:
-        raise ValueError("toast IPC frame exceeds the 64 KiB protocol limit")
-    return _HEADER.pack(
-        PROTOCOL_MAGIC,
-        PROTOCOL_VERSION,
-        int(message_type),
-        len(body),
-        max(0, int(sequence)),
-    ) + body
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("toast snapshot exceeds the 64 KiB size limit")
+    return bytes(payload)
 
 
 def _encode_string(value: str) -> bytes:
     encoded = str(value or "").encode("utf-8", errors="strict")
     if len(encoded) > 0xFFFFFFFF:
-        raise ValueError("toast IPC string is too large")
+        raise ValueError("toast snapshot string is too large")
     return struct.pack("<I", len(encoded)) + encoded
-

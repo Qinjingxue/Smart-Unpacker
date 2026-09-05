@@ -79,10 +79,10 @@ Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D
 Name: "{group}\Uninstall SunPack"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--register-toast"; StatusMsg: "Registering watch notifications..."; Flags: runhidden waituntilterminated
+Filename: "{app}\sunpack-runtime.exe"; Parameters: "--register-toast"; StatusMsg: "Registering watch notifications..."; Flags: runhidden waituntilterminated
 
 [UninstallRun]
-Filename: "{app}\tools\sunpack_toast_host.exe"; Parameters: "--unregister-toast"; RunOnceId: "SunPackToastHost"; Flags: runhidden waituntilterminated skipifdoesntexist
+Filename: "{app}\sunpack-runtime.exe"; Parameters: "--unregister-toast"; RunOnceId: "SunPackToast"; Flags: runhidden waituntilterminated skipifdoesntexist
 
 [Code]
 const

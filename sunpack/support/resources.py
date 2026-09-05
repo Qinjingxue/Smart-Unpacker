@@ -95,14 +95,14 @@ def get_sevenzip_bridge_worker_path() -> str:
     raise FileNotFoundError("Required sunpack_sevenzip_worker.exe was not found under tools\\ or native\\sevenzip_bridge\\build.")
 
 
-def get_toast_host_path() -> str:
+def get_toast_library_path() -> str:
+    arch = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x64"
     relatives = (
-        Path("native") / "toast_host" / "build-x64" / "Release" / "sunpack_toast_host.exe",
-        Path("native") / "toast_host" / "build-arm64" / "Release" / "sunpack_toast_host.exe",
-        Path("native") / "toast_host" / "build" / "Release" / "sunpack_toast_host.exe",
-        Path("native") / "toast_host" / "build" / "Debug" / "sunpack_toast_host.exe",
-        *tuple(tool_dir / "sunpack_toast_host.exe" for tool_dir in tool_dir_candidates()),
-        Path("sunpack_toast_host.exe"),
+        Path("native") / "toast_host" / f"build-{arch}" / "Release" / "sunpack_toast.dll",
+        Path("native") / "toast_host" / "build" / "Release" / "sunpack_toast.dll",
+        Path("native") / "toast_host" / "build" / "Debug" / "sunpack_toast.dll",
+        *tuple(tool_dir / "sunpack_toast.dll" for tool_dir in tool_dir_candidates()),
+        Path("sunpack_toast.dll"),
     )
     for root in candidate_resource_roots():
         for relative in relatives:
@@ -110,7 +110,7 @@ def get_toast_host_path() -> str:
             if host.exists():
                 return str(host)
     raise FileNotFoundError(
-        "Optional sunpack_toast_host.exe was not found under tools\\ or native\\toast_host\\build."
+        "Optional sunpack_toast.dll was not found under tools\\ or native\\toast_host\\build."
     )
 
 

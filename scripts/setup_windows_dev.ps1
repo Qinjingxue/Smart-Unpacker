@@ -615,7 +615,7 @@ function Build-SevenZipWrapper {
     Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sunpack_sevenzip_worker.exe") -Force
 }
 
-function Build-ToastHost {
+function Build-ToastLibrary {
     param(
         [Parameter(Mandatory = $true)][string]$CMakeCommand,
         [Parameter(Mandatory = $true)][string]$CTestCommand,
@@ -625,8 +625,8 @@ function Build-ToastHost {
         [Parameter(Mandatory = $true)][string]$BuildArch
     )
 
-    Write-Step "Building ordinary-user Windows Toast Host"
-    Assert-PathExists -LiteralPath (Join-Path $SourceRoot "CMakeLists.txt") -Description "Toast Host CMake project"
+    Write-Step "Building in-process Windows toast library"
+    Assert-PathExists -LiteralPath (Join-Path $SourceRoot "CMakeLists.txt") -Description "toast CMake project"
     $cmakePlatform = Get-CMakePlatform -BuildArch $BuildArch
     Reset-StaleCMakeBuildDir -SourceDir $SourceRoot -BuildDir $BuildDir -CMakePlatform $cmakePlatform
     Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $SourceRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
@@ -634,9 +634,9 @@ function Build-ToastHost {
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
         Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
     }
-    $hostExe = Join-Path $BuildDir "Release\sunpack_toast_host.exe"
-    Assert-PathExists -LiteralPath $hostExe -Description "Built Toast Host executable"
-    Copy-Item -LiteralPath $hostExe -Destination (Join-Path $ToolsRoot "sunpack_toast_host.exe") -Force
+    $toastDll = Join-Path $BuildDir "Release\sunpack_toast.dll"
+    Assert-PathExists -LiteralPath $toastDll -Description "Built toast DLL"
+    Copy-Item -LiteralPath $toastDll -Destination (Join-Path $ToolsRoot "sunpack_toast.dll") -Force
 }
 
 function Test-NativeImport {
@@ -841,12 +841,12 @@ if ($buildArch -eq "x64" -and -not $SkipAcceptanceTestTools) {
 $cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
-Build-ToastHost -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -SourceRoot $toastHostRoot -BuildDir $toastHostBuildDir -ToolsRoot $toolsRoot -BuildArch $buildArch
+Build-ToastLibrary -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -SourceRoot $toastHostRoot -BuildDir $toastHostBuildDir -ToolsRoot $toolsRoot -BuildArch $buildArch
 Test-SevenZipWrapper -PythonPath $venvPython
 Test-SevenZipWorker -PythonPath $venvPython
 Invoke-Native -FilePath $venvPython -Arguments @(
     "-c",
-    "from sunpack.support.resources import get_toast_host_path; import os; assert os.path.exists(get_toast_host_path())"
+    "from sunpack.support.resources import get_toast_library_path; import os; assert os.path.exists(get_toast_library_path())"
 )
 
 Write-Step "Verifying local source execution"

@@ -85,7 +85,8 @@ def test_watch_service_forces_complete_content_policy_for_pipeline_engine(tmp_pa
     assert service.config["extraction"]["content_requirement"] == "allow_partial"
 
 
-def test_watch_service_attaches_and_releases_toast_host_with_watch_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enabled", [True, False])
+def test_watch_service_attaches_and_releases_toast_with_watch_lifecycle(tmp_path, monkeypatch, enabled):
     config = {
         "extraction": {"content_requirement": "complete"},
         "watch": {
@@ -93,7 +94,7 @@ def test_watch_service_attaches_and_releases_toast_host_with_watch_lifecycle(tmp
             "roots": [str(tmp_path)],
             "tray_enabled": False,
             "clipboard_monitor_enabled": False,
-            "toast_enabled": True,
+            "toast_enabled": enabled,
         },
     }
     monkeypatch.setattr(service_module, "load_config", lambda: config)
@@ -143,14 +144,15 @@ def test_watch_service_attaches_and_releases_toast_host_with_watch_lifecycle(tmp
     )
 
     _await(service._start_scheduler())
-    assert host.started is True
+    assert host.started is enabled
     assert captured["sink"] is service.toast_coordinator
+    assert (captured["sink"] is not None) is enabled
 
     _await(service._stop_scheduler())
-    assert host.cleared == 1
+    assert host.cleared == int(enabled)
     assert host.stopped is False
     service._stop_toast_host()
-    assert host.stopped is True
+    assert host.stopped is enabled
 
 
 def test_watch_runtime_does_not_change_process_cwd(tmp_path, monkeypatch):

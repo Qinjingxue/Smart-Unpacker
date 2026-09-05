@@ -13,18 +13,23 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
-#include <functional>
+#include <cmath>
+#include "toast.h"
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,10 +52,11 @@ constexpr CLSID kToastActivatorClsid = {
     0xc5a6b4e9, 0x3184, 0x44e2, {0x9f, 0x15, 0x6a, 0x71, 0x80, 0x4f, 0x7a, 0x36}
 };
 
-constexpr std::uint32_t kProtocolMagic = 0x4E545053;
-constexpr std::uint16_t kProtocolVersion = 1;
-constexpr std::size_t kHeaderBytes = 20;
-constexpr std::uint32_t kMaximumFrameBytes = 64 * 1024;
+constexpr std::uint32_t kMaximumSnapshotBytes = 64 * 1024 - 20;
+
+std::mutex g_activation_mutex;
+std::condition_variable g_activation_condition;
+bool g_activated = false;
 
 class WinrtApartmentScope {
 public:
@@ -65,14 +71,6 @@ public:
 
     WinrtApartmentScope(const WinrtApartmentScope&) = delete;
     WinrtApartmentScope& operator=(const WinrtApartmentScope&) = delete;
-};
-
-enum class MessageType : std::uint16_t {
-    hello = 1,
-    snapshot = 2,
-    clear = 3,
-    ping = 4,
-    shutdown = 5,
 };
 
 enum class SnapshotKind : std::uint8_t {
@@ -113,24 +111,6 @@ struct Snapshot {
     std::vector<Action> actions;
 };
 
-struct Frame {
-    MessageType type{};
-    std::uint64_t sequence{};
-    std::vector<std::uint8_t> payload;
-};
-
-std::atomic<HANDLE> g_activation_event{nullptr};
-
-std::wstring executable_path() {
-    std::wstring buffer(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (length == 0 || length >= buffer.size()) {
-        winrt::throw_last_error();
-    }
-    buffer.resize(length);
-    return buffer;
-}
-
 std::wstring quote_argument(std::wstring_view value) {
     std::wstring result = L"\"";
     std::size_t backslashes = 0;
@@ -154,32 +134,6 @@ std::wstring quote_argument(std::wstring_view value) {
     return result;
 }
 
-bool is_ordinary_integrity() {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        return false;
-    }
-    DWORD bytes = 0;
-    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &bytes);
-    std::vector<std::uint8_t> buffer(bytes);
-    const BOOL ok = bytes != 0 && GetTokenInformation(
-        token,
-        TokenIntegrityLevel,
-        buffer.data(),
-        bytes,
-        &bytes
-    );
-    CloseHandle(token);
-    if (!ok) {
-        return false;
-    }
-    const auto label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buffer.data());
-    const auto sid = label->Label.Sid;
-    const DWORD count = *GetSidSubAuthorityCount(sid);
-    const DWORD rid = *GetSidSubAuthority(sid, count - 1);
-    return rid < SECURITY_MANDATORY_HIGH_RID;
-}
-
 std::wstring programs_shortcut_path(bool create_directory = true) {
     PWSTR raw = nullptr;
     winrt::check_hresult(SHGetKnownFolderPath(FOLDERID_Programs, KF_FLAG_CREATE, nullptr, &raw));
@@ -188,7 +142,7 @@ std::wstring programs_shortcut_path(bool create_directory = true) {
     if (create_directory) {
         std::filesystem::create_directories(directory);
     }
-    return (directory / L"SunPack Toast Host.lnk").wstring();
+    return (directory / L"SunPack Watch Notifications.lnk").wstring();
 }
 
 void set_registry_string(HKEY root, const std::wstring& subkey, const std::wstring& value) {
@@ -221,10 +175,9 @@ void set_registry_string(HKEY root, const std::wstring& subkey, const std::wstri
     }
 }
 
-void register_toast_identity() {
-    const std::wstring executable = executable_path();
+void register_toast_identity(const std::wstring& executable, const std::wstring& arguments) {
     const std::wstring registry_path = std::wstring(L"Software\\Classes\\CLSID\\") + kClsidText + L"\\LocalServer32";
-    set_registry_string(HKEY_CURRENT_USER, registry_path, quote_argument(executable) + L" -ToastActivated");
+    set_registry_string(HKEY_CURRENT_USER, registry_path, quote_argument(executable) + L" " + arguments);
 
     winrt::com_ptr<IShellLinkW> link;
     winrt::check_hresult(CoCreateInstance(
@@ -234,7 +187,7 @@ void register_toast_identity() {
         IID_PPV_ARGS(link.put())
     ));
     winrt::check_hresult(link->SetPath(executable.c_str()));
-    winrt::check_hresult(link->SetArguments(L"--toast-shortcut"));
+    winrt::check_hresult(link->SetArguments(arguments.c_str()));
     winrt::check_hresult(link->SetDescription(L"SunPack Watch notifications"));
 
     const auto store = link.as<IPropertyStore>();
@@ -251,7 +204,7 @@ void register_toast_identity() {
     winrt::check_hresult(persist->Save(programs_shortcut_path().c_str(), TRUE));
 }
 
-bool toast_identity_registered() noexcept {
+bool toast_identity_registered(const std::wstring& executable, const std::wstring& arguments) noexcept {
     try {
         const std::wstring registry_path = std::wstring(L"Software\\Classes\\CLSID\\") + kClsidText + L"\\LocalServer32";
         DWORD bytes = 0;
@@ -279,7 +232,7 @@ bool toast_identity_registered() noexcept {
             return false;
         }
         value.resize(std::wcslen(value.c_str()));
-        const std::wstring expected = quote_argument(executable_path()) + L" -ToastActivated";
+        const std::wstring expected = quote_argument(executable) + L" " + arguments;
         return value == expected && std::filesystem::is_regular_file(programs_shortcut_path(false));
     } catch (...) {
         return false;
@@ -564,9 +517,11 @@ public:
         if (app_user_model_id != nullptr && std::wstring_view(app_user_model_id) == kAppId) {
             activate_action(invoked_args == nullptr ? std::wstring_view{} : std::wstring_view(invoked_args));
         }
-        if (const HANDLE event = g_activation_event.load()) {
-            SetEvent(event);
+        {
+            std::lock_guard lock(g_activation_mutex);
+            g_activated = true;
         }
+        g_activation_condition.notify_all();
         return S_OK;
     }
 
@@ -609,37 +564,21 @@ private:
     std::atomic<ULONG> references_{1};
 };
 
-int run_activation_server() {
-    if (!is_ordinary_integrity()) {
-        return ERROR_ELEVATION_REQUIRED;
+class ActivationRegistration {
+public:
+    explicit ActivationRegistration(const CLSID& clsid = kToastActivatorClsid) {
+        winrt::com_ptr<IClassFactory> factory;
+        factory.attach(new ActivationFactory());
+        winrt::check_hresult(CoRegisterClassObject(
+            clsid, factory.get(), CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE, &cookie_));
     }
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (event == nullptr) {
-        winrt::throw_last_error();
-    }
-    g_activation_event.store(event);
-    auto* factory = new ActivationFactory();
-    DWORD cookie = 0;
-    const HRESULT registered = CoRegisterClassObject(
-        kToastActivatorClsid,
-        factory,
-        CLSCTX_LOCAL_SERVER,
-        REGCLS_MULTIPLEUSE,
-        &cookie
-    );
-    factory->Release();
-    if (FAILED(registered)) {
-        CloseHandle(event);
-        winrt::check_hresult(registered);
-    }
-    CoResumeClassObjects();
-    WaitForSingleObject(event, 30'000);
-    CoRevokeClassObject(cookie);
-    g_activation_event.store(nullptr);
-    CloseHandle(event);
-    return 0;
-}
+    ~ActivationRegistration() { CoRevokeClassObject(cookie_); }
+    ActivationRegistration(const ActivationRegistration&) = delete;
+    ActivationRegistration& operator=(const ActivationRegistration&) = delete;
+private:
+    DWORD cookie_{};
+};
 
 template <typename T>
 T read_little_endian(const std::uint8_t* data) {
@@ -684,7 +623,7 @@ public:
 private:
     void require(std::size_t count) const {
         if (count > payload_.size() - offset_) {
-            throw std::runtime_error("truncated Toast IPC payload");
+            throw std::runtime_error("truncated Toast payload");
         }
     }
 
@@ -701,7 +640,8 @@ Snapshot parse_snapshot(const std::vector<std::uint8_t>& payload) {
     if (reader.byte() != 0 || action_count > 2) {
         throw std::runtime_error("invalid Toast snapshot header");
     }
-    result.progress_value = std::clamp(reader.floating(), 0.0, 1.0);
+    const double progress = reader.floating();
+    result.progress_value = std::isfinite(progress) ? std::clamp(progress, 0.0, 1.0) : 0.0;
     result.ttl_ms = reader.uint32();
     result.batch_id = reader.string();
     result.title = reader.string();
@@ -723,99 +663,10 @@ Snapshot parse_snapshot(const std::vector<std::uint8_t>& payload) {
         result.actions.push_back(std::move(action));
     }
     if (!reader.finished()) {
-        throw std::runtime_error("trailing Toast IPC snapshot data");
+        throw std::runtime_error("trailing Toast snapshot data");
     }
     if (result.kind < SnapshotKind::progress || result.kind > SnapshotKind::mixed) {
         throw std::runtime_error("invalid Toast snapshot kind");
-    }
-    return result;
-}
-
-enum class ReadResult { complete, disconnected, parent_exited };
-
-ReadResult read_exact(HANDLE pipe, HANDLE parent, HANDLE expiry_timer, void* destination, DWORD size, const std::function<void()>& expire) {
-    auto* output = static_cast<std::uint8_t*>(destination);
-    DWORD offset = 0;
-    while (offset < size) {
-        HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (event == nullptr) winrt::throw_last_error();
-        OVERLAPPED operation{};
-        operation.hEvent = event;
-        DWORD transferred = 0;
-        BOOL started = ReadFile(pipe, output + offset, size - offset, &transferred, &operation);
-        if (!started) {
-            const DWORD error = GetLastError();
-            if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
-                CloseHandle(event);
-                return ReadResult::disconnected;
-            }
-            if (error != ERROR_IO_PENDING) {
-                CloseHandle(event);
-                winrt::throw_last_error();
-            }
-            std::array<HANDLE, 3> handles{event, parent, expiry_timer};
-            const DWORD count = parent == nullptr ? 2 : 3;
-            if (parent == nullptr) {
-                handles[1] = expiry_timer;
-            }
-            while (true) {
-                const DWORD wait = WaitForMultipleObjects(count, handles.data(), FALSE, INFINITE);
-                if (wait == WAIT_OBJECT_0) {
-                    if (!GetOverlappedResult(pipe, &operation, &transferred, FALSE)) {
-                        const DWORD result_error = GetLastError();
-                        CloseHandle(event);
-                        if (result_error == ERROR_BROKEN_PIPE || result_error == ERROR_PIPE_NOT_CONNECTED) {
-                            return ReadResult::disconnected;
-                        }
-                        winrt::throw_last_error();
-                    }
-                    break;
-                }
-                const DWORD parent_index = parent == nullptr ? 0xffffffff : WAIT_OBJECT_0 + 1;
-                const DWORD expiry_index = parent == nullptr ? WAIT_OBJECT_0 + 1 : WAIT_OBJECT_0 + 2;
-                if (wait == parent_index) {
-                    CancelIoEx(pipe, &operation);
-                    GetOverlappedResult(pipe, &operation, &transferred, TRUE);
-                    CloseHandle(event);
-                    return ReadResult::parent_exited;
-                }
-                if (wait == expiry_index) {
-                    expire();
-                    continue;
-                }
-                CancelIoEx(pipe, &operation);
-                CloseHandle(event);
-                winrt::throw_last_error();
-            }
-        }
-        CloseHandle(event);
-        if (transferred == 0) {
-            return ReadResult::disconnected;
-        }
-        offset += transferred;
-    }
-    return ReadResult::complete;
-}
-
-std::optional<Frame> read_frame(HANDLE pipe, HANDLE parent, HANDLE expiry_timer, const std::function<void()>& expire) {
-    std::array<std::uint8_t, kHeaderBytes> header{};
-    if (read_exact(pipe, parent, expiry_timer, header.data(), static_cast<DWORD>(header.size()), expire) != ReadResult::complete) {
-        return std::nullopt;
-    }
-    if (read_little_endian<std::uint32_t>(header.data()) != kProtocolMagic
-        || read_little_endian<std::uint16_t>(header.data() + 4) != kProtocolVersion) {
-        throw std::runtime_error("invalid Toast IPC protocol header");
-    }
-    const std::uint32_t payload_size = read_little_endian<std::uint32_t>(header.data() + 8);
-    if (payload_size > kMaximumFrameBytes - kHeaderBytes) {
-        throw std::runtime_error("oversized Toast IPC frame");
-    }
-    Frame result;
-    result.type = static_cast<MessageType>(read_little_endian<std::uint16_t>(header.data() + 6));
-    result.sequence = read_little_endian<std::uint64_t>(header.data() + 12);
-    result.payload.resize(payload_size);
-    if (payload_size != 0 && read_exact(pipe, parent, expiry_timer, result.payload.data(), payload_size, expire) != ReadResult::complete) {
-        return std::nullopt;
     }
     return result;
 }
@@ -826,9 +677,8 @@ std::wstring action_arguments(const Action& action) {
 
 class ToastPresenter {
 public:
-    ToastPresenter(HANDLE expiry_timer, std::wstring diagnostic_log_path)
+    explicit ToastPresenter(std::wstring diagnostic_log_path)
         : notifier_(ToastNotificationManager::CreateToastNotifier(kAppId)),
-          expiry_timer_(expiry_timer),
           diagnostic_log_path_(std::move(diagnostic_log_path)) {}
 
     ~ToastPresenter() {
@@ -836,23 +686,14 @@ public:
     }
 
     void show(const Snapshot& snapshot, std::uint64_t sequence) {
-        cancel_expiry();
         if (snapshot.kind == SnapshotKind::progress) {
             show_progress(snapshot, sequence);
         } else {
             show_final(snapshot);
         }
-        if (snapshot.ttl_ms > 0) {
-            LARGE_INTEGER due{};
-            due.QuadPart = -static_cast<LONGLONG>(snapshot.ttl_ms) * 10'000;
-            if (!SetWaitableTimer(expiry_timer_, &due, 0, nullptr, nullptr, FALSE)) {
-                winrt::throw_last_error();
-            }
-        }
     }
 
     void clear() noexcept {
-        cancel_expiry();
         remove(kProgressToastTag);
         remove(kFinalToastTag);
         progress_shown_ = false;
@@ -943,209 +784,41 @@ private:
         notifier_.Show(toast);
     }
 
-    void cancel_expiry() noexcept {
-        if (expiry_timer_ != nullptr) CancelWaitableTimer(expiry_timer_);
-    }
-
     winrt::Windows::UI::Notifications::ToastNotifier notifier_{nullptr};
-    HANDLE expiry_timer_{};
     std::wstring diagnostic_log_path_;
     bool progress_shown_{};
 };
 
-std::optional<std::wstring> argument_value(int argc, wchar_t** argv, std::wstring_view name) {
-    for (int index = 1; index + 1 < argc; ++index) {
-        if (std::wstring_view(argv[index]) == name) {
-            return std::wstring(argv[index + 1]);
-        }
-    }
-    return std::nullopt;
-}
-
-bool has_argument(int argc, wchar_t** argv, std::wstring_view name) {
-    for (int index = 1; index < argc; ++index) {
-        if (std::wstring_view(argv[index]) == name) return true;
-    }
-    return false;
-}
-
-DWORD parse_process_id(const std::optional<std::wstring>& value) {
-    if (!value || value->empty()) return 0;
-    wchar_t* end = nullptr;
-    const unsigned long parsed = std::wcstoul(value->c_str(), &end, 10);
-    return end != value->c_str() && *end == L'\0' ? static_cast<DWORD>(parsed) : 0;
-}
-
-void signal_ready_event(const std::wstring& name) {
-    if (!name.starts_with(L"Local\\SunPackToastReady-")) {
-        throw std::runtime_error("invalid Toast ready event name");
-    }
-    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str());
-    if (ready == nullptr) winrt::throw_last_error();
-    if (!SetEvent(ready)) {
-        const DWORD error = GetLastError();
-        CloseHandle(ready);
-        SetLastError(error);
-        winrt::throw_last_error();
-    }
-    CloseHandle(ready);
-}
-
-HANDLE connect_server_pipe(const std::wstring& name, HANDLE parent, const std::wstring& ready_event_name) {
-    if (!name.starts_with(L"\\\\.\\pipe\\SunPackToast-")) {
-        throw std::runtime_error("invalid Toast pipe name");
-    }
-    HANDLE pipe = CreateNamedPipeW(
-        name.c_str(),
-        PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1,
-        kMaximumFrameBytes,
-        kMaximumFrameBytes,
-        5'000,
-        nullptr
-    );
-    if (pipe == INVALID_HANDLE_VALUE) winrt::throw_last_error();
-    try {
-        signal_ready_event(ready_event_name);
-    } catch (...) {
-        CloseHandle(pipe);
-        throw;
-    }
-    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (event == nullptr) {
-        CloseHandle(pipe);
-        winrt::throw_last_error();
-    }
-    OVERLAPPED operation{};
-    operation.hEvent = event;
-    const BOOL connected = ConnectNamedPipe(pipe, &operation);
-    bool overlapped_pending = false;
-    if (!connected) {
-        const DWORD error = GetLastError();
-        if (error == ERROR_PIPE_CONNECTED) {
-            SetEvent(event);
-        } else if (error != ERROR_IO_PENDING) {
-            CloseHandle(event);
-            CloseHandle(pipe);
-            winrt::throw_last_error();
-        } else {
-            overlapped_pending = true;
-        }
-    } else {
-        SetEvent(event);
-    }
-    std::array<HANDLE, 2> waits{event, parent};
-    const DWORD result = WaitForMultipleObjects(parent == nullptr ? 1 : 2, waits.data(), FALSE, INFINITE);
-    if (result == WAIT_OBJECT_0 + 1) {
-        CancelIoEx(pipe, &operation);
-        CloseHandle(event);
-        CloseHandle(pipe);
-        return INVALID_HANDLE_VALUE;
-    }
-    DWORD transferred = 0;
-    if (overlapped_pending && !GetOverlappedResult(pipe, &operation, &transferred, FALSE)) {
-        const DWORD error = GetLastError();
-        CloseHandle(event);
-        CloseHandle(pipe);
-        SetLastError(error);
-        winrt::throw_last_error();
-    }
-    CloseHandle(event);
-    return pipe;
-}
-
-int run_host(
-    const std::wstring& pipe_name,
-    const std::wstring& session,
-    DWORD parent_pid,
-    const std::wstring& ready_event_name,
-    const std::wstring& diagnostic_log_path
-) {
-    if (!is_ordinary_integrity()) {
-        return ERROR_ELEVATION_REQUIRED;
-    }
+// This context and all of its WinRT objects belong to the Python toast thread.
+// Member order keeps the apartment alive through presenter and COM teardown.
+struct ToastContext {
+    explicit ToastContext(const CLSID& clsid = kToastActivatorClsid) : activation(clsid) {}
     WinrtApartmentScope apartment;
-    if (!toast_identity_registered()) {
-        register_toast_identity();
-    }
-    winrt::check_hresult(SetCurrentProcessExplicitAppUserModelID(kAppId));
-    HANDLE parent = parent_pid == 0 ? nullptr : OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
-    HANDLE pipe = connect_server_pipe(pipe_name, parent, ready_event_name);
-    if (pipe == INVALID_HANDLE_VALUE) {
-        if (parent != nullptr) CloseHandle(parent);
-        return 0;
-    }
-    HANDLE expiry_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
-    if (expiry_timer == nullptr) {
-        DisconnectNamedPipe(pipe);
-        CloseHandle(pipe);
-        if (parent != nullptr) CloseHandle(parent);
-        winrt::throw_last_error();
-    }
+    ActivationRegistration activation;
+    std::wstring diagnostic_log_path;
     std::unique_ptr<ToastPresenter> presenter;
-    const auto release_presenter = [&] {
-        if (presenter) presenter->clear();
-        presenter.reset();
-    };
-    const auto expire = [&] { release_presenter(); };
-    std::uint64_t last_sequence = 0;
-    bool authenticated = false;
-    int result = 0;
+    DWORD owner_thread = GetCurrentThreadId();
+};
+
+template <typename Work>
+HRESULT protect(Work&& work) noexcept {
     try {
-        while (true) {
-            auto frame = read_frame(pipe, parent, expiry_timer, expire);
-            if (!frame) break;
-            if (frame->sequence <= last_sequence) {
-                throw std::runtime_error("non-monotonic Toast IPC sequence");
-            }
-            last_sequence = frame->sequence;
-            if (!authenticated) {
-                if (frame->type != MessageType::hello) {
-                    throw std::runtime_error("Toast IPC session was not authenticated");
-                }
-                PayloadReader reader(frame->payload);
-                if (reader.string() != session || !reader.finished()) {
-                    throw std::runtime_error("Toast IPC session token mismatch");
-                }
-                authenticated = true;
-                continue;
-            }
-            switch (frame->type) {
-            case MessageType::snapshot:
-                if (!presenter) {
-                    presenter = std::make_unique<ToastPresenter>(expiry_timer, diagnostic_log_path);
-                }
-                presenter->show(parse_snapshot(frame->payload), frame->sequence);
-                break;
-            case MessageType::clear:
-                if (!frame->payload.empty()) throw std::runtime_error("invalid clear frame");
-                release_presenter();
-                break;
-            case MessageType::ping:
-                if (!frame->payload.empty()) throw std::runtime_error("invalid ping frame");
-                break;
-            case MessageType::shutdown:
-                if (!frame->payload.empty()) throw std::runtime_error("invalid shutdown frame");
-                release_presenter();
-                CloseHandle(expiry_timer);
-                DisconnectNamedPipe(pipe);
-                CloseHandle(pipe);
-                if (parent != nullptr) CloseHandle(parent);
-                return 0;
-            default:
-                throw std::runtime_error("unknown Toast IPC message type");
-            }
-        }
+        work();
+        return S_OK;
+    } catch (const winrt::hresult_error& error) {
+        return error.code();
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
     } catch (...) {
-        result = ERROR_INVALID_DATA;
+        return E_INVALIDARG;
     }
-    release_presenter();
-    CloseHandle(expiry_timer);
-    DisconnectNamedPipe(pipe);
-    CloseHandle(pipe);
-    if (parent != nullptr) CloseHandle(parent);
-    return result;
+}
+
+ToastContext& context_on_owner_thread(void* raw) {
+    if (!raw) winrt::throw_hresult(E_INVALIDARG);
+    auto& context = *static_cast<ToastContext*>(raw);
+    if (context.owner_thread != GetCurrentThreadId()) winrt::throw_hresult(RPC_E_WRONG_THREAD);
+    return context;
 }
 
 int self_test() {
@@ -1153,51 +826,112 @@ int self_test() {
     const auto decoded = hex_decode(hex_encode(original));
     if (!decoded || *decoded != original) return 1;
     if (xml_escape(L"<&\"'>") != L"&lt;&amp;&quot;&apos;&gt;") return 2;
+    std::vector<std::uint8_t> payload(40, 0); // header and six empty strings
+    payload[0] = static_cast<std::uint8_t>(SnapshotKind::success);
+    payload[1] = static_cast<std::uint8_t>(ProgressMode::determinate);
+    const double progress = 0.25;
+    std::memcpy(payload.data() + 4, &progress, sizeof(progress));
+    if (parse_snapshot(payload).progress_value != progress) return 3;
+    for (std::size_t size = 0; size < payload.size(); ++size) {
+        bool rejected = false;
+        try { parse_snapshot(std::vector<std::uint8_t>(payload.begin(), payload.begin() + size)); }
+        catch (...) { rejected = true; }
+        if (!rejected) return 4;
+    }
     {
-        WinrtApartmentScope apartment;
+        // Exercise the real context without registering a user shortcut or
+        // interfering with the production activator in a running watch.
+        CLSID test_clsid{};
+        winrt::check_hresult(CoCreateGuid(&test_clsid));
+        ToastContext context(test_clsid);
         XmlDocument first;
         first.LoadXml(L"<root><value>first</value></root>");
         XmlDocument second;
         second.LoadXml(L"<root><value>second</value></root>");
+        if (&context_on_owner_thread(&context) != &context) return 5;
+        HRESULT wrong_thread = S_OK;
+        std::thread other([&] {
+            wrong_thread = protect([&] { context_on_owner_thread(&context); });
+        });
+        other.join();
+        if (wrong_thread != RPC_E_WRONG_THREAD) return 6;
+        // Resolve our live COM factory, as Windows does for a button click.
+        winrt::com_ptr<IClassFactory> factory;
+        winrt::check_hresult(CoGetClassObject(test_clsid, CLSCTX_LOCAL_SERVER, nullptr, IID_PPV_ARGS(factory.put())));
+        winrt::com_ptr<INotificationActivationCallback> callback;
+        winrt::check_hresult(factory->CreateInstance(nullptr, IID_PPV_ARGS(callback.put())));
+        winrt::check_hresult(callback->Activate(kAppId, L"noop", nullptr, 0));
     }
     return 0;
 }
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    int argc = 0;
-    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv == nullptr) return static_cast<int>(GetLastError());
-    const auto release_argv = std::unique_ptr<wchar_t*, decltype(&LocalFree)>(argv, LocalFree);
-    try {
-        if (has_argument(argc, argv, L"--self-test")) {
-            return self_test();
+HRESULT sunpack_toast_create(const wchar_t* executable, const wchar_t* arguments,
+                             const wchar_t* log_path, void** output) noexcept {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    return protect([&] {
+        if (!executable || !arguments) winrt::throw_hresult(E_INVALIDARG);
+        auto context = std::make_unique<ToastContext>();
+        if (!toast_identity_registered(executable, arguments)) {
+            register_toast_identity(executable, arguments);
         }
-        if (has_argument(argc, argv, L"--register-toast")) {
-            winrt::init_apartment(winrt::apartment_type::multi_threaded);
-            register_toast_identity();
-            return 0;
+        context->diagnostic_log_path = log_path ? log_path : L"";
+        *output = context.release();
+    });
+}
+
+HRESULT sunpack_toast_show(void* raw, const std::uint8_t* data,
+                           std::uint32_t size, std::uint64_t sequence) noexcept {
+    return protect([&] {
+        auto& context = context_on_owner_thread(raw);
+        if (!data || size > kMaximumSnapshotBytes) winrt::throw_hresult(E_INVALIDARG);
+        const auto snapshot = parse_snapshot(std::vector<std::uint8_t>(data, data + size));
+        if (!context.presenter) {
+            context.presenter = std::make_unique<ToastPresenter>(context.diagnostic_log_path);
         }
-        if (has_argument(argc, argv, L"--unregister-toast")) {
-            unregister_toast_identity();
-            return 0;
+        context.presenter->show(snapshot, sequence);
+    });
+}
+
+HRESULT sunpack_toast_clear(void* raw) noexcept {
+    return protect([&] { context_on_owner_thread(raw).presenter.reset(); });
+}
+
+HRESULT sunpack_toast_destroy(void* raw) noexcept {
+    return protect([&] { delete &context_on_owner_thread(raw); });
+}
+
+HRESULT sunpack_toast_register(const wchar_t* executable, const wchar_t* arguments) noexcept {
+    return protect([&] {
+        if (!executable || !arguments) winrt::throw_hresult(E_INVALIDARG);
+        WinrtApartmentScope apartment;
+        register_toast_identity(executable, arguments);
+    });
+}
+
+HRESULT sunpack_toast_unregister() noexcept {
+    return protect([] { unregister_toast_identity(); });
+}
+
+// Windows can cold-activate the main executable for a notification that was
+// clicked during shutdown. A live watch already owns the registered factory.
+HRESULT sunpack_toast_activate() noexcept {
+    return protect([] {
+        WinrtApartmentScope apartment;
+        {
+            std::lock_guard lock(g_activation_mutex);
+            g_activated = false;
         }
-        if (has_argument(argc, argv, L"-ToastActivated")) {
-            return run_activation_server();
-        }
-        const auto pipe = argument_value(argc, argv, L"--pipe");
-        const auto session = argument_value(argc, argv, L"--session");
-        const auto ready_event = argument_value(argc, argv, L"--ready-event");
-        const auto diagnostic_log = argument_value(argc, argv, L"--diagnostic-log");
-        const DWORD parent_pid = parse_process_id(argument_value(argc, argv, L"--parent-pid"));
-        if (!pipe || !session || session->size() < 16 || !ready_event || parent_pid == 0) {
-            return ERROR_INVALID_PARAMETER;
-        }
-        return run_host(*pipe, *session, parent_pid, *ready_event, diagnostic_log.value_or(L""));
-    } catch (const winrt::hresult_error& error) {
-        return static_cast<int>(error.code().value & 0x7fffffff);
-    } catch (...) {
-        return ERROR_INVALID_DATA;
-    }
+        ActivationRegistration activation;
+        std::unique_lock lock(g_activation_mutex);
+        g_activation_condition.wait_for(lock, std::chrono::seconds(30), [] { return g_activated; });
+    });
+}
+
+HRESULT sunpack_toast_self_test() noexcept {
+    return protect([] {
+        if (self_test() != 0) winrt::throw_hresult(E_FAIL);
+    });
 }

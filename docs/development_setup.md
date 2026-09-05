@@ -22,6 +22,7 @@ repair_training/          数据、训练与评估工具
 models/                   正式发布模型资产
 native/sunpack_native/    Rust/PyO3 扩展
 native/sevenzip_bridge/   Windows 7z.dll bridge 与 worker
+native/toast_host/        主程序内加载的 Windows toast DLL
 tools/                    x64 外部工具和原生构建产物
 tools-arm64/              ARM64 外部工具和原生构建产物
 ```
@@ -65,7 +66,7 @@ ARM64 的模型运行时由脚本使用 PyTorch CPU wheel 源单独安装；不�
 3. 仅在 full 模式安装模型运行时依赖
 4. 清理所有旧 `sunpack_native` 残留，构建并只安装最新 wheel
 5. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
-6. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
+6. 构建 `sunpack_sevenzip.dll`、`sunpack_sevenzip_worker.exe` 和 `sunpack_toast.dll`
 7. 把 C++ 产物复制到工具目录
 8. 运行 Python、Rust、C++ 和 CLI smoke checks
 
@@ -114,6 +115,19 @@ Copy-Item native\sevenzip_bridge\build-x64\Release\sunpack_sevenzip_worker.exe t
 ```
 
 bridge 运行时还需要同一工具目录中的 `7z.dll`。
+
+### Windows toast
+
+```powershell
+cmake -S native\toast_host -B native\toast_host\build-x64 -A x64
+cmake --build native\toast_host\build-x64 --config Release
+ctest --test-dir native\toast_host\build-x64 -C Release --output-on-failure
+Copy-Item native\toast_host\build-x64\Release\sunpack_toast.dll tools\sunpack_toast.dll -Force
+```
+
+只有持续运行的 watch 创建 `ToastManager`。它在主程序内的专用线程上加载 DLL、维护 WinRT apartment 和 COM 按钮回调，并处理进度限频与完成通知 TTL；停止或重载 watch 时等待该线程释放资源。普通 CLI 请求和独立的 `watch start --once` 不创建通知管理器。watch 与 CLI 共用引擎时，通知仍仅来自 watch 调度器。
+
+发行包只携带 `tools\sunpack_toast.dll`，无需通知辅助进程。安装与卸载由 `sunpack-runtime.exe --register-toast` / `--unregister-toast` 处理通知身份；Windows 的冷激活也进入主程序的 `--toast-activated` 入口，不启动解压引擎或 watch。
 
 ## Smoke Checks
 

@@ -115,3 +115,65 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
     assert ("host_qos", True) in events
     assert ("worker_qos", False) in events
     assert ("host_qos", False) in events
+
+
+def test_runtime_host_creates_toast_only_for_continuous_watch(monkeypatch, tmp_path):
+    import sunpack.cli.runtime_host as module
+    import sunpack.platform.windows.toast_host as toast
+
+    managers = []
+    services = []
+
+    class FakeManager:
+        def __init__(self, **kwargs):
+            managers.append(kwargs)
+
+    class FakeService:
+        def __init__(self, *, toast_manager_factory=None, **_kwargs):
+            services.append(self)
+            self.toast_factory = toast_manager_factory
+            self.scheduler = None
+            self.stop = asyncio.Event()
+            self.ready = asyncio.Event()
+
+        async def run(self, *, once=False, initial_scan=False):
+            if once:
+                assert self.toast_factory is None
+                return 0
+            self.toast_factory({"watch": {"toast_update_interval_ms": 123}}, str(tmp_path), None)
+            self.ready.set()
+            await self.stop.wait()
+            return 0
+
+        async def wait_ready(self):
+            await self.ready.wait()
+
+        def request_stop(self):
+            self.stop.set()
+
+    async def engine(_config):
+        return object()
+
+    monkeypatch.setattr(module, "load_config", lambda: {})
+    monkeypatch.setattr(module, "shared_pipeline_engine", engine)
+    monkeypatch.setattr(module, "WatchService", FakeService)
+    monkeypatch.setattr(toast, "ToastManager", FakeManager)
+
+    async def run():
+        host = RuntimeHost()
+        await host.foreground_started()
+        await host.foreground_finished()
+        assert managers == []
+        assert await host.run_watch_once() == 0
+        assert managers == []
+        await host.start_watch(tray_enabled=False)
+        assert len(managers) == 1
+        # Foreground requests coexist without creating another notification owner.
+        await host.foreground_started()
+        await host.foreground_finished()
+        await host.start_watch(tray_enabled=False)
+        assert len(managers) == 1
+        await host.close()
+
+    asyncio.run(run())
+    assert managers[0]["update_interval_ms"] == 123

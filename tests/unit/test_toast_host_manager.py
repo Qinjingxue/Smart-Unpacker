@@ -1,150 +1,309 @@
 import os
-import secrets
 import threading
+import time
 
-from sunpack.platform.windows import toast_host as toast_host_module
-from sunpack.platform.windows.toast_host import ToastHostManager
+import pytest
+
+from sunpack.platform.windows import toast_host as module
+from sunpack.platform.windows.toast_host import ToastManager
 from sunpack.platform.windows.toast_protocol import ToastSnapshot, ToastSnapshotKind
 
 
-def _terminal_snapshot(*, ttl_ms: int = 5_000) -> ToastSnapshot:
-    return ToastSnapshot(
-        kind=ToastSnapshotKind.SUCCESS,
-        batch_id="batch",
-        title="complete",
-        ttl_ms=ttl_ms,
-    )
+def snapshot(kind=ToastSnapshotKind.SUCCESS, *, title='done', ttl_ms=0):
+    return ToastSnapshot(kind, 'batch', title, ttl_ms=ttl_ms)
 
 
-def test_terminal_retention_starts_only_after_snapshot_is_sent(monkeypatch):
-    manager = ToastHostManager()
-    snapshot = _terminal_snapshot()
+class Recorder:
+    def __init__(self):
+        self.events = []
+        self.condition = threading.Condition()
 
-    manager.publish(snapshot)
+    def record(self, name, *values):
+        with self.condition:
+            self.events.append((name, threading.get_ident(), os.getpid(), *values))
+            self.condition.notify_all()
 
-    assert manager._snapshot_expires_at == 0.0
-    revision = manager._revision
-    monkeypatch.setattr(toast_host_module.time, "monotonic", lambda: 100.0)
-    manager._retain_terminal_after_send(snapshot, revision)
-    assert manager._snapshot_expires_at == 105.0
+    def wait(self, name, count=1):
+        with self.condition:
+            assert self.condition.wait_for(
+                lambda: sum(e[0] == name for e in self.events) >= count, timeout=3,
+            ), self.events
+
+    def factory(self, **kwargs):
+        self.record('create', kwargs)
+        recorder = self
+
+        class Presenter:
+            def show(self, payload, sequence):
+                recorder.record('show', payload, sequence)
+
+            def clear(self):
+                recorder.record('clear')
+
+            def close(self):
+                recorder.record('close')
+
+        return Presenter()
 
 
-def test_expired_terminal_is_forgotten_without_sending_clear(monkeypatch):
-    manager = ToastHostManager()
-    snapshot = _terminal_snapshot()
-    manager.publish(snapshot)
-    revision = manager._revision
-    monkeypatch.setattr(toast_host_module.time, "monotonic", lambda: 100.0)
-    manager._retain_terminal_after_send(snapshot, revision)
-
-    with manager._condition:
-        manager._forget_expired_snapshot_locked(105.0)
-
+def test_lifecycle_owns_native_objects_on_one_main_process_thread(tmp_path):
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory, diagnostic_log_path=str(tmp_path / 'events.jsonl'))
+    manager.publish(snapshot())
+    assert recorder.events == []
+    try:
+        manager.start()
+        manager.start()
+        recorder.wait('show')
+        manager.clear()
+        recorder.wait('clear')
+    finally:
+        manager.stop()
+    assert len({e[1] for e in recorder.events}) == 1
+    assert recorder.events[0][1] != threading.get_ident()
+    assert {e[2] for e in recorder.events} == {os.getpid()}
+    assert recorder.events[-1][0] == 'close'
+    assert sum(e[0] == 'create' for e in recorder.events) == 1
+    assert recorder.events[0][3]['diagnostic_log_path'] == str(tmp_path / 'events.jsonl')
+    manager.publish(snapshot())
     assert manager._snapshot is None
-    assert manager._snapshot_expires_at == 0.0
-    assert manager._revision == revision
+    manager.stop()
 
 
-def test_native_host_receives_diagnostic_log_path(tmp_path, monkeypatch):
-    host_path = tmp_path / "sunpack_toast_host.exe"
-    host_path.write_bytes(b"")
-    diagnostic_log_path = tmp_path / "state" / "toast_host_events.jsonl"
-    launched = {}
+def test_ttl_starts_after_show_returns():
+    recorder = Recorder()
+    entered, release = threading.Event(), threading.Event()
 
-    class _Process:
-        pid = 42
+    def factory(**kwargs):
+        presenter = recorder.factory(**kwargs)
+        show = presenter.show
 
-    def launcher(arguments, *, cwd):
-        launched["arguments"] = arguments
-        launched["cwd"] = cwd
-        return _Process()
+        def delayed_show(payload, sequence):
+            entered.set()
+            assert release.wait(3)
+            show(payload, sequence)
 
-    manager = ToastHostManager(
-        host_path=str(host_path),
-        diagnostic_log_path=str(diagnostic_log_path),
-        launcher=launcher,
-    )
-    manager._stop_handle = 456
-    monkeypatch.setattr(toast_host_module, "_create_event", lambda *_args, **_kwargs: 123)
-    monkeypatch.setattr(toast_host_module, "_wait_for_host_ready", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(toast_host_module, "_open_pipe", lambda _name, _timeout: 123)
-    monkeypatch.setattr(manager, "_start_process_waiter", lambda _process, _generation: None)
-    monkeypatch.setattr(manager, "_write", lambda _frame: None)
+        presenter.show = delayed_show
+        return presenter
 
-    class _Kernel32:
-        @staticmethod
-        def CloseHandle(_handle):
-            return True
-
-    monkeypatch.setattr(toast_host_module, "_kernel32", lambda: _Kernel32())
-
-    manager._start_and_connect()
-
-    assert launched["arguments"][-2:] == ["--diagnostic-log", str(diagnostic_log_path)]
-    ready_index = launched["arguments"].index("--ready-event")
-    assert launched["arguments"][ready_index + 1].startswith("Local\\SunPackToastReady-")
-    assert launched["cwd"] == str(tmp_path)
+    manager = ToastManager(presenter_factory=factory)
+    manager.publish(snapshot(ttl_ms=100))
+    try:
+        manager.start()
+        assert entered.wait(3)
+        time.sleep(.15)
+        assert not any(e[0] == 'clear' for e in recorder.events)
+        released_at = time.monotonic()
+        release.set()
+        recorder.wait('clear')
+        assert time.monotonic() - released_at >= .09
+    finally:
+        release.set()
+        manager.stop()
 
 
-def test_process_exit_waiter_notifies_the_matching_generation():
-    manager = ToastHostManager()
-    released = threading.Event()
-
-    class _Process:
-        @staticmethod
-        def wait(timeout=None):
-            assert timeout is None
-            released.wait()
-            return 37
-
-    process = _Process()
-    with manager._condition:
-        manager._process = process
-        manager._process_generation = 4
-    manager._start_process_waiter(process, 4)
-
-    released.set()
-    with manager._condition:
-        assert manager._condition.wait_for(
-            lambda: manager._process_exit_generation == 4,
-            timeout=1.0,
-        )
-        assert manager._process_exit_code == 37
-
-
-def test_idle_supervisor_has_no_periodic_wakeup(monkeypatch):
-    manager = ToastHostManager()
-    observed_timeouts = []
-
-    def start_and_connect():
-        manager._pipe_handle = 123
+def test_idle_thread_does_not_poll(monkeypatch):
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory)
+    waits = []
 
     def wait_for(predicate, timeout=None):
-        observed_timeouts.append(timeout)
+        waits.append(timeout)
         manager._stopping = True
         return predicate()
 
-    class _Kernel32:
-        @staticmethod
-        def CloseHandle(_handle):
-            return True
-
-    monkeypatch.setattr(manager, "_start_and_connect", start_and_connect)
-    monkeypatch.setattr(manager, "_send", lambda _message_type: None)
-    monkeypatch.setattr(manager._condition, "wait_for", wait_for)
-    monkeypatch.setattr(toast_host_module, "_kernel32", lambda: _Kernel32())
-
-    manager._supervise()
-
-    assert observed_timeouts == [None]
+    monkeypatch.setattr(manager._condition, 'wait_for', wait_for)
+    manager._run()
+    assert waits == [None]
 
 
-def test_cross_integrity_ready_event_security_descriptor_is_valid():
-    handle = toast_host_module._create_event(
-        f"Local\\SunPackToastReady-test-{os.getpid()}-{secrets.token_hex(4)}",
-        cross_integrity=True,
-    )
+def test_progress_coalesces_but_terminal_bypasses_throttle():
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory, update_interval_ms=1000)
+    manager.publish(snapshot(ToastSnapshotKind.PROGRESS, title='first'))
     try:
-        assert handle
+        manager.start()
+        recorder.wait('show')
+        for i in range(10):
+            manager.publish(snapshot(ToastSnapshotKind.PROGRESS, title=f'pending-{i}'))
+        manager.publish(snapshot(title='terminal'))
+        recorder.wait('show', 2)
+        shown = [e for e in recorder.events if e[0] == 'show']
+        assert len(shown) == 2
+        assert b'terminal' in shown[1][3]
+        assert shown[1][4] > shown[0][4]
     finally:
-        toast_host_module._kernel32().CloseHandle(handle)
+        manager.stop()
+
+
+def test_latest_progress_is_sent_after_throttle_deadline():
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory, update_interval_ms=100)
+    manager.publish(snapshot(ToastSnapshotKind.PROGRESS, title='first'))
+    try:
+        manager.start()
+        recorder.wait('show')
+        manager.publish(snapshot(ToastSnapshotKind.PROGRESS, title='latest'))
+        recorder.wait('show', 2)
+        assert b'latest' in [e for e in recorder.events if e[0] == 'show'][-1][3]
+    finally:
+        manager.stop()
+
+
+def test_bad_snapshot_is_rejected_without_killing_thread():
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory)
+    manager.publish(snapshot(title='x' * 65536))
+    try:
+        manager.start()
+        recorder.wait('clear')
+        manager.publish(snapshot())
+        recorder.wait('show')
+        assert manager._thread.is_alive()
+    finally:
+        manager.stop()
+
+
+def test_native_start_failure_retries_latest_snapshot(monkeypatch):
+    recorder = Recorder()
+    attempts = []
+
+    def factory(**kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError('unavailable')
+        return recorder.factory(**kwargs)
+
+    manager = ToastManager(presenter_factory=factory)
+    manager.publish(snapshot(title='old'))
+    monkeypatch.setattr(manager, '_wait_for_stop', lambda _seconds: manager.publish(snapshot(title='latest')))
+    try:
+        manager.start()
+        recorder.wait('show')
+        assert b'latest' in [e for e in recorder.events if e[0] == 'show'][0][3]
+    finally:
+        manager.stop()
+
+
+def test_stop_interrupts_native_retry_backoff():
+    entered = threading.Event()
+
+    def factory(**_kwargs):
+        entered.set()
+        raise OSError('unavailable')
+
+    manager = ToastManager(presenter_factory=factory)
+    manager.start()
+    assert entered.wait(3)
+    manager.stop()
+    assert manager._thread is None
+
+
+def test_restart_does_not_replay_previous_watch_snapshot():
+    recorder = Recorder()
+    manager = ToastManager(presenter_factory=recorder.factory)
+    manager.publish(snapshot())
+    manager.start()
+    recorder.wait('show')
+    manager.stop()
+    try:
+        manager.start()
+        recorder.wait('clear')
+        assert sum(e[0] == 'show' for e in recorder.events) == 1
+    finally:
+        manager.stop()
+
+
+def test_cli_bootstrap_does_not_load_toast_library(monkeypatch):
+    monkeypatch.setattr(module, '_load_library', lambda: pytest.fail('CLI loaded toast DLL'))
+    for argv in ([], ['extract', 'archive.zip'], ['scan', '.'], ['watch', 'status']):
+        assert module.handle_toast_argv(argv) is None
+
+
+def test_native_wrapper_passes_snapshot_and_closes_once(monkeypatch):
+    calls = []
+
+    class Library:
+        def sunpack_toast_create(self, executable, arguments, log, output):
+            calls.append(('create', executable, arguments, log))
+            output._obj.value = 123
+            return 0
+
+        def sunpack_toast_show(self, context, payload, size, sequence):
+            calls.append(('show', context.value, payload, size, sequence))
+            return 0
+
+        def sunpack_toast_destroy(self, context):
+            calls.append(('destroy', context.value))
+            return 0
+
+    monkeypatch.setattr(module, '_load_library', lambda _path: Library())
+    monkeypatch.setattr(module, '_activation_command', lambda: ('main.exe', '--toast-activated'))
+    presenter = module._NativeToastPresenter(diagnostic_log_path='events.jsonl')
+    presenter.show(b'a\0b', 7)
+    presenter.close()
+    presenter.close()
+    assert calls == [('create', 'main.exe', '--toast-activated', 'events.jsonl'),
+                     ('show', 123, b'a\0b', 3, 7), ('destroy', 123)]
+
+
+def test_show_failure_recreates_presenter_on_owner_thread(monkeypatch):
+    recorder = Recorder()
+    attempts = []
+
+    def factory(**kwargs):
+        presenter = recorder.factory(**kwargs)
+        attempts.append(1)
+        if len(attempts) == 1:
+            def fail(_payload, _sequence):
+                raise OSError('Show failed')
+            presenter.show = fail
+        return presenter
+
+    manager = ToastManager(presenter_factory=factory)
+    manager.publish(snapshot())
+    monkeypatch.setattr(manager, '_wait_for_stop', lambda _seconds: None)
+    try:
+        manager.start()
+        recorder.wait('show')
+    finally:
+        manager.stop()
+    assert [e[0] for e in recorder.events] == ['create', 'close', 'create', 'show', 'close']
+    assert len({e[1] for e in recorder.events}) == 1
+
+
+@pytest.mark.parametrize('argument, native_method', [
+    ('--register-toast', 'register'), ('--unregister-toast', 'unregister'),
+    ('--toast-activated', 'activate'),
+])
+def test_main_runtime_handles_toast_bootstrap_without_starting_engine(monkeypatch, argument, native_method):
+    import sys
+    from types import SimpleNamespace
+    from sunpack.support import entrypoint
+    from sunpack.support import runtime_identity
+
+    calls = []
+    library = SimpleNamespace(**{
+        'sunpack_toast_' + name: (lambda *args, name=name: calls.append((name, args)) or 0)
+        for name in ('register', 'unregister', 'activate')
+    })
+    monkeypatch.setattr(module, '_load_library', lambda: library)
+    monkeypatch.setattr(module, '_activation_command', lambda: ('main.exe', '--toast-activated'))
+    monkeypatch.setattr(sys, 'argv', ['sunpack-runtime.exe', argument])
+    monkeypatch.setattr(runtime_identity, 'consume_runtime_id', lambda _argv: pytest.fail('entered normal runtime'))
+    assert entrypoint.main() == 0
+    assert calls == [(native_method, ('main.exe', '--toast-activated') if native_method == 'register' else ())]
+
+
+def test_resource_lookup_selects_current_architecture(tmp_path, monkeypatch):
+    from sunpack.support import resources
+
+    for arch in ('x64', 'arm64'):
+        directory = tmp_path / 'native' / 'toast_host' / f'build-{arch}' / 'Release'
+        directory.mkdir(parents=True)
+        (directory / 'sunpack_toast.dll').write_bytes(b'')
+    monkeypatch.setattr(resources, 'candidate_resource_roots', lambda: [tmp_path])
+    monkeypatch.setattr(resources.platform, 'machine', lambda: 'ARM64')
+    assert 'build-arm64' in resources.get_toast_library_path()
+    monkeypatch.setattr(resources.platform, 'machine', lambda: 'AMD64')
+    assert 'build-x64' in resources.get_toast_library_path()
