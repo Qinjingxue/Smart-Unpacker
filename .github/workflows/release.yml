@@ -207,7 +207,6 @@ jobs:
           $buildArgs = @{
             SkipTests = $true
             NoPause = $true
-            RequireInstaller = $true
             Arch = "${{ matrix.arch }}"
             RepairSystem = "${{ matrix.repair_system }}"
           }
@@ -219,20 +218,14 @@ jobs:
       - name: Validate release package
         shell: pwsh
         run: |
-          $archives = @(
-            Get-ChildItem -LiteralPath "release" `
-              -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip" `
-              -File
-          )
           $installers = @(
             Get-ChildItem -LiteralPath "release" `
               -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe" `
               -File
           )
-          if ($archives.Count -ne 1 -or $installers.Count -ne 1) {
-            throw "Expected one portable archive and one installer; found $($archives.Count) archive(s) and $($installers.Count) installer(s)."
+          if ($installers.Count -ne 1) {
+            throw "Expected one Windows installer; found $($installers.Count)."
           }
-          Write-Host "Portable archive: $($archives[0].FullName)"
           Write-Host "Windows installer: $($installers[0].FullName)"
 
       - name: Verify package architecture
@@ -254,9 +247,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}
-          path: |
-            release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip
-            release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe
+          path: release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -338,16 +329,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t packages < <(find artifacts -type f \( -name 'sunpack-windows-*.zip' -o -name 'sunpack-windows-*-setup.exe' \) | sort)
-          if [ "${#packages[@]}" -ne 4 ]; then
-            echo "Expected four lite release files (two portable archives and two installers), found ${#packages[@]}." >&2
+          mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*-setup.exe' | sort)
+          if [ "${#packages[@]}" -ne 2 ]; then
+            echo "Expected two lite Windows installers, found ${#packages[@]}." >&2
             exit 1
           fi
           for package in x64-lite arm64-lite; do
-            if ! printf '%s\n' "${packages[@]}" | grep -Eq "/sunpack-windows-${package}-.*\.zip$"; then
-              echo "Missing ${package} portable archive." >&2
-              exit 1
-            fi
             if ! printf '%s\n' "${packages[@]}" | grep -Eq "/sunpack-windows-${package}-.*-setup\.exe$"; then
               echo "Missing ${package} Windows installer." >&2
               exit 1

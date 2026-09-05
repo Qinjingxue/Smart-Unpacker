@@ -182,11 +182,10 @@ python -m pytest tests\unit\test_model_runtime.py
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Version 1.2.3
-.\scripts\build_windows.ps1 -RequireInstaller
 ```
 
-如果本机没有安装 Inno Setup 6，普通本地构建会给出警告并继续生成 portable ZIP；
-正式发行或需要安装器时使用 `-RequireInstaller`，缺少 `ISCC.exe` 将在耗时构建开始前失败。
+Windows 发布只生成安装器，不再生成 portable ZIP。构建环境必须安装 Inno Setup 6；
+缺少 `ISCC.exe` 时会在耗时构建开始前失败，也可以通过 `-InnoCompilerPath` 指定编译器路径。
 
 构建过程：
 
@@ -199,13 +198,13 @@ python -m pytest tests\unit\test_model_runtime.py
 7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`，lite 构建显式排除并校验 torch/PyG 运行时
 8. 校验关键 PE 文件架构
 9. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check
-10. 用随附 7-Zip 创建并测试发布 ZIP
+10. 用 Inno Setup 创建 Windows 安装器
 
 输出：
 
 ```text
 dist\sunpack-<arch>-<repair_system>\
-release\sunpack-windows-<arch>-<repair_system>-<version>.zip
+release\sunpack-windows-<arch>-<repair_system>-<version>-setup.exe
 ```
 
 ARM64 必须在 ARM64 Windows 和 ARM64 Python 环境中构建。已有目录可独立校验：

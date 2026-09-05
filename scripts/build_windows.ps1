@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
-    [switch]$SkipInstaller,
-    [switch]$RequireInstaller,
     [switch]$Clean,
     [switch]$NoPause,
     # Nuitka currently warns that C-level PGO is unsupported for standalone builds.
@@ -20,10 +18,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $interactivePrompting = -not $NoPause -and -not [Console]::IsInputRedirected
 $promptForAcceptanceTests = ($PSBoundParameters.Count -eq 0) -and $interactivePrompting
-
-if ($SkipInstaller -and $RequireInstaller) {
-    throw "-SkipInstaller and -RequireInstaller cannot be used together."
-}
 
 function Write-Step {
     param([string]$Message)
@@ -472,7 +466,7 @@ function Get-InnoSetupCompiler {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw "Inno Setup 6 compiler (ISCC.exe) was not found. Install JRSoftware.InnoSetup, pass -InnoCompilerPath, or use -SkipInstaller."
+    throw "Inno Setup 6 compiler (ISCC.exe) was not found. Install JRSoftware.InnoSetup or pass -InnoCompilerPath."
 }
 
 function Install-ModelRuntimeDependencies {
@@ -955,12 +949,9 @@ $distServiceRoot = Join-Path $distAppRoot "service"
 $distWatchBrokerPath = Join-Path $distServiceRoot "sunpack-watch-broker.exe"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
-$releaseZipName = "sunpack-windows-{0}-{1}-{2}.zip" -f $buildArch, $repairSystemMode, $versionValue
-$releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $releaseInstallerName = "sunpack-windows-{0}-{1}-{2}-setup.exe" -f $buildArch, $repairSystemMode, $versionValue
 $releaseInstallerPath = Join-Path $releaseRoot $releaseInstallerName
 $runAcceptanceTests = -not $SkipTests
-$innoCompiler = $null
 
 if ($promptForAcceptanceTests) {
     $runAcceptanceTests = Confirm-AcceptanceTests
@@ -971,18 +962,8 @@ Assert-PathExists -LiteralPath $sunpackEntryPath -Description "SunPack entry poi
 if ($repairSystemMode -eq "full") {
     Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
 }
-if (-not $SkipInstaller) {
-    Assert-PathExists -LiteralPath $installerScriptPath -Description "Inno Setup installer script"
-    try {
-        $innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath
-    } catch {
-        if ($RequireInstaller) {
-            throw
-        }
-        Write-Warning "Inno Setup 6 was not found. Continuing with the portable ZIP only. Install Inno Setup, pass -InnoCompilerPath, or use -RequireInstaller to make this a hard failure."
-        $SkipInstaller = $true
-    }
-}
+Assert-PathExists -LiteralPath $installerScriptPath -Description "Inno Setup installer script"
+$innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $applicationManifestPath -Description "Windows application manifest"
 Assert-PathExists -LiteralPath $manifestEmbeddingScriptPath -Description "Manifest resource embedding script"
@@ -1220,40 +1201,25 @@ if ($processArch -eq $buildArch) {
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
 }
 
-Write-Step "Creating distributable zip archive"
-if (Test-Path -LiteralPath $releaseZipPath) {
-    Remove-Item -LiteralPath $releaseZipPath -Force
-}
-Invoke-Native -FilePath $sevenZipPath -Arguments @("a", "-tzip", "-mx=5", $releaseZipPath, $distAppRoot)
-Invoke-Native -FilePath $sevenZipPath -Arguments @("t", $releaseZipPath)
-Assert-PathExists -LiteralPath $releaseZipPath -Description "Release zip archive"
-
-if (-not $SkipInstaller) {
-    Write-Step "Creating Windows installer"
-    $installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
-    Invoke-Native -FilePath $innoCompiler -Arguments @(
-        "/Qp",
-        "/DAppVersion=$versionValue",
-        "/DSourceDir=$distAppRoot",
-        "/DOutputDir=$releaseRoot",
-        "/DOutputBaseFilename=$installerBaseName",
-        "/DTargetArch=$buildArch",
-        "/DRepairSystem=$repairSystemMode",
-        $installerScriptPath
-    )
-    Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
-} else {
-    Write-Host "Skipping Windows installer by request." -ForegroundColor Yellow
-}
+Write-Step "Creating Windows installer"
+$installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
+Invoke-Native -FilePath $innoCompiler -Arguments @(
+    "/Qp",
+    "/DAppVersion=$versionValue",
+    "/DSourceDir=$distAppRoot",
+    "/DOutputDir=$releaseRoot",
+    "/DOutputBaseFilename=$installerBaseName",
+    "/DTargetArch=$buildArch",
+    "/DRepairSystem=$repairSystemMode",
+    $installerScriptPath
+)
+Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
 
 Write-Host ""
 Write-Host "Build completed successfully." -ForegroundColor Green
 Write-Host "Version: $versionValue"
 Write-Host "App directory: $distAppRoot"
-Write-Host "Release zip: $releaseZipPath"
-if (-not $SkipInstaller) {
-    Write-Host "Windows installer: $releaseInstallerPath"
-}
+Write-Host "Windows installer: $releaseInstallerPath"
 
 if (-not $NoPause -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
     Write-Host ""

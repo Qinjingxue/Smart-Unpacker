@@ -145,26 +145,28 @@ def test_installer_declares_x64_and_arm64_modes():
     assert "ArchitecturesAllowed=x64compatible" in script
 
 
-def test_build_and_release_workflow_publish_portable_and_setup_packages():
+def test_build_and_release_workflow_publish_installers_only():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
     assert "-setup.exe" in build_script
     assert "Get-InnoSetupCompiler" in build_script
-    assert "-RequireInstaller" in build_script
-    assert "RequireInstaller = $true" in workflow
+    assert "Creating distributable zip archive" not in build_script
+    assert "$releaseZipPath" not in build_script
+    assert "portable archive" not in workflow
+    assert "sunpack-windows-*.zip" not in workflow
     assert "test_windows_installer.ps1" in workflow
-    assert "Expected four lite release files" in workflow
+    assert "Expected two lite Windows installers" in workflow
     assert "*-setup.exe" in workflow
 
 
-def test_local_build_falls_back_to_portable_zip_when_inno_is_missing():
+def test_local_build_requires_inno_setup():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
 
-    assert "if ($RequireInstaller)" in build_script
-    assert "Continuing with the portable ZIP only" in build_script
-    assert "$SkipInstaller = $true" in build_script
-    assert "-SkipInstaller and -RequireInstaller cannot be used together" in build_script
+    assert "[switch]$SkipInstaller" not in build_script
+    assert "[switch]$RequireInstaller" not in build_script
+    assert "$innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath" in build_script
+    assert "Install JRSoftware.InnoSetup or pass -InnoCompilerPath" in build_script
 
 
 def test_build_notes_handles_recreated_tags_and_noninteractive_log_output():
