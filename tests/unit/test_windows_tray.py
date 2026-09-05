@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import sunpack.filesystem.watcher.service as service_module
@@ -77,3 +80,100 @@ def test_tray_defaults_to_english_text():
     assert tray._text("open_watch_roots") == "Open watch folders file"
     assert tray._text("open_builtin_passwords") == "Open built-in passwords file"
     assert tray._text("exit") == "Exit"
+
+
+def test_tray_close_and_destroy_have_distinct_responsibilities():
+    calls = []
+
+    class User32:
+        def DestroyWindow(self, hwnd):
+            calls.append(("destroy", hwnd))
+
+        def PostQuitMessage(self, code):
+            calls.append(("quit", code))
+
+    tray = object.__new__(WindowsTrayIcon)
+    tray.user32 = User32()
+
+    assert tray._wndproc(123, tray_module.WM_CLOSE, 0, 0) == 0
+    assert calls == [("destroy", 123)]
+
+    assert tray._wndproc(123, tray_module.WM_DESTROY, 0, 0) == 0
+    assert calls == [("destroy", 123), ("quit", 0)]
+
+
+def test_global_tray_callback_contains_python_exceptions(monkeypatch):
+    errors = []
+    instance = SimpleNamespace(
+        _wndproc=lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
+        _log_callback_error=lambda exc, msg: errors.append((type(exc), msg)),
+    )
+    monkeypatch.setattr(tray_module, "_default_window_proc", lambda *_args: 77)
+    with tray_module._TRAY_INSTANCES_LOCK:
+        tray_module._TRAY_INSTANCES[123] = instance
+    try:
+        assert tray_module._dispatch_window_message(123, 456, 0, 0) == 77
+    finally:
+        with tray_module._TRAY_INSTANCES_LOCK:
+            tray_module._TRAY_INSTANCES.pop(123, None)
+
+    assert errors == [(KeyboardInterrupt, 456)]
+
+
+def test_ffi_tray_callback_never_leaks_even_default_handler_failure(monkeypatch):
+    monkeypatch.setattr(
+        tray_module,
+        "_dispatch_window_message",
+        lambda *_args: (_ for _ in ()).throw(SystemExit()),
+    )
+
+    assert tray_module._ffi_window_proc(123, 456, 0, 0) == 0
+
+
+def test_tray_stop_timeout_keeps_thread_reference():
+    class Thread:
+        def is_alive(self):
+            return True
+
+    tray = object.__new__(WindowsTrayIcon)
+    tray._thread = Thread()
+    tray._hwnd = None
+    tray._closed = SimpleNamespace(wait=lambda timeout: False)
+
+    try:
+        tray.stop()
+    except RuntimeError as exc:
+        assert "did not close" in str(exc)
+    else:
+        raise AssertionError("stop must report a tray lifecycle timeout")
+
+    assert isinstance(tray._thread, Thread)
+
+
+def test_tray_window_can_be_recreated_without_stale_callback_crash():
+    script = textwrap.dedent(
+        """
+        import gc
+        from types import SimpleNamespace
+        from sunpack.gui.tray import WindowsTrayIcon
+
+        WindowsTrayIcon._add_icon = lambda self, hwnd: None
+        service = SimpleNamespace(config={"cli": {"language": "en"}}, log=None)
+        for _ in range(50):
+            tray = WindowsTrayIcon(service)
+            tray.start()
+            tray.stop()
+            del tray
+            gc.collect()
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr

@@ -3,12 +3,11 @@ from __future__ import annotations
 import ctypes
 import asyncio
 import hashlib
-import json
 import os
-import time
 from copy import deepcopy
 from contextlib import contextmanager
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
@@ -20,15 +19,12 @@ from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.filesystem.watcher.toast import WatchToastCoordinator
 from sunpack.support.resources import get_resource_path
 from sunpack.support.resource_lifecycle import (
-    named_task_temporary_file,
     read_task_text,
     write_task_text,
 )
 
 
 SERVICE_STATE = "state.json"
-INITIAL_SCAN_REQUEST = "initial_scan_request.json"
-INITIAL_SCAN_REQUEST_TTL_SECONDS = 60.0
 WATCH_ROOTS_FILENAME = "sunpack_watch_roots.txt"
 ROOTS_MUTEX_PREFIX = "Local\\SunPackWatchRoots"
 CONTROL_STOP = "stop"
@@ -40,6 +36,18 @@ WAIT_ABANDONED = 0x00000080
 WAIT_OBJECT_0 = 0x00000000
 WAIT_FAILED = 0xFFFFFFFF
 INFINITE = 0xFFFFFFFF
+
+
+@dataclass(frozen=True)
+class ReloadPlan:
+    restart_scheduler: bool
+    reconcile_tray: bool
+    state_dir_changed: bool
+    initial_scan_roots: tuple[str, ...]
+
+    @property
+    def changed(self) -> bool:
+        return self.restart_scheduler or self.reconcile_tray or self.state_dir_changed
 
 
 def _acquire_watch_broker() -> None:
@@ -94,76 +102,6 @@ def service_state_dir(config: dict) -> str:
     return os.path.join(normalize_root(str(watch_roots_path().resolve().parent)), ".sunpack_watch")
 
 
-def initial_scan_request_path(config: dict) -> Path:
-    return Path(service_state_dir(config)) / INITIAL_SCAN_REQUEST
-
-
-def request_initial_scan(config: dict, roots: list[str]) -> Path | None:
-    requested_roots = _normalize_scan_roots(roots)
-    if not requested_roots:
-        return None
-    request_path = initial_scan_request_path(config)
-    request_path.parent.mkdir(parents=True, exist_ok=True)
-    with _watch_roots_mutex():
-        merged_roots = list(requested_roots)
-        try:
-            previous = json.loads(read_task_text(request_path, encoding="utf-8"))
-        except (FileNotFoundError, OSError, TypeError, ValueError):
-            previous = None
-        if isinstance(previous, dict):
-            try:
-                age = max(0.0, time.time() - float(previous.get("requested_at", 0.0)))
-            except (TypeError, ValueError):
-                age = INITIAL_SCAN_REQUEST_TTL_SECONDS + 1.0
-            if age <= INITIAL_SCAN_REQUEST_TTL_SECONDS:
-                merged_roots = _normalize_scan_roots(
-                    [*(previous.get("roots") or []), *merged_roots]
-                )
-        payload = {"requested_at": time.time(), "roots": merged_roots}
-        temp_path: Path | None = None
-        try:
-            with named_task_temporary_file(
-                mode="w",
-                encoding="utf-8",
-                dir=request_path.parent,
-                prefix=f".{request_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temp:
-                temp_path = Path(temp.name)
-                json.dump(payload, temp, ensure_ascii=False, separators=(",", ":"))
-            os.replace(temp_path, request_path)
-        finally:
-            if temp_path is not None:
-                try:
-                    temp_path.unlink()
-                except FileNotFoundError:
-                    pass
-    return request_path
-
-
-def consume_initial_scan_request(config: dict) -> list[str] | None:
-    request_path = initial_scan_request_path(config)
-    with _watch_roots_mutex():
-        try:
-            payload = json.loads(read_task_text(request_path, encoding="utf-8"))
-        except (FileNotFoundError, OSError, TypeError, ValueError):
-            payload = None
-        try:
-            request_path.unlink()
-        except FileNotFoundError:
-            pass
-    if not isinstance(payload, dict):
-        return None
-    try:
-        age = max(0.0, time.time() - float(payload.get("requested_at", 0.0)))
-    except (TypeError, ValueError):
-        return None
-    if age > INITIAL_SCAN_REQUEST_TTL_SECONDS:
-        return None
-    return _normalize_scan_roots(payload.get("roots") or [])
-
-
 def _normalize_scan_roots(roots) -> list[str]:
     result = []
     seen = set()
@@ -178,6 +116,56 @@ def _normalize_scan_roots(roots) -> list[str]:
         seen.add(key)
         result.append(normalized)
     return result
+
+
+def _config_without_tray(config: dict) -> dict:
+    result = deepcopy(config)
+    watch = result.get("watch")
+    if isinstance(watch, dict):
+        watch.pop("tray_enabled", None)
+        watch.pop("roots", None)
+    return result
+
+
+def _service_config_without_tray(service_config: dict) -> dict:
+    result = dict(service_config)
+    result.pop("tray_enabled", None)
+    return result
+
+
+def _tray_signature(config: dict, service_config: dict) -> tuple[bool, str]:
+    cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
+    return (
+        bool(service_config.get("tray_enabled", True)),
+        str(cli_config.get("language") or "").strip().lower(),
+    )
+
+
+def _build_reload_plan(
+    old_config: dict,
+    old_service_config: dict,
+    old_state_dir: str,
+    new_config: dict,
+    new_service_config: dict,
+    new_state_dir: str,
+    initial_scan_roots: list[str] | None,
+) -> ReloadPlan:
+    scan_roots = tuple(_normalize_scan_roots(initial_scan_roots))
+    state_dir_changed = new_state_dir != old_state_dir
+    restart_scheduler = bool(scan_roots) or state_dir_changed or (
+        _config_without_tray(new_config) != _config_without_tray(old_config)
+        or _service_config_without_tray(new_service_config)
+        != _service_config_without_tray(old_service_config)
+    )
+    return ReloadPlan(
+        restart_scheduler=restart_scheduler,
+        reconcile_tray=(
+            _tray_signature(new_config, new_service_config)
+            != _tray_signature(old_config, old_service_config)
+        ),
+        state_dir_changed=state_dir_changed,
+        initial_scan_roots=scan_roots,
+    )
 
 
 def watch_roots_path() -> Path:
@@ -243,7 +231,8 @@ def add_watch_roots(paths: list[str]) -> tuple[Path, list[str]]:
             roots.append(normalized)
             seen.add(key)
             added.append(normalized)
-        _write_watch_roots_unlocked(roots, roots_path)
+        if added:
+            _write_watch_roots_unlocked(roots, roots_path)
     return roots_path, added
 
 
@@ -260,7 +249,8 @@ def remove_watch_roots(paths: list[str]) -> tuple[Path, list[str]]:
                 removed.append(normalized)
             else:
                 kept.append(root)
-        _write_watch_roots_unlocked(kept, roots_path)
+        if removed:
+            _write_watch_roots_unlocked(kept, roots_path)
     return roots_path, removed
 
 
@@ -294,6 +284,7 @@ class WatchService:
         self.config_observer: ConfigFileObserver | None = None
         self.tray = None
         self.toast_host = None
+        self._toast_host_signature = None
         self.toast_coordinator: WatchToastCoordinator | None = None
         self._stop_requested = False
         self._last_idle_tick_signature = None
@@ -309,8 +300,15 @@ class WatchService:
     def roots(self) -> list[str]:
         return existing_roots(list(self.service_config.get("roots") or []))
 
-    async def run(self, *, once: bool = False, initial_scan: bool = False) -> int:
+    async def run(
+        self,
+        *,
+        once: bool = False,
+        initial_scan: bool = False,
+        initial_scan_roots: list[str] | None = None,
+    ) -> int:
         self._loop = asyncio.get_running_loop()
+        tray_shutdown_error: BaseException | None = None
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
         try:
             _acquire_watch_broker()
@@ -322,11 +320,15 @@ class WatchService:
                 roots=self.roots,
                 once=once,
                 initial_scan=bool(initial_scan),
+                initial_scan_roots=_normalize_scan_roots(initial_scan_roots),
             )
             if self._control_queue is None:
                 self._control_queue = asyncio.Queue()
-            await self._start_scheduler(initial_scan=bool(initial_scan))
-            self._start_tray()
+            await self._start_scheduler(
+                initial_scan=bool(initial_scan),
+                initial_scan_roots=initial_scan_roots,
+            )
+            self._reconcile_tray()
             self._ready_event.set()
             if once:
                 if self.scheduler is None:
@@ -397,7 +399,10 @@ class WatchService:
             raise
         finally:
             self._stop_config_observer()
-            self._stop_tray()
+            try:
+                self._stop_tray()
+            except Exception as exc:
+                tray_shutdown_error = exc
             try:
                 await self._stop_scheduler()
             except Exception as exc:
@@ -420,14 +425,61 @@ class WatchService:
                     self._broker_acquired = False
             self._stop_toast_host()
             self.log.write("service_stopped", state_dir=self.state_dir)
+            if tray_shutdown_error is not None:
+                raise tray_shutdown_error
 
     async def wait_ready(self) -> None:
         await self._ready_event.wait()
         if self._startup_error is not None:
             raise self._startup_error
 
-    async def reload(self) -> None:
-        await self._reload_config()
+    async def reload(self) -> bool:
+        return await self._reload_config()
+
+    async def add_roots(self, paths: list[str], *, initial_scan: bool = True) -> dict:
+        async with self._reload_lock:
+            roots_path, added = add_watch_roots(paths)
+            if not added:
+                self.log.write("watch_roots_add_skipped", requested=_normalize_scan_roots(paths))
+                return {
+                    "roots_path": str(roots_path),
+                    "added": [],
+                    "applied": False,
+                }
+            new_service_config = service_config_from(self.config)
+            applied = await self._apply_configuration(
+                self.config,
+                new_service_config,
+                service_state_dir(self.config),
+                initial_scan_roots=added if initial_scan else None,
+            )
+            return {
+                "roots_path": str(roots_path),
+                "added": added,
+                "applied": applied,
+            }
+
+    async def remove_roots(self, paths: list[str]) -> dict:
+        async with self._reload_lock:
+            roots_path, removed = remove_watch_roots(paths)
+            if not removed:
+                self.log.write("watch_roots_remove_skipped", requested=_normalize_scan_roots(paths))
+                return {
+                    "roots_path": str(roots_path),
+                    "removed": [],
+                    "applied": False,
+                }
+            new_service_config = service_config_from(self.config)
+            applied = await self._apply_configuration(
+                self.config,
+                new_service_config,
+                service_state_dir(self.config),
+            )
+            return {
+                "roots_path": str(roots_path),
+                "removed": removed,
+                "applied": applied,
+            }
 
     def request_stop(self) -> None:
         if self._loop is not None:
@@ -441,9 +493,14 @@ class WatchService:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config()))
 
-    async def _start_scheduler(self, *, initial_scan: bool = False) -> None:
+    async def _start_scheduler(
+        self,
+        *,
+        initial_scan: bool = False,
+        initial_scan_roots: list[str] | None = None,
+    ) -> None:
         await self._stop_scheduler()
-        requested_scan_roots = consume_initial_scan_request(self.config)
+        requested_scan_roots = _normalize_scan_roots(initial_scan_roots)
         roots = self.roots
         if not roots:
             self._stop_toast_host()
@@ -457,7 +514,7 @@ class WatchService:
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
         watch_config["clipboard_monitor_enabled"] = bool(self.service_config.get("clipboard_monitor_enabled", True))
         run_config["watch"] = watch_config
-        self._restart_toast_host(run_config)
+        self._reconcile_toast_host(run_config)
         toast_coordinator = (
             WatchToastCoordinator(self.toast_host, run_config, self.state_dir)
             if self.toast_host is not None
@@ -483,7 +540,7 @@ class WatchService:
                     )
                 ),
                 initial_scan=bool(initial_scan),
-                initial_scan_roots=requested_scan_roots,
+                initial_scan_roots=requested_scan_roots or None,
                 observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
                 pipeline_engine=pipeline_engine,
                 group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
@@ -525,10 +582,19 @@ class WatchService:
             self.pipeline_engine = None
         self._last_idle_tick_signature = None
 
-    def _restart_toast_host(self, config: dict) -> None:
-        self._stop_toast_host()
+    def _reconcile_toast_host(self, config: dict) -> None:
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
-        if not bool(watch_config.get("toast_enabled", True)) or self.toast_manager_factory is None:
+        enabled = bool(watch_config.get("toast_enabled", True)) and self.toast_manager_factory is not None
+        signature = (
+            enabled,
+            self.state_dir,
+            int(watch_config.get("toast_update_interval_ms", 50)),
+        )
+        if signature == self._toast_host_signature and (not enabled or self.toast_host is not None):
+            return
+        self._stop_toast_host()
+        self._toast_host_signature = signature
+        if not enabled:
             return
         try:
             host = self.toast_manager_factory(config, self.state_dir, self.log)
@@ -536,10 +602,12 @@ class WatchService:
             self.toast_host = host
         except Exception as exc:
             self.toast_host = None
+            self._toast_host_signature = None
             self.log.write("toast_host_manager_error", error=str(exc), error_type=type(exc).__name__)
 
     def _stop_toast_host(self) -> None:
         host, self.toast_host = self.toast_host, None
+        self._toast_host_signature = None
         if host is not None:
             try:
                 host.stop()
@@ -549,20 +617,34 @@ class WatchService:
     def _start_tray(self) -> None:
         if not self.service_config.get("tray_enabled", True) or self.tray_factory is None:
             return
+        tray = self.tray_factory(self)
+        self.tray = tray
         try:
-            self.tray = self.tray_factory(self)
-            self.tray.start()
+            tray.start()
         except Exception as exc:
-            self.tray = None
             self.log.write("tray_start_error", error=str(exc), error_type=type(exc).__name__)
+            raise
 
     def _stop_tray(self) -> None:
         if self.tray is not None:
             try:
                 self.tray.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                self.log.write("tray_stop_error", error=str(exc), error_type=type(exc).__name__)
+                raise
         self.tray = None
+
+    def _reconcile_tray(self) -> None:
+        enabled = bool(self.service_config.get("tray_enabled", True)) and self.tray_factory is not None
+        if not enabled:
+            self._stop_tray()
+            return
+        if self.tray is None:
+            self._start_tray()
+            return
+        refresh = getattr(self.tray, "refresh", None)
+        if refresh is not None:
+            refresh()
 
     def _handle_control_event(self, event: str | None) -> None:
         if event == CONTROL_STOP:
@@ -636,12 +718,11 @@ class WatchService:
         if self._loop is not None and self._control_queue is not None:
             self._loop.call_soon_threadsafe(self._control_queue.put_nowait, CONTROL_RELOAD)
 
-    async def _reload_config(self) -> None:
+    async def _reload_config(self) -> bool:
         async with self._reload_lock:
-            await self._reload_config_unlocked()
+            return await self._reload_config_unlocked()
 
-    async def _reload_config_unlocked(self) -> None:
-        previous = (self.config, self.service_config, self.state_dir, self.log)
+    async def _reload_config_unlocked(self) -> bool:
         try:
             new_config = load_config()
             new_service_config = service_config_from(new_config)
@@ -649,31 +730,78 @@ class WatchService:
             Path(new_state_dir).mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             self.log.write("config_reload_failed", error=str(exc), error_type=type(exc).__name__, phase="load")
-            return
+            return False
 
+        try:
+            return await self._apply_configuration(
+                new_config,
+                new_service_config,
+                new_state_dir,
+            )
+        except Exception:
+            return False
+
+    async def _apply_configuration(
+        self,
+        new_config: dict,
+        new_service_config: dict,
+        new_state_dir: str,
+        *,
+        initial_scan_roots: list[str] | None = None,
+    ) -> bool:
+        plan = _build_reload_plan(
+            self.config,
+            self.service_config,
+            self.state_dir,
+            new_config,
+            new_service_config,
+            new_state_dir,
+            initial_scan_roots,
+        )
+        if not plan.changed:
+            self.log.write("service_reload_skipped", reason="no_semantic_change")
+            return False
+
+        previous = (self.config, self.service_config, self.state_dir, self.log)
         self.config = new_config
         self.service_config = new_service_config
         self.state_dir = new_state_dir
-        self.log = WatchLogStore(os.path.join(new_state_dir, "events.jsonl"))
+        if plan.state_dir_changed:
+            self.log = WatchLogStore(os.path.join(new_state_dir, "events.jsonl"))
         try:
-            await self._start_scheduler()
+            if plan.restart_scheduler:
+                await self._start_scheduler(
+                    initial_scan_roots=list(plan.initial_scan_roots) or None,
+                )
+            if plan.reconcile_tray:
+                self._reconcile_tray()
         except Exception as exc:
             failed_log = self.log
             self.config, self.service_config, self.state_dir, self.log = previous
             failed_log.write("config_reload_failed", error=str(exc), error_type=type(exc).__name__, phase="apply")
             try:
-                await self._start_scheduler()
+                if plan.restart_scheduler:
+                    await self._start_scheduler()
+                if plan.reconcile_tray:
+                    self._reconcile_tray()
             except Exception as rollback_exc:
                 self.log.write(
                     "config_reload_rollback_failed",
                     error=str(rollback_exc),
                     error_type=type(rollback_exc).__name__,
                 )
-            return
+            raise
 
-        self._stop_tray()
-        self._start_tray()
-        self.log.write("service_reloaded", state_dir=self.state_dir, roots=self.roots)
+        self.log.write(
+            "service_reloaded",
+            state_dir=self.state_dir,
+            roots=self.roots,
+            scheduler_restarted=plan.restart_scheduler,
+            tray_reconciled=plan.reconcile_tray,
+            initial_scan_roots=list(plan.initial_scan_roots),
+        )
+        return True
+
 
 def watch_roots_mutex_name(path: Path | None = None) -> str:
     roots_path = path or watch_roots_path()

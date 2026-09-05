@@ -8,7 +8,6 @@ from sunpack.filesystem.watcher.service import (
     add_watch_roots,
     list_watch_roots,
     remove_watch_roots,
-    request_initial_scan,
     service_state_dir,
 )
 
@@ -94,29 +93,31 @@ async def _handle_add(args, ctx):
 
     start_requested = bool(getattr(args, "start", False))
     initial_scan_requested = bool(getattr(args, "initial_scan", False))
-    roots_path, added = add_watch_roots(list(args.paths or []))
-    config = load_request_config(ctx.cwd)
-    scan_request_path = (
-        request_initial_scan(config, list(args.paths or []))
-        if initial_scan_requested
-        else None
-    )
+    paths = list(args.paths or [])
     host = require_runtime_host()
-    reload_summary = await host.reload_watch() if host.watch_enabled else {"reloaded": False}
+    apply_summary = None
+    if host.watch_enabled:
+        apply_summary = await host.add_watch_roots(paths, initial_scan=initial_scan_requested)
+        roots_path = apply_summary["roots_path"]
+        added = list(apply_summary["added"])
+    else:
+        roots_path_obj, added = add_watch_roots(paths)
+        roots_path = str(roots_path_obj)
     start_summary = None
     if start_requested and not host.watch_enabled:
-        start_summary = await host.start_watch(initial_scan=initial_scan_requested)
+        start_summary = await host.start_watch(
+            initial_scan_roots=added if initial_scan_requested else None,
+        )
     return 0, CliCommandResult(
         command=COMMAND,
-        inputs={"action": "add", "paths": list(args.paths or [])},
+        inputs={"action": "add", "paths": paths},
         summary={
             "roots_path": str(roots_path),
             "added": added,
-            "reload": reload_summary,
+            "apply": apply_summary,
             "start": start_summary,
             "start_requested": start_requested,
             "initial_scan_requested": initial_scan_requested,
-            "initial_scan_request_path": str(scan_request_path) if scan_request_path else "",
         },
         items=added,
     )
@@ -125,13 +126,20 @@ async def _handle_add(args, ctx):
 async def _handle_remove(args, ctx):
     from sunpack.cli.runtime_state import require_runtime_host
 
-    roots_path, removed = remove_watch_roots(list(args.paths or []))
+    paths = list(args.paths or [])
     host = require_runtime_host()
-    reload_summary = await host.reload_watch() if host.watch_enabled else {"reloaded": False}
+    apply_summary = None
+    if host.watch_enabled:
+        apply_summary = await host.remove_watch_roots(paths)
+        roots_path = apply_summary["roots_path"]
+        removed = list(apply_summary["removed"])
+    else:
+        roots_path_obj, removed = remove_watch_roots(paths)
+        roots_path = str(roots_path_obj)
     return 0, CliCommandResult(
         command=COMMAND,
-        inputs={"action": "remove", "paths": list(args.paths or [])},
-        summary={"roots_path": str(roots_path), "removed": removed, "reload": reload_summary},
+        inputs={"action": "remove", "paths": paths},
+        summary={"roots_path": str(roots_path), "removed": removed, "apply": apply_summary},
         items=removed,
     )
 

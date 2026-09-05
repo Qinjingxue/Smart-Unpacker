@@ -72,8 +72,8 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
             self._stop = asyncio.Event()
             self.reloads = 0
 
-        async def run(self, *, initial_scan=False):
-            events.append(("watch_started", initial_scan))
+        async def run(self, *, initial_scan=False, initial_scan_roots=None):
+            events.append(("watch_started", initial_scan, initial_scan_roots))
             await self._stop.wait()
             return 0
 
@@ -86,6 +86,13 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
 
         async def reload(self):
             self.reloads += 1
+            return True
+
+        async def add_roots(self, paths, *, initial_scan=True):
+            return {"roots_path": "roots.txt", "added": list(paths), "applied": True}
+
+        async def remove_roots(self, paths):
+            return {"roots_path": "roots.txt", "removed": list(paths), "applied": True}
 
     async def shared_engine(_config):
         return engine
@@ -103,6 +110,8 @@ def test_runtime_host_owns_watch_and_switches_host_and_worker_qos(monkeypatch):
         assert started["started"] is True
         assert host.watch_enabled is True
         assert (await host.reload_watch())["reloaded"] is True
+        assert (await host.add_watch_roots(["C:/second"], initial_scan=True))["added"] == ["C:/second"]
+        assert (await host.remove_watch_roots(["C:/second"]))["removed"] == ["C:/second"]
         await host._set_process_mode(background=True)
         await host.foreground_started()
         await host.foreground_finished()
@@ -139,7 +148,7 @@ def test_runtime_host_creates_toast_only_for_continuous_watch(monkeypatch, tmp_p
             self.stop = asyncio.Event()
             self.ready = asyncio.Event()
 
-        async def run(self, *, once=False, initial_scan=False):
+        async def run(self, *, once=False, initial_scan=False, initial_scan_roots=None):
             if once:
                 assert self.toast_factory is None
                 return 0

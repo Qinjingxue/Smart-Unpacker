@@ -15,11 +15,13 @@ from sunpack.support.process_executable import current_process_executable
 
 WM_NULL = 0x0000
 WM_DESTROY = 0x0002
+WM_NCDESTROY = 0x0082
 WM_COMMAND = 0x0111
 WM_USER = 0x0400
 WM_TRAYICON = WM_USER + 20
 WM_CLOSE = 0x0010
 NIM_ADD = 0x00000000
+NIM_MODIFY = 0x00000001
 NIM_DELETE = 0x00000002
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
@@ -42,6 +44,96 @@ ID_RELOAD = 1003
 ID_EXIT = 1004
 ID_TOGGLE_STARTUP = 1005
 ID_OPEN_BUILTIN_PASSWORDS = 1006
+
+
+class WNDCLASS(ctypes.Structure):
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HANDLE),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
+
+
+class NOTIFYICONDATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HANDLE),
+        ("szTip", wintypes.WCHAR * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", wintypes.WCHAR * 256),
+        ("uVersion", wintypes.UINT),
+        ("szInfoTitle", wintypes.WCHAR * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", ctypes.c_byte * 16),
+        ("hBalloonIcon", wintypes.HANDLE),
+    ]
+
+
+_TRAY_CLASS_NAME = "SunpackWatchServiceTray"
+_TRAY_CLASS_LOCK = threading.Lock()
+_TRAY_CLASS_REGISTERED = False
+_TRAY_INSTANCES_LOCK = threading.RLock()
+_TRAY_INSTANCES: dict[int, "WindowsTrayIcon"] = {}
+
+
+def _default_window_proc(hwnd, msg, wparam, lparam):
+    return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+def _dispatch_window_message(hwnd, msg, wparam, lparam):
+    hwnd_key = int(hwnd or 0)
+    with _TRAY_INSTANCES_LOCK:
+        instance = _TRAY_INSTANCES.get(hwnd_key)
+    try:
+        if instance is None:
+            return _default_window_proc(hwnd, msg, wparam, lparam)
+        return instance._wndproc(hwnd, msg, wparam, lparam)
+    except BaseException as exc:
+        if instance is not None:
+            instance._log_callback_error(exc, msg)
+        return _default_window_proc(hwnd, msg, wparam, lparam)
+    finally:
+        if msg == WM_NCDESTROY:
+            with _TRAY_INSTANCES_LOCK:
+                _TRAY_INSTANCES.pop(hwnd_key, None)
+
+
+def _ffi_window_proc(hwnd, msg, wparam, lparam):
+    try:
+        return _dispatch_window_message(hwnd, msg, wparam, lparam)
+    except BaseException:
+        return 0
+
+
+_WNDPROC_TYPE = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM)
+_GLOBAL_WNDPROC = _WNDPROC_TYPE(_ffi_window_proc)
+
+
+def _ensure_tray_class_registered(user32, hinstance) -> None:
+    global _TRAY_CLASS_REGISTERED
+    with _TRAY_CLASS_LOCK:
+        if _TRAY_CLASS_REGISTERED:
+            return
+        wndclass = WNDCLASS()
+        wndclass.lpfnWndProc = ctypes.cast(_GLOBAL_WNDPROC, ctypes.c_void_p)
+        wndclass.hInstance = hinstance
+        wndclass.lpszClassName = _TRAY_CLASS_NAME
+        if not user32.RegisterClassW(ctypes.byref(wndclass)):
+            raise ctypes.WinError(ctypes.GetLastError())
+        _TRAY_CLASS_REGISTERED = True
+
 
 class WindowsTrayIcon:
     def __init__(self, service):
@@ -71,58 +163,112 @@ class WindowsTrayIcon:
         self.user32.CreateWindowExW.restype = wintypes.HWND
         self.user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
         self.user32.DefWindowProcW.restype = LRESULT
+        self.user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
+        self.user32.PostMessageW.restype = wintypes.BOOL
+        self.user32.DestroyWindow.argtypes = [wintypes.HWND]
+        self.user32.DestroyWindow.restype = wintypes.BOOL
+        self.user32.IsWindow.argtypes = [wintypes.HWND]
+        self.user32.IsWindow.restype = wintypes.BOOL
+        self.user32.GetMessageW.argtypes = [
+            ctypes.POINTER(wintypes.MSG),
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.UINT,
+        ]
+        self.user32.GetMessageW.restype = wintypes.BOOL
+        self.user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self.user32.TranslateMessage.restype = wintypes.BOOL
+        self.user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self.user32.DispatchMessageW.restype = LRESULT
+        self.user32.PostQuitMessage.argtypes = [ctypes.c_int]
+        self.user32.PostQuitMessage.restype = None
+        self.shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATA)]
+        self.shell32.Shell_NotifyIconW.restype = wintypes.BOOL
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        self._closed = threading.Event()
+        self._startup_error: BaseException | None = None
         self._hwnd = None
         self._icon = None
-        self._wndproc_ref = None
+        self._icon_registered = False
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
+        self._thread = None
+        self._ready.clear()
+        self._closed.clear()
+        self._startup_error = None
         self._thread = threading.Thread(target=self._run, name="sunpack-tray", daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=2.0)
+        if not self._ready.wait(timeout=2.0):
+            raise RuntimeError("Tray window did not become ready within 2 seconds.")
+        if self._startup_error is not None:
+            raise RuntimeError("Tray window failed to start.") from self._startup_error
+        if not self._hwnd:
+            raise RuntimeError("Tray window exited before startup completed.")
 
     def stop(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
         hwnd = self._hwnd
         if hwnd:
-            try:
-                self.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-            except Exception:
-                pass
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=2.0)
+            if not self.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0):
+                raise ctypes.WinError(ctypes.GetLastError())
+        if not self._closed.wait(timeout=2.0):
+            raise RuntimeError("Tray thread did not close within 2 seconds.")
+        thread.join(timeout=0.1)
+        if thread.is_alive():
+            raise RuntimeError("Tray thread remained alive after its window closed.")
         self._thread = None
 
     def _run(self) -> None:
-        hwnd = self._create_window()
-        if not hwnd:
+        hwnd = None
+        try:
+            hwnd = self._create_window()
+            if not hwnd:
+                raise ctypes.WinError(ctypes.GetLastError())
+            self._hwnd = hwnd
+            with _TRAY_INSTANCES_LOCK:
+                _TRAY_INSTANCES[int(hwnd)] = self
+            self._add_icon(hwnd)
             self._ready.set()
-            return
-        self._hwnd = hwnd
-        self._add_icon(hwnd)
-        self._ready.set()
-        msg = wintypes.MSG()
-        while self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            self.user32.TranslateMessage(ctypes.byref(msg))
-            self.user32.DispatchMessageW(ctypes.byref(msg))
-        self._delete_icon(hwnd)
+            msg = wintypes.MSG()
+            while True:
+                result = self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result == 0:
+                    break
+                if result == -1:
+                    raise ctypes.WinError(ctypes.GetLastError())
+                self.user32.TranslateMessage(ctypes.byref(msg))
+                self.user32.DispatchMessageW(ctypes.byref(msg))
+        except BaseException as exc:
+            self._startup_error = exc
+            self._log_callback_error(exc, None)
+        finally:
+            self._ready.set()
+            if hwnd:
+                try:
+                    if self._icon_registered:
+                        self._delete_icon(hwnd)
+                    if self.user32.IsWindow(hwnd):
+                        self.user32.DestroyWindow(hwnd)
+                except BaseException as exc:
+                    self._log_callback_error(exc, None)
+                finally:
+                    with _TRAY_INSTANCES_LOCK:
+                        _TRAY_INSTANCES.pop(int(hwnd), None)
+            self._hwnd = None
+            self._closed.set()
 
     def _create_window(self):
-        wndproc_type = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM)
-        self._wndproc_ref = wndproc_type(self._wndproc)
         hinstance = self.kernel32.GetModuleHandleW(None)
-        wndclass = WNDCLASS()
-        wndclass.lpfnWndProc = ctypes.cast(self._wndproc_ref, ctypes.c_void_p)
-        wndclass.hInstance = hinstance
-        wndclass.lpszClassName = "SunpackWatchServiceTray"
-        self.user32.RegisterClassW(ctypes.byref(wndclass))
+        _ensure_tray_class_registered(self.user32, hinstance)
         return self.user32.CreateWindowExW(
             0,
-            wndclass.lpszClassName,
-            wndclass.lpszClassName,
+            _TRAY_CLASS_NAME,
+            _TRAY_CLASS_NAME,
             0,
             0,
             0,
@@ -143,7 +289,9 @@ class WindowsTrayIcon:
         data.uCallbackMessage = WM_TRAYICON
         data.hIcon = self._load_icon()
         data.szTip = self._text("tip")
-        self.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
+        if not self.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
+            raise ctypes.WinError(ctypes.GetLastError())
+        self._icon_registered = True
 
     def _delete_icon(self, hwnd) -> None:
         data = NOTIFYICONDATA()
@@ -151,6 +299,7 @@ class WindowsTrayIcon:
         data.hWnd = hwnd
         data.uID = 1
         self.shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+        self._icon_registered = False
 
     def _load_icon(self):
         for icon_path in _candidate_icon_paths():
@@ -168,12 +317,41 @@ class WindowsTrayIcon:
         if msg == WM_COMMAND:
             self._handle_command(int(wparam) & 0xFFFF)
             return 0
-        if msg in {WM_CLOSE, WM_DESTROY}:
-            self._delete_icon(hwnd)
+        if msg == WM_CLOSE:
             self.user32.DestroyWindow(hwnd)
+            return 0
+        if msg == WM_DESTROY:
             self.user32.PostQuitMessage(0)
             return 0
         return self.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def refresh(self) -> None:
+        self.i18n = I18nContext(_tray_language_from_service(self.service))
+        hwnd = self._hwnd
+        if not hwnd or not self._icon_registered:
+            return
+        data = NOTIFYICONDATA()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+        data.hWnd = hwnd
+        data.uID = 1
+        data.uFlags = NIF_TIP
+        data.szTip = self._text("tip")
+        if not self.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data)):
+            raise ctypes.WinError(ctypes.GetLastError())
+
+    def _log_callback_error(self, exc: BaseException, msg: int | None) -> None:
+        log = getattr(self.service, "log", None)
+        if log is None:
+            return
+        try:
+            log.write(
+                "tray_callback_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                message=msg,
+            )
+        except BaseException:
+            pass
 
     def _show_menu(self, hwnd) -> None:
         menu = self.user32.CreatePopupMenu()
@@ -277,42 +455,6 @@ class WindowsTrayIcon:
                 enable_startup()
         except Exception:
             return
-
-
-class WNDCLASS(ctypes.Structure):
-    _fields_ = [
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", ctypes.c_void_p),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HANDLE),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HANDLE),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
-
-
-class NOTIFYICONDATA(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", wintypes.HANDLE),
-        ("szTip", wintypes.WCHAR * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", wintypes.WCHAR * 256),
-        ("uVersion", wintypes.UINT),
-        ("szInfoTitle", wintypes.WCHAR * 64),
-        ("dwInfoFlags", wintypes.DWORD),
-        ("guidItem", ctypes.c_byte * 16),
-        ("hBalloonIcon", wintypes.HANDLE),
-    ]
-
 
 def _candidate_icon_paths() -> list[Path]:
     executable_dir = current_process_executable().parent

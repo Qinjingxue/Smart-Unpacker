@@ -67,6 +67,7 @@ class RuntimeHost:
         *,
         tray_enabled: bool = True,
         initial_scan: bool = False,
+        initial_scan_roots: list[str] | None = None,
     ) -> dict:
         async with self._lock:
             if self.watch_enabled:
@@ -97,14 +98,22 @@ class RuntimeHost:
                 toast_manager_factory=toast_manager_factory,
             )
             task = asyncio.create_task(
-                service.run(initial_scan=bool(initial_scan)),
+                service.run(
+                    initial_scan=bool(initial_scan),
+                    initial_scan_roots=initial_scan_roots,
+                ),
                 name="sunpack-runtime-watch",
             )
             self._watch_service = service
             self._watch_task = task
             self._watch_generation += 1
             generation = self._watch_generation
-            self.log_event("watch_starting", initial_scan=bool(initial_scan), tray_enabled=bool(tray_enabled))
+            self.log_event(
+                "watch_starting",
+                initial_scan=bool(initial_scan),
+                initial_scan_roots=list(initial_scan_roots or []),
+                tray_enabled=bool(tray_enabled),
+            )
             self._notify_state_changed()
         try:
             await service.wait_ready()
@@ -170,9 +179,36 @@ class RuntimeHost:
         if service is None or not self.watch_enabled:
             self.log_event("watch_reload_ignored")
             return {"reloaded": False, "running": False, "generation": self._watch_generation}
-        await service.reload()
-        self.log_event("watch_reloaded")
-        return {"reloaded": True, "running": True, "generation": self._watch_generation}
+        reloaded = await service.reload()
+        self.log_event("watch_reloaded" if reloaded else "watch_reload_skipped")
+        return {"reloaded": reloaded, "running": True, "generation": self._watch_generation}
+
+    async def add_watch_roots(self, paths: list[str], *, initial_scan: bool = True) -> dict:
+        service = self._watch_service
+        if service is None or not self.watch_enabled:
+            self.log_event("watch_roots_add_ignored", paths=list(paths))
+            return {"added": [], "applied": False, "running": False}
+        result = await service.add_roots(paths, initial_scan=initial_scan)
+        self.log_event(
+            "watch_roots_added",
+            added=list(result["added"]),
+            initial_scan=bool(initial_scan),
+            applied=bool(result["applied"]),
+        )
+        return {**result, "running": True, "generation": self._watch_generation}
+
+    async def remove_watch_roots(self, paths: list[str]) -> dict:
+        service = self._watch_service
+        if service is None or not self.watch_enabled:
+            self.log_event("watch_roots_remove_ignored", paths=list(paths))
+            return {"removed": [], "applied": False, "running": False}
+        result = await service.remove_roots(paths)
+        self.log_event(
+            "watch_roots_removed",
+            removed=list(result["removed"]),
+            applied=bool(result["applied"]),
+        )
+        return {**result, "running": True, "generation": self._watch_generation}
 
     def watch_status(self) -> dict:
         service = self._watch_service

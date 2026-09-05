@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
-
 import threading
 import time
 from types import SimpleNamespace
+
 import pytest
 
 import sunpack.filesystem.watcher.service as service_module
@@ -15,9 +14,6 @@ from sunpack.filesystem.watcher.service import (
     CONTROL_SCHEDULER_WAKEUP,
     CONTROL_STOP,
     WatchService,
-    consume_initial_scan_request,
-    initial_scan_request_path,
-    request_initial_scan,
 )
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
@@ -33,6 +29,7 @@ _TEST_LOOP = asyncio.new_event_loop()
 def _stub_watch_broker(monkeypatch):
     monkeypatch.setattr(service_module, "_acquire_watch_broker", lambda: None)
     monkeypatch.setattr(service_module, "_release_watch_broker", lambda: None)
+
 
 def _await(awaitable):
     return _TEST_LOOP.run_until_complete(awaitable)
@@ -155,6 +152,66 @@ def test_watch_service_attaches_and_releases_toast_with_watch_lifecycle(tmp_path
     assert host.stopped is enabled
 
 
+def test_scheduler_restart_keeps_unchanged_toast_manager(tmp_path, monkeypatch):
+    config = {
+        "watch": {
+            "state_dir": str(tmp_path / "state"),
+            "tray_enabled": False,
+            "toast_enabled": True,
+            "toast_update_interval_ms": 50,
+        }
+    }
+    monkeypatch.setattr(service_module, "load_config", lambda: config)
+    monkeypatch.setattr(service_module, "read_watch_roots", lambda: [str(tmp_path)])
+
+    class Scheduler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    class Host:
+        def __init__(self):
+            self.starts = 0
+            self.stops = 0
+
+        def start(self):
+            self.starts += 1
+
+        def stop(self):
+            self.stops += 1
+
+        def publish(self, _snapshot):
+            pass
+
+        def clear(self):
+            pass
+
+    hosts = []
+
+    def make_host(*_args):
+        host = Host()
+        hosts.append(host)
+        return host
+
+    monkeypatch.setattr(service_module, "WatchScheduler", Scheduler)
+    service = WatchService(
+        engine_factory=lambda _config: FakePipelineEngine(FakeRunner),
+        toast_manager_factory=make_host,
+    )
+
+    _await(service._start_scheduler())
+    _await(service._start_scheduler())
+
+    assert len(hosts) == 1
+    assert hosts[0].starts == 1
+    assert hosts[0].stops == 0
+
+
 def test_watch_runtime_does_not_change_process_cwd(tmp_path, monkeypatch):
     caller = tmp_path / "caller"
     caller.mkdir()
@@ -192,12 +249,12 @@ def test_watch_runtime_delegates_start_to_runtime_host(monkeypatch):
 
 def test_watch_add_reports_start_request_without_creating_watch_process(tmp_path, monkeypatch):
     monkeypatch.setattr(watch_command, "add_watch_roots", lambda paths: (tmp_path / "roots.txt", paths))
-    monkeypatch.setattr(watch_command, "load_request_config", lambda cwd: {})
 
     class FakeHost:
         watch_enabled = False
 
-        async def start_watch(self, *, initial_scan=False):
+        async def start_watch(self, *, initial_scan_roots=None):
+            assert initial_scan_roots == ["C:/downloads"]
             return {"started": True, "running": True}
 
     from sunpack.cli import runtime_state
@@ -205,13 +262,52 @@ def test_watch_add_reports_start_request_without_creating_watch_process(tmp_path
     monkeypatch.setattr(runtime_state, "require_runtime_host", lambda: FakeHost())
 
     code, result = _await(watch_command._handle_add(
-        SimpleNamespace(paths=["C:/downloads"], start=True),
+        SimpleNamespace(paths=["C:/downloads"], start=True, initial_scan=True),
         SimpleNamespace(cwd=str(tmp_path)),
     ))
 
     assert code == 0
     assert result.summary["start_requested"] is True
     assert result.summary["start"] == {"started": True, "running": True}
+
+
+def test_watch_add_applies_directly_to_running_service(tmp_path, monkeypatch):
+    requested = ["C:/downloads/new"]
+    calls = []
+
+    class FakeHost:
+        watch_enabled = True
+
+        async def add_watch_roots(self, paths, *, initial_scan=True):
+            calls.append((list(paths), initial_scan))
+            return {
+                "roots_path": str(tmp_path / "roots.txt"),
+                "added": requested,
+                "applied": True,
+                "running": True,
+            }
+
+    from sunpack.cli import runtime_state
+
+    monkeypatch.setattr(runtime_state, "require_runtime_host", lambda: FakeHost())
+    monkeypatch.setattr(
+        watch_command,
+        "add_watch_roots",
+        lambda _paths: (_ for _ in ()).throw(AssertionError("CLI must not persist before direct apply")),
+    )
+
+    code, result = _await(
+        watch_command._handle_add(
+            SimpleNamespace(paths=requested, start=True, initial_scan=True),
+            SimpleNamespace(cwd=str(tmp_path)),
+        )
+    )
+
+    assert code == 0
+    assert calls == [(requested, True)]
+    assert result.summary["added"] == requested
+    assert result.summary["apply"]["applied"] is True
+    assert result.summary["start"] is None
 
 
 def test_watch_config_observer_wakes_runtime_host_queue():
@@ -226,28 +322,102 @@ def test_watch_config_observer_wakes_runtime_host_queue():
     assert asyncio.run(scenario()) == service_module.CONTROL_RELOAD
 
 
-def test_initial_scan_request_is_scoped_and_consumed_once(tmp_path, monkeypatch):
-    state_dir = tmp_path / ".sunpack_watch"
-    config = {"watch": {"state_dir": str(state_dir)}}
-    monkeypatch.setattr(service_module, "read_watch_roots", lambda: [])
+def test_running_watch_service_adds_roots_and_scans_only_new_roots(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    roots_path.write_text(str(first_root), encoding="utf-8")
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(tmp_path / ".sunpack_watch"), "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
 
-    request_path = request_initial_scan(config, [str(first_root), str(first_root)])
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
+        starts.append((initial_scan, initial_scan_roots, list(service.roots)))
 
-    assert request_path == initial_scan_request_path(config)
-    payload = json.loads(request_path.read_text(encoding="utf-8"))
-    assert payload["roots"] == [str(first_root.resolve())]
-    assert consume_initial_scan_request(config) == [str(first_root.resolve())]
-    assert not request_path.exists()
-    assert consume_initial_scan_request(config) is None
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
 
-    request_initial_scan(config, [str(first_root)])
-    request_initial_scan(config, [str(second_root)])
-    assert consume_initial_scan_request(config) == [
+    result = _await(service.add_roots([str(second_root), str(second_root)], initial_scan=True))
+    observer_reload_applied = _await(service.reload())
+
+    normalized_second = str(second_root.resolve())
+    assert result == {
+        "roots_path": str(roots_path),
+        "added": [normalized_second],
+        "applied": True,
+    }
+    assert roots_path.read_text(encoding="utf-8").splitlines() == [
         str(first_root.resolve()),
-        str(second_root.resolve()),
+        normalized_second,
     ]
+    assert starts == [(False, [normalized_second], [str(first_root.resolve()), normalized_second])]
+    assert observer_reload_applied is False
+
+
+def test_running_watch_service_duplicate_add_is_a_noop(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    root = tmp_path / "watched"
+    root.mkdir()
+    roots_path.write_text(str(root), encoding="utf-8")
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(tmp_path / ".sunpack_watch"), "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
+    monkeypatch.setattr(
+        service_module,
+        "_write_watch_roots_unlocked",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("duplicate add must not rewrite roots")),
+    )
+
+    async def start_scheduler(**kwargs):
+        starts.append(kwargs)
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    result = _await(service.add_roots([str(root)], initial_scan=True))
+
+    assert result["added"] == []
+    assert result["applied"] is False
+    assert starts == []
+
+
+def test_running_watch_service_removes_root_directly(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    roots_path.write_text(f"{first_root}\n{second_root}\n", encoding="utf-8")
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(tmp_path / ".sunpack_watch"), "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
+
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
+        starts.append((initial_scan_roots, list(service.roots)))
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    result = _await(service.remove_roots([str(second_root)]))
+
+    assert result["removed"] == [str(second_root.resolve())]
+    assert result["applied"] is True
+    assert starts == [(None, [str(first_root.resolve())])]
+    assert roots_path.read_text(encoding="utf-8").splitlines() == [str(first_root.resolve())]
 
 
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
@@ -334,7 +504,7 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     waiting = threading.Event()
 
-    async def no_scheduler(*, initial_scan=False):
+    async def no_scheduler(*, initial_scan=False, initial_scan_roots=None):
         service.scheduler = None
         waiting.set()
 
@@ -415,7 +585,7 @@ def test_watch_service_invalid_config_reload_preserves_running_service(tmp_path,
     written = []
     service.log.write = lambda event, **payload: written.append((event, payload))
     monkeypatch.setattr(service_module, "load_config", lambda: (_ for _ in ()).throw(ValueError("invalid json")))
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         scheduler_restarts.append(True)
 
     monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
@@ -434,7 +604,7 @@ def test_watch_service_invalid_config_reload_preserves_running_service(tmp_path,
     ]
 
 
-def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, monkeypatch):
+def test_watch_service_reload_applies_new_roots_without_restarting_tray(tmp_path, monkeypatch):
     roots_path = tmp_path / "sunpack_watch_roots.txt"
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
@@ -444,8 +614,8 @@ def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, m
     state_dir = tmp_path / ".sunpack_watch"
     configs = iter(
         [
-            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 1},
-            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 2},
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": True}, "revision": 1},
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": True}, "revision": 2},
         ]
     )
     monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
@@ -453,12 +623,14 @@ def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, m
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     starts = []
     tray_events = []
-    async def start_scheduler(*, initial_scan=False):
+
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         starts.append((service.config["revision"], service.roots))
 
     monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
-    monkeypatch.setattr(service, "_stop_tray", lambda: tray_events.append("stop"))
-    monkeypatch.setattr(service, "_start_tray", lambda: tray_events.append("start"))
+    tray = SimpleNamespace(refresh=lambda: tray_events.append("refreshed"))
+    service.tray_factory = lambda _service: None
+    service.tray = tray
     roots_path.write_text(str(second_root), encoding="utf-8")
 
     _await(service._reload_config())
@@ -466,7 +638,99 @@ def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, m
     assert service.config["revision"] == 2
     assert service.roots == [str(second_root.resolve())]
     assert starts == [(2, [str(second_root.resolve())])]
-    assert tray_events == ["stop", "start"]
+    assert tray_events == []
+    assert service.tray is tray
+
+
+def test_watch_service_tray_only_reload_does_not_restart_scheduler(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    root = tmp_path / "watched"
+    root.mkdir()
+    roots_path.write_text(str(root), encoding="utf-8")
+    state_dir = tmp_path / ".sunpack_watch"
+    configs = iter(
+        [
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}},
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": True}},
+        ]
+    )
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "load_config", lambda: next(configs))
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    scheduler_starts = []
+    tray_events = []
+
+    async def start_scheduler(**kwargs):
+        scheduler_starts.append(kwargs)
+
+    class Tray:
+        def start(self):
+            tray_events.append("start")
+
+        def stop(self):
+            tray_events.append("stop")
+
+    service.tray_factory = lambda _service: Tray()
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    assert _await(service.reload()) is True
+    assert scheduler_starts == []
+    assert tray_events == ["start"]
+
+
+def test_watch_service_language_reload_refreshes_existing_tray(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    root = tmp_path / "watched"
+    root.mkdir()
+    roots_path.write_text(str(root), encoding="utf-8")
+    state_dir = tmp_path / ".sunpack_watch"
+    configs = iter(
+        [
+            {"cli": {"language": "en"}, "watch": {"state_dir": str(state_dir), "tray_enabled": True}},
+            {"cli": {"language": "zh"}, "watch": {"state_dir": str(state_dir), "tray_enabled": True}},
+        ]
+    )
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "load_config", lambda: next(configs))
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    scheduler_starts = []
+    tray_events = []
+
+    async def start_scheduler(**kwargs):
+        scheduler_starts.append(kwargs)
+
+    tray = SimpleNamespace(refresh=lambda: tray_events.append("refresh"))
+    service.tray_factory = lambda _service: None
+    service.tray = tray
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    assert _await(service.reload()) is True
+    assert len(scheduler_starts) == 1
+    assert tray_events == ["refresh"]
+    assert service.tray is tray
+
+
+def test_watch_service_reload_skips_unchanged_state(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    root = tmp_path / "watched"
+    root.mkdir()
+    roots_path.write_text(str(root), encoding="utf-8")
+    config = {"watch": {"state_dir": str(tmp_path / ".sunpack_watch"), "tray_enabled": False}}
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "load_config", lambda: config)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
+    events = []
+    service.log.write = lambda event, **payload: events.append((event, payload))
+
+    async def start_scheduler(**kwargs):
+        starts.append(kwargs)
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    assert _await(service.reload()) is False
+    assert starts == []
+    assert events == [("service_reload_skipped", {"reason": "no_semantic_change"})]
 
 
 def test_watch_service_apply_failure_rolls_back_previous_config(tmp_path, monkeypatch):
@@ -486,7 +750,7 @@ def test_watch_service_apply_failure_rolls_back_previous_config(tmp_path, monkey
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     starts = []
 
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         starts.append(service.config["revision"])
         if service.config["revision"] == 2:
             raise RuntimeError("new runtime failed")
@@ -686,7 +950,7 @@ def test_watch_service_scheduler_never_recurses(tmp_path, monkeypatch):
     assert captured["started"] is True
 
 
-def test_watch_service_passes_one_shot_scan_roots_to_scheduler(tmp_path, monkeypatch):
+def test_watch_service_passes_direct_scan_roots_to_scheduler(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     watch_root = tmp_path / "watch-root"
     watch_root.mkdir()
@@ -725,14 +989,8 @@ def test_watch_service_passes_one_shot_scan_roots_to_scheduler(tmp_path, monkeyp
     )
     monkeypatch.setattr(service_module, "read_watch_roots", lambda: [str(watch_root)])
     monkeypatch.setattr(service_module, "WatchScheduler", FakeScheduler)
-    monkeypatch.setattr(
-        service_module,
-        "consume_initial_scan_request",
-        lambda _config: [str(requested_root.resolve())],
-    )
-
     service = WatchService(engine_factory=lambda _config: Engine())
-    _await(service._start_scheduler())
+    _await(service._start_scheduler(initial_scan_roots=[str(requested_root)]))
 
     assert captured["roots"] == [str(watch_root.resolve())]
     assert captured["kwargs"]["initial_scan"] is False
@@ -761,7 +1019,7 @@ def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monke
             scheduler_runs.append(len(scheduler_runs))
             return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=0, errors=[])
 
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         service.scheduler = FakeScheduler()
 
     async def stop_scheduler():
@@ -803,7 +1061,7 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
 
     scheduler = FakeScheduler()
 
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         service.scheduler = scheduler
 
     async def stop_scheduler():
@@ -844,7 +1102,7 @@ def test_watch_service_runs_scheduler_when_wakeup_has_no_schedulable_delay(tmp_p
 
     scheduler = FakeScheduler()
 
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         service.scheduler = scheduler
 
     async def stop_scheduler():
@@ -892,7 +1150,7 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
         def next_delay_seconds(self):
             return 5.0
 
-    async def start_scheduler(*, initial_scan=False):
+    async def start_scheduler(*, initial_scan=False, initial_scan_roots=None):
         service.scheduler = FakeScheduler()
 
     async def stop_scheduler():
