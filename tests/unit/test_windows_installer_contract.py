@@ -326,6 +326,24 @@ def test_watch_test_runner_reuses_current_powershell_host_and_dotnet_hash(tmp_pa
     assert completed.stdout.strip() == hashlib.sha256(payload).hexdigest()
 
 
+def test_packaged_smoke_tests_shutdown_the_persistent_runtime_before_installer_test():
+    build = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+
+    smoke = build.index('Write-Step "Running packaged smoke tests"')
+    last_request = build.index(
+        'Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")',
+        smoke,
+    )
+    shutdown = build.index(
+        'Invoke-Native -FilePath $distExePath -Arguments @("--persistent-shutdown")',
+        last_request,
+    )
+    wait = build.index("Wait-ExecutableExit -ExecutablePath $distRuntimeExePath", shutdown)
+
+    assert smoke < last_request < shutdown < wait
+    assert "Get-CimInstance Win32_Process" in build
+
+
 def test_watch_test_runner_never_reuses_or_removes_the_release_service():
     runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
     acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")

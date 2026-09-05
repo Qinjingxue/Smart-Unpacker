@@ -50,6 +50,33 @@ function ConvertTo-NormalizedFullPath {
     return ([System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/') -replace '/', '\').ToLowerInvariant()
 }
 
+function Wait-ExecutableExit {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExecutablePath,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $expectedPath = ConvertTo-NormalizedFullPath -Path $ExecutablePath
+    $executableName = [System.IO.Path]::GetFileName($ExecutablePath).Replace("'", "''")
+    $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    do {
+        $matching = @(
+            Get-CimInstance Win32_Process -Filter "Name='$executableName'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ExecutablePath -and
+                    (ConvertTo-NormalizedFullPath -Path $_.ExecutablePath) -eq $expectedPath
+                }
+        )
+        if ($matching.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+
+    $processIds = ($matching | ForEach-Object ProcessId) -join ", "
+    throw "Packaged runtime did not exit within $TimeoutSeconds seconds: $ExecutablePath (PID: $processIds)"
+}
+
 function Reset-StaleCMakeBuildDir {
     param(
         [Parameter(Mandatory = $true)]
@@ -1195,10 +1222,18 @@ $metadata = @(
 
 if ($processArch -eq $buildArch) {
     Write-Step "Running packaged smoke tests"
-    Invoke-Native -FilePath $distExePath -Arguments @("--help")
-    Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
-    Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
-    Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
+    try {
+        Invoke-Native -FilePath $distExePath -Arguments @("--help")
+        Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
+        Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
+        Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
+    } finally {
+        # Every launcher request may start the packaged persistent runtime. It
+        # uses %LOCALAPPDATA%\SunPack\runtime-cwd, so leaving it alive pins the
+        # user-data directory and breaks the installer smoke test that follows.
+        Invoke-Native -FilePath $distExePath -Arguments @("--persistent-shutdown")
+        Wait-ExecutableExit -ExecutablePath $distRuntimeExePath
+    }
 } else {
     Write-Step "Skipping packaged smoke tests"
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
