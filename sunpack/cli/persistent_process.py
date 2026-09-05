@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from sunpack.config.cli_settings import load_cli_language_from_config
 from sunpack.i18n import I18nContext
+from sunpack.support.process_executable import current_process_executable
 from sunpack.support.runtime_cwd import runtime_working_directory
 from sunpack.support.resource_lifecycle import open_service_file
 from sunpack.support.runtime_identity import (
@@ -28,7 +29,7 @@ _STREAM_MAGIC = b"SPS2"
 def _runtime_binary_build_id() -> bytes:
     value = 0xCBF29CE484222325
     try:
-        with open_service_file(sys.executable, "rb") as stream:
+        with open_service_file(current_process_executable(), "rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 for byte in chunk:
                     value ^= byte
@@ -43,7 +44,7 @@ _RUNTIME_BUILD_ID = _runtime_binary_build_id()
 
 def _runtime_binary_stamp() -> str:
     try:
-        metadata = os.stat(sys.executable)
+        metadata = current_process_executable().stat()
     except OSError:
         return "unavailable"
     return f"{int(metadata.st_size):x}-{int(metadata.st_mtime_ns):x}"
@@ -83,13 +84,13 @@ def pipe_name() -> str:
 
 def server_command() -> list[str]:
     if getattr(sys, "frozen", False):
-        command = [sys.executable, SERVER_ARG]
+        command = [str(current_process_executable()), SERVER_ARG]
     else:
         entry = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "sunpack.py"))
         if os.path.isfile(entry):
-            command = [sys.executable, entry, SERVER_ARG]
+            command = [str(current_process_executable()), entry, SERVER_ARG]
         else:
-            command = [sys.executable, "-m", "sunpack", SERVER_ARG]
+            command = [str(current_process_executable()), "-m", "sunpack", SERVER_ARG]
     if runtime_id_available():
         command.append(runtime_id_argument())
     return command

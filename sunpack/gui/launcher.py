@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+from sunpack.support.process_executable import current_process_executable
 
 LAUNCHER_EXECUTABLE_NAME = "sunpack.exe"
 
 
 def packaged_runtime_executable(executable: str | Path | None = None) -> Path | None:
-    current = Path(executable or sys.executable).resolve()
+    current = Path(executable).resolve() if executable is not None else current_process_executable()
     candidate = current.parent / LAUNCHER_EXECUTABLE_NAME
     return candidate if candidate.is_file() else None
 
@@ -23,7 +24,7 @@ def watch_launch_argv(
     if packaged is not None:
         argv = [str(packaged), "watch", "start"]
     else:
-        executable = Path(sys.executable).resolve()
+        executable = current_process_executable()
         if prefer_windowed_python and executable.name.lower() == "python.exe":
             pythonw = executable.with_name("pythonw.exe")
             if pythonw.is_file():

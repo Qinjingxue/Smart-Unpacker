@@ -1202,16 +1202,18 @@ if ($processArch -eq $buildArch) {
 
 Write-Step "Creating Windows installer"
 $installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
-Invoke-Native -FilePath $innoCompiler -Arguments @(
-    "/Qp",
-    "/DAppVersion=$versionValue",
-    "/DSourceDir=$distAppRoot",
-    "/DOutputDir=$releaseRoot",
-    "/DOutputBaseFilename=$installerBaseName",
-    "/DTargetArch=$buildArch",
-    "/DRepairSystem=$repairSystemMode",
-    $installerScriptPath
-)
+Invoke-WithRetry -Description "Inno Setup installer compilation" -ScriptBlock {
+    Invoke-Native -FilePath $innoCompiler -Arguments @(
+        "/Qp",
+        "/DAppVersion=$versionValue",
+        "/DSourceDir=$distAppRoot",
+        "/DOutputDir=$releaseRoot",
+        "/DOutputBaseFilename=$installerBaseName",
+        "/DTargetArch=$buildArch",
+        "/DRepairSystem=$repairSystemMode",
+        $installerScriptPath
+    )
+}
 Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
 
 Write-Host ""

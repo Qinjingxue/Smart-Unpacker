@@ -10,14 +10,15 @@ from functools import lru_cache
 from pathlib import Path
 
 from sunpack.platform.windows.toast_protocol import ToastSnapshot, ToastSnapshotKind, encode_snapshot
+from sunpack.support.process_executable import current_process_executable
 from sunpack.support.resources import get_toast_library_path
 
 
 def _activation_command() -> tuple[str, str]:
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
-        return sys.executable, "--toast-activated"
+        return str(current_process_executable()), "--toast-activated"
     # COM must be able to activate the main program in source runs as well.
-    executable = Path(sys.executable).with_name("pythonw.exe")
+    executable = current_process_executable().with_name("pythonw.exe")
     script = Path(__file__).resolve().parents[3] / "sunpack.py"
     return str(executable), subprocess.list2cmdline([str(script), "--toast-activated"])
 

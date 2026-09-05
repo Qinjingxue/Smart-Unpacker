@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import sys
 import threading
 from ctypes import wintypes
 from pathlib import Path
@@ -12,6 +11,7 @@ from sunpack.filesystem.watcher.service import watch_roots_path
 from sunpack.i18n import I18nContext
 from sunpack.passwords.internal.builtin import builtin_password_path, get_builtin_passwords
 from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
+from sunpack.support.process_executable import current_process_executable
 
 WM_NULL = 0x0000
 WM_DESTROY = 0x0002
@@ -315,7 +315,7 @@ class NOTIFYICONDATA(ctypes.Structure):
 
 
 def _candidate_icon_paths() -> list[Path]:
-    executable_dir = Path(sys.executable).resolve().parent
+    executable_dir = current_process_executable().parent
     return [
         executable_dir / "sunpack.ico",
         Path(__file__).resolve().parents[3] / "sunpack.ico",

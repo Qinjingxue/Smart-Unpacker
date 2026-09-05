@@ -3,6 +3,8 @@ import platform
 import sys
 from pathlib import Path
 
+from sunpack.support.process_executable import current_process_executable
+
 
 def dedupe_paths(paths: list[Path]) -> list[Path]:
     deduped: list[Path] = []
@@ -26,7 +28,7 @@ def candidate_resource_roots(request_cwd: str | Path | None = None) -> list[Path
     roots: list[Path] = []
 
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
-        roots.append(Path(sys.executable).resolve().parent)
+        roots.append(current_process_executable().parent)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             roots.append(Path(meipass).resolve())
