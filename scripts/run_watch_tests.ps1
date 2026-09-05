@@ -90,32 +90,173 @@ $pipeName = "\\.\pipe\SunPack.WatchBroker.Test.$runId"
 if ($serviceName -eq "SunPackWatchBroker" -or -not $serviceName.StartsWith("SunPackWatchBrokerTest_")) {
     throw "Refusing to provision a non-test Watch Broker service identity: $serviceName"
 }
-$unelevatedRunner = Join-Path $repoRoot "scripts\run_unelevated_process.py"
 $resultRoot = Join-Path $repoRoot ".sunpack_watch_validation\broker"
 $serviceCreated = $false
+$standardUser = $null
+$standardUserSid = $null
+$standardUserName = "SunPackTest$($runId.Substring(0, 8))"
+$standardUserPassword = $null
+$standardUserWorkRoot = Join-Path $resultRoot "user-$runId"
+$standardUserAclGranted = $false
 $commandExitCode = 0
 
-function Invoke-OrdinaryPython {
+function Initialize-StandardTestUser {
+    $passwordText = "Sp!$([guid]::NewGuid().ToString('N'))aA1"
+    $script:standardUserPassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
+    $passwordText = $null
+    $script:standardUser = New-LocalUser `
+        -Name $script:standardUserName `
+        -Password $script:standardUserPassword `
+        -AccountNeverExpires `
+        -PasswordNeverExpires `
+        -UserMayNotChangePassword `
+        -Description "Ephemeral standard user for SunPack Watch Broker tests"
+    $script:standardUserSid = $script:standardUser.SID.Value
+
+    $usersGroup = Get-LocalGroup -SID "S-1-5-32-545"
+    $alreadyInUsers = Get-LocalGroupMember -Group $usersGroup | Where-Object {
+        $_.SID.Value -eq $script:standardUserSid
+    }
+    if (-not $alreadyInUsers) {
+        Add-LocalGroupMember -Group $usersGroup -Member $script:standardUser
+    }
+
+    New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:standardUserWorkRoot -Force | Out-Null
+    & icacls.exe $resultRoot /grant ("*$($script:standardUserSid):(OI)(CI)M") /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to grant the temporary standard user access to test results."
+    }
+    $script:standardUserAclGranted = $true
+}
+
+function Invoke-StandardUserPython {
     param(
         [Parameter(Mandatory = $true)][string[]]$PythonArguments,
         [int]$CommandTimeoutSeconds = $TimeoutSeconds
     )
-    $runnerArguments = @(
-        $unelevatedRunner,
-        "--cwd", $repoRoot,
-        "--timeout-seconds", [string][Math]::Max(1, $CommandTimeoutSeconds),
-        "--env", ("SUNPACK_WATCH_BROKER_SERVICE_NAME=" + $env:SUNPACK_WATCH_BROKER_SERVICE_NAME),
-        "--env", ("SUNPACK_WATCH_BROKER_PIPE_NAME=" + $env:SUNPACK_WATCH_BROKER_PIPE_NAME),
-        "--env", ("SUNPACK_WATCH_BROKER_BINARY_PATH=" + $env:SUNPACK_WATCH_BROKER_BINARY_PATH),
-        "--env", ("SUNPACK_WATCH_BROKER_BINARY_SHA256=" + $env:SUNPACK_WATCH_BROKER_BINARY_SHA256),
-        "--",
-        $PythonPath
-    ) + $PythonArguments
-    # Keep child output visible without mixing it into the function's return
-    # value. Assigning this function's result must yield exactly one exit code.
-    & $PythonPath @runnerArguments | Out-Host
-    $exitCode = [int]$LASTEXITCODE
-    return $exitCode
+    if (-not $script:standardUser -or -not $script:standardUserPassword) {
+        throw "The temporary standard test user has not been initialized."
+    }
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $PythonPath
+    $startInfo.WorkingDirectory = $repoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.UserName = $script:standardUserName
+    $startInfo.Domain = $env:COMPUTERNAME
+    $startInfo.Password = $script:standardUserPassword
+    $startInfo.LoadUserProfile = $true
+    foreach ($argument in $PythonArguments) {
+        $startInfo.ArgumentList.Add([string]$argument)
+    }
+
+    $profileRoot = Join-Path $env:SystemDrive "Users\$($script:standardUserName)"
+    $environment = @{
+        "USERNAME" = $script:standardUserName
+        "USERDOMAIN" = $env:COMPUTERNAME
+        "USERPROFILE" = $profileRoot
+        "HOMEDRIVE" = $env:SystemDrive
+        "HOMEPATH" = "\Users\$($script:standardUserName)"
+        "HOME" = $profileRoot
+        "APPDATA" = Join-Path $profileRoot "AppData\Roaming"
+        "LOCALAPPDATA" = Join-Path $profileRoot "AppData\Local"
+        "TEMP" = $script:standardUserWorkRoot
+        "TMP" = $script:standardUserWorkRoot
+        "PYTHONPYCACHEPREFIX" = Join-Path $script:standardUserWorkRoot "pycache"
+    }
+    foreach ($name in @(
+        "SUNPACK_WATCH_BROKER_SERVICE_NAME",
+        "SUNPACK_WATCH_BROKER_PIPE_NAME",
+        "SUNPACK_WATCH_BROKER_BINARY_PATH",
+        "SUNPACK_WATCH_BROKER_BINARY_SHA256"
+    )) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ($null -ne $value) {
+            $environment[$name] = $value
+        }
+    }
+    foreach ($entry in $environment.GetEnumerator()) {
+        $startInfo.Environment[$entry.Key] = [string]$entry.Value
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Failed to start Python as temporary standard user $($script:standardUserName)."
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timeoutMilliseconds = [int][Math]::Min(
+            [int]::MaxValue,
+            [Math]::Ceiling([Math]::Max(1, $CommandTimeoutSeconds) * 1000.0)
+        )
+        if (-not $process.WaitForExit($timeoutMilliseconds)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            [Console]::Error.WriteLine(
+                "Standard-user process timed out after {0}s" -f $CommandTimeoutSeconds
+            )
+            return 124
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($stdout) {
+            [Console]::Out.Write($stdout)
+        }
+        if ($stderr) {
+            [Console]::Error.Write($stderr)
+        }
+        return [int]$process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-StandardTestUserToken {
+    $probe = @'
+from sunpack.platform.windows.elevation import is_process_elevated
+raise SystemExit(97 if is_process_elevated() else 0)
+'@
+    $exitCode = Invoke-StandardUserPython -PythonArguments @("-c", $probe) -CommandTimeoutSeconds 30
+    if ($exitCode -eq 97) {
+        throw "Temporary test user $standardUserName unexpectedly has an administrator token."
+    }
+    Assert-CommandSucceeded -ExitCode $exitCode -Description "Standard-user token verification"
+}
+
+function Remove-StandardTestUser {
+    try {
+        if ($standardUserAclGranted -and $standardUserSid -and (Test-Path -LiteralPath $resultRoot)) {
+            & icacls.exe $resultRoot /remove:g ("*$standardUserSid") /T /C | Out-Null
+        }
+    } finally {
+        try {
+            if (Test-Path -LiteralPath $standardUserWorkRoot) {
+                $resolvedResultRoot = [IO.Path]::GetFullPath($resultRoot).TrimEnd('\')
+                $resolvedWorkRoot = [IO.Path]::GetFullPath($standardUserWorkRoot)
+                if (-not $resolvedWorkRoot.StartsWith("$resolvedResultRoot\", [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Refusing to remove standard-user work directory outside the result root: $resolvedWorkRoot"
+                }
+                Remove-Item -LiteralPath $resolvedWorkRoot -Recurse -Force
+            }
+        } finally {
+            try {
+                if ($standardUserSid) {
+                    Get-CimInstance Win32_UserProfile -Filter "SID = '$standardUserSid'" -ErrorAction SilentlyContinue |
+                        Remove-CimInstance -ErrorAction SilentlyContinue
+                }
+            } finally {
+                if ($standardUser) {
+                    Remove-LocalUser -SID $standardUser.SID
+                }
+            }
+        }
+    }
 }
 
 function Assert-CommandSucceeded {
@@ -149,6 +290,7 @@ function Assert-PytestReportComplete {
 }
 
 try {
+    Initialize-StandardTestUser
     $binaryPath = '"{0}" --service-name "{1}" --pipe-name "{2}"' -f $BrokerPath, $serviceName, $pipeName
     New-Service `
         -Name $serviceName `
@@ -172,17 +314,17 @@ try {
     $env:SUNPACK_WATCH_BROKER_BINARY_PATH = $BrokerPath
     $env:SUNPACK_WATCH_BROKER_BINARY_SHA256 = Get-SunPackFileSha256 -LiteralPath $BrokerPath
 
-    New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
+    Assert-StandardTestUserToken
     switch ($Mode) {
         "pytest" {
-            $commandExitCode = Invoke-OrdinaryPython -PythonArguments (@("-m", "pytest") + $Arguments)
+            $commandExitCode = Invoke-StandardUserPython -PythonArguments (@("-m", "pytest") + $Arguments)
         }
         "benchmark" {
-            $commandExitCode = Invoke-OrdinaryPython -PythonArguments (@("-m", "benchmarks") + $Arguments)
+            $commandExitCode = Invoke-StandardUserPython -PythonArguments (@("-m", "benchmarks") + $Arguments)
         }
         "acceptance" {
             $integrationParallelReport = Join-Path $resultRoot "acceptance-integration-parallel.xml"
-            $integrationParallel = Invoke-OrdinaryPython -PythonArguments @(
+            $integrationParallel = Invoke-StandardUserPython -PythonArguments @(
                 "-m", "pytest", "-q",
                 "-n", [string]$ParallelWorkers, "--dist", "worksteal",
                 "-m", "not requires_watch_broker", "tests/integration", "--durations=20",
@@ -191,7 +333,7 @@ try {
             Assert-CommandSucceeded -ExitCode $integrationParallel -Description "Parallel integration tests"
             Assert-PytestReportComplete -ReportPath $integrationParallelReport -Description "Parallel integration tests"
             $integrationBrokerReport = Join-Path $resultRoot "acceptance-integration-broker.xml"
-            $integrationBroker = Invoke-OrdinaryPython -PythonArguments @(
+            $integrationBroker = Invoke-StandardUserPython -PythonArguments @(
                 "-m", "pytest", "-q", "-n", "0",
                 "-m", "requires_watch_broker", "tests/integration", "--durations=20",
                 ("--junitxml=" + $integrationBrokerReport)
@@ -199,7 +341,7 @@ try {
             Assert-CommandSucceeded -ExitCode $integrationBroker -Description "Broker integration tests"
             Assert-PytestReportComplete -ReportPath $integrationBrokerReport -Description "Broker integration tests"
             $realParallelReport = Join-Path $resultRoot "acceptance-real-parallel.xml"
-            $realParallel = Invoke-OrdinaryPython -PythonArguments @(
+            $realParallel = Invoke-StandardUserPython -PythonArguments @(
                 "-m", "pytest", "-q",
                 "-n", [string]$ParallelWorkers, "--dist", "worksteal",
                 "-m", "not requires_watch_broker", "tests/real", "--durations=20",
@@ -208,7 +350,7 @@ try {
             Assert-CommandSucceeded -ExitCode $realParallel -Description "Parallel real archive tests"
             Assert-PytestReportComplete -ReportPath $realParallelReport -Description "Parallel real archive tests"
             $realWatchReport = Join-Path $resultRoot "acceptance-real-watch.xml"
-            $commandExitCode = Invoke-OrdinaryPython -PythonArguments @(
+            $commandExitCode = Invoke-StandardUserPython -PythonArguments @(
                 "-m", "pytest", "-q", "-n", "0",
                 "tests/real/plan7_watch_downloads", "--durations=20",
                 ("--junitxml=" + $realWatchReport)
@@ -217,7 +359,7 @@ try {
             Assert-PytestReportComplete -ReportPath $realWatchReport -Description "Real watch tests"
         }
         "service-suite" {
-            $serviceTests = Invoke-OrdinaryPython -PythonArguments @(
+            $serviceTests = Invoke-StandardUserPython -PythonArguments @(
                 "-m", "pytest", (Join-Path $repoRoot "tests\integration\test_watch_broker_service.py"), "-q",
                 ("--junitxml=" + (Join-Path $resultRoot "service-integration.xml"))
             ) -CommandTimeoutSeconds 180
@@ -229,24 +371,24 @@ try {
                 if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
                     throw "The direct-USN baseline report is required: $BaselinePath"
                 }
-                $ntfsTests = Invoke-OrdinaryPython -PythonArguments @(
+                $ntfsTests = Invoke-StandardUserPython -PythonArguments @(
                     "-m", "pytest", (Join-Path $repoRoot "tests\integration\test_watch_ntfs_usn.py"), "-q",
                     ("--junitxml=" + (Join-Path $resultRoot "ntfs-usn.xml"))
                 ) -CommandTimeoutSeconds 300
                 Assert-CommandSucceeded -ExitCode $ntfsTests -Description "NTFS USN tests"
-                $validation = Invoke-OrdinaryPython -PythonArguments @(
+                $validation = Invoke-StandardUserPython -PythonArguments @(
                     (Join-Path $repoRoot "tests\integration\watch_validation.py"),
                     "--transport", "broker",
                     "--output", (Join-Path $resultRoot "broker.json"),
                     "--baseline", $BaselinePath
                 ) -CommandTimeoutSeconds 600
                 Assert-CommandSucceeded -ExitCode $validation -Description "Watch validation"
-                $plan7 = Invoke-OrdinaryPython -PythonArguments @(
+                $plan7 = Invoke-StandardUserPython -PythonArguments @(
                     "-m", "pytest", (Join-Path $repoRoot "tests\real\plan7_watch_downloads"), "-q",
                     ("--junitxml=" + (Join-Path $resultRoot "plan7-downloads.xml"))
                 ) -CommandTimeoutSeconds 900
                 Assert-CommandSucceeded -ExitCode $plan7 -Description "Plan 7 watch tests"
-                $commandExitCode = Invoke-OrdinaryPython -PythonArguments @(
+                $commandExitCode = Invoke-StandardUserPython -PythonArguments @(
                     "-m", "benchmarks", "watch", "split-arrival",
                     "--modes", "shuffle_rename,shuffle_direct,interleaved_rename,interleaved_direct,head_first_rename",
                     "--quiet-values", "0,1.25", "--runs", "1",
@@ -261,16 +403,20 @@ try {
     Remove-Item Env:SUNPACK_WATCH_BROKER_PIPE_NAME -ErrorAction SilentlyContinue
     Remove-Item Env:SUNPACK_WATCH_BROKER_BINARY_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:SUNPACK_WATCH_BROKER_BINARY_SHA256 -ErrorAction SilentlyContinue
-    if ($serviceCreated) {
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        & sc.exe delete $serviceName | Out-Null
-        $deadline = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $deadline -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Milliseconds 250
+    try {
+        if ($serviceCreated) {
+            Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+            & sc.exe delete $serviceName | Out-Null
+            $deadline = (Get-Date).AddSeconds(20)
+            while ((Get-Date) -lt $deadline -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                Start-Sleep -Milliseconds 250
+            }
+            if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+                throw "Temporary Watch Broker service was not removed: $serviceName"
+            }
         }
-        if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
-            throw "Temporary Watch Broker service was not removed: $serviceName"
-        }
+    } finally {
+        Remove-StandardTestUser
     }
 }
 

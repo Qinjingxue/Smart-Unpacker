@@ -340,6 +340,20 @@ def test_watch_test_runner_never_reuses_or_removes_the_release_service():
     assert "sc.exe delete SunPackWatchBroker" not in acceptance
 
 
+def test_watch_test_runner_uses_an_ephemeral_local_standard_user():
+    runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
+
+    assert "New-LocalUser" in runner
+    assert 'Get-LocalGroup -SID "S-1-5-32-545"' in runner
+    assert "[Diagnostics.ProcessStartInfo]::new()" in runner
+    assert "$startInfo.UserName = $script:standardUserName" in runner
+    assert "$startInfo.Password = $script:standardUserPassword" in runner
+    assert "$startInfo.LoadUserProfile = $true" in runner
+    assert "Assert-StandardTestUserToken" in runner
+    assert "Remove-LocalUser -SID $standardUser.SID" in runner
+    assert "Invoke-OrdinaryPython" not in runner
+
+
 def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 
