@@ -353,6 +353,13 @@ def test_watch_test_runner_uses_an_ephemeral_local_standard_user():
     assert "$startInfo.Password = $script:standardUserPassword" in runner
     assert "$startInfo.LoadUserProfile = $true" in runner
     assert "Assert-StandardTestUserToken" in runner
+    assert 'Join-Path $env:SystemDrive "SunPackTestTemp"' in runner
+    assert '"TEMP" = $script:standardUserWorkRoot' in runner
+    assert '"PYTEST_ADDOPTS" = "-o cache_dir=' in runner
+    assert "Assert-StandardTestUserUsn" in runner
+    assert "watch_candidate_for_path" in runner
+    assert "/remove:g" in runner
+    assert "/T /C" not in runner
     assert "Remove-LocalUser -SID $standardUser.SID" in runner
     assert "Invoke-OrdinaryPython" not in runner
 

@@ -90,14 +90,17 @@ $pipeName = "\\.\pipe\SunPack.WatchBroker.Test.$runId"
 if ($serviceName -eq "SunPackWatchBroker" -or -not $serviceName.StartsWith("SunPackWatchBrokerTest_")) {
     throw "Refusing to provision a non-test Watch Broker service identity: $serviceName"
 }
-$resultRoot = Join-Path $repoRoot ".sunpack_watch_validation\broker"
+$resultBase = Join-Path $repoRoot ".sunpack_watch_validation\broker"
+$resultRoot = Join-Path $resultBase $runId
 $serviceCreated = $false
 $standardUser = $null
 $standardUserSid = $null
 $standardUserName = "SunPackTest$($runId.Substring(0, 8))"
 $standardUserPassword = $null
-$standardUserWorkRoot = Join-Path $resultRoot "user-$runId"
-$standardUserAclGranted = $false
+$standardUserTempBase = Join-Path $env:SystemDrive "SunPackTestTemp"
+$standardUserWorkRoot = Join-Path $standardUserTempBase $runId
+$resultRootAclGranted = $false
+$workRootAclGranted = $false
 $commandExitCode = 0
 
 function Initialize-StandardTestUser {
@@ -123,11 +126,16 @@ function Initialize-StandardTestUser {
 
     New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $script:standardUserWorkRoot -Force | Out-Null
-    & icacls.exe $resultRoot /grant ("*$($script:standardUserSid):(OI)(CI)M") /T /C | Out-Null
+    & icacls.exe $resultRoot /grant ("*$($script:standardUserSid):(OI)(CI)M") /Q | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to grant the temporary standard user access to test results."
     }
-    $script:standardUserAclGranted = $true
+    $script:resultRootAclGranted = $true
+    & icacls.exe $script:standardUserWorkRoot /grant ("*$($script:standardUserSid):(OI)(CI)M") /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to grant the temporary standard user access to its system-volume work directory."
+    }
+    $script:workRootAclGranted = $true
 }
 
 function Invoke-StandardUserPython {
@@ -167,6 +175,7 @@ function Invoke-StandardUserPython {
         "TEMP" = $script:standardUserWorkRoot
         "TMP" = $script:standardUserWorkRoot
         "PYTHONPYCACHEPREFIX" = Join-Path $script:standardUserWorkRoot "pycache"
+        "PYTEST_ADDOPTS" = "-o cache_dir=$($script:standardUserWorkRoot)\pytest-cache"
     }
     foreach ($name in @(
         "SUNPACK_WATCH_BROKER_SERVICE_NAME",
@@ -229,18 +238,48 @@ raise SystemExit(97 if is_process_elevated() else 0)
     Assert-CommandSucceeded -ExitCode $exitCode -Description "Standard-user token verification"
 }
 
+function Assert-StandardTestUserUsn {
+    $probe = @'
+from pathlib import Path
+import sys
+
+from sunpack_native import watch_candidate_for_path
+
+target = Path(sys.argv[1])
+try:
+    target.write_bytes(b"sunpack-usn-probe")
+    candidate = watch_candidate_for_path(str(target), None)
+    if candidate is None or int(candidate["change_usn"]) <= 0:
+        raise RuntimeError("the probe file has no positive USN")
+except Exception as exc:
+    print(f"System-volume USN probe failed: {exc}", file=sys.stderr)
+    raise SystemExit(98)
+finally:
+    target.unlink(missing_ok=True)
+'@
+    $probePath = Join-Path $standardUserWorkRoot "usn-probe.bin"
+    $exitCode = Invoke-StandardUserPython -PythonArguments @("-c", $probe, $probePath) -CommandTimeoutSeconds 30
+    if ($exitCode -eq 98) {
+        throw "Temporary standard-user work directory does not expose a readable file USN: $standardUserWorkRoot"
+    }
+    Assert-CommandSucceeded -ExitCode $exitCode -Description "Standard-user USN verification"
+}
+
 function Remove-StandardTestUser {
     try {
-        if ($standardUserAclGranted -and $standardUserSid -and (Test-Path -LiteralPath $resultRoot)) {
-            & icacls.exe $resultRoot /remove:g ("*$standardUserSid") /T /C | Out-Null
+        if ($resultRootAclGranted -and $standardUserSid -and (Test-Path -LiteralPath $resultRoot)) {
+            & icacls.exe $resultRoot /remove:g ("*$standardUserSid") /Q | Out-Null
+        }
+        if ($workRootAclGranted -and $standardUserSid -and (Test-Path -LiteralPath $standardUserWorkRoot)) {
+            & icacls.exe $standardUserWorkRoot /remove:g ("*$standardUserSid") /Q | Out-Null
         }
     } finally {
         try {
             if (Test-Path -LiteralPath $standardUserWorkRoot) {
-                $resolvedResultRoot = [IO.Path]::GetFullPath($resultRoot).TrimEnd('\')
+                $resolvedTempBase = [IO.Path]::GetFullPath($standardUserTempBase).TrimEnd('\')
                 $resolvedWorkRoot = [IO.Path]::GetFullPath($standardUserWorkRoot)
-                if (-not $resolvedWorkRoot.StartsWith("$resolvedResultRoot\", [StringComparison]::OrdinalIgnoreCase)) {
-                    throw "Refusing to remove standard-user work directory outside the result root: $resolvedWorkRoot"
+                if (-not $resolvedWorkRoot.StartsWith("$resolvedTempBase\", [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Refusing to remove standard-user work directory outside its fixed base: $resolvedWorkRoot"
                 }
                 Remove-Item -LiteralPath $resolvedWorkRoot -Recurse -Force
             }
@@ -315,6 +354,7 @@ try {
     $env:SUNPACK_WATCH_BROKER_BINARY_SHA256 = Get-SunPackFileSha256 -LiteralPath $BrokerPath
 
     Assert-StandardTestUserToken
+    Assert-StandardTestUserUsn
     switch ($Mode) {
         "pytest" {
             $commandExitCode = Invoke-StandardUserPython -PythonArguments (@("-m", "pytest") + $Arguments)
