@@ -539,8 +539,9 @@ if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
     $brokerPath = Join-Path $repoRoot "native\target\release\sunpack-watch-broker.exe"
 }
 $watchRunner = Join-Path $repoRoot "scripts\run_watch_tests.ps1"
+$powerShellHost = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $watchCommand = @(
-    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watchRunner,
+    $powerShellHost, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watchRunner,
     "-Mode", "acceptance", "-PythonPath", $python, "-BrokerPath", $brokerPath,
     "-Arch", $Arch, "-SkipBuild",
     "-ParallelWorkers", [string]$ParallelWorkers,

@@ -25,6 +25,9 @@ if ($ParallelWorkers -le 0) {
     $ParallelWorkers = [math]::Max(1, [math]::Floor([Environment]::ProcessorCount / 4))
 }
 
+. (Join-Path $PSScriptRoot "powershell_runtime.ps1")
+Write-SunPackPowerShellDiagnostics
+
 . (Join-Path $PSScriptRoot "test_elevation.ps1")
 $elevatedExitCode = Invoke-TestScriptElevated -ScriptPath $PSCommandPath -BoundParameters $PSBoundParameters
 if ($null -ne $elevatedExitCode) {
@@ -167,7 +170,7 @@ try {
     $env:SUNPACK_WATCH_BROKER_SERVICE_NAME = $serviceName
     $env:SUNPACK_WATCH_BROKER_PIPE_NAME = $pipeName
     $env:SUNPACK_WATCH_BROKER_BINARY_PATH = $BrokerPath
-    $env:SUNPACK_WATCH_BROKER_BINARY_SHA256 = (Get-FileHash -LiteralPath $BrokerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $env:SUNPACK_WATCH_BROKER_BINARY_SHA256 = Get-SunPackFileSha256 -LiteralPath $BrokerPath
 
     New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
     switch ($Mode) {

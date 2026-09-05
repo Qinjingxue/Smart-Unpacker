@@ -1,4 +1,7 @@
+import hashlib
 from pathlib import Path
+import shutil
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -288,6 +291,39 @@ def test_service_test_entries_relaunch_themselves_elevated():
     assert 'Mode = "service-suite"' in service_entry
     assert "run_watch_tests.ps1" in acceptance
     assert '"-Mode", "acceptance"' in acceptance
+
+
+def test_watch_test_runner_reuses_current_powershell_host_and_dotnet_hash(tmp_path):
+    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+    watch_runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
+
+    assert "[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName" in acceptance
+    assert '$powerShellHost, "-NoProfile"' in acceptance
+    assert '"powershell", "-NoProfile"' not in acceptance
+    assert "Get-SunPackFileSha256 -LiteralPath $BrokerPath" in watch_runner
+
+    power_shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert power_shell is not None
+    helper = ROOT / "scripts" / "powershell_runtime.ps1"
+    payload = b"SunPack SHA-256 runtime test\x00\xff"
+    target = tmp_path / "payload.bin"
+    target.write_bytes(payload)
+    helper_literal = str(helper).replace("'", "''")
+    target_literal = str(target).replace("'", "''")
+    command = (
+        "function global:Get-FileHash { throw 'Get-FileHash must not be called' }; "
+        f". '{helper_literal}'; Get-SunPackFileSha256 -LiteralPath '{target_literal}'"
+    )
+
+    completed = subprocess.run(
+        [power_shell, "-NoProfile", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8-sig",
+    )
+
+    assert completed.stdout.strip() == hashlib.sha256(payload).hexdigest()
 
 
 def test_watch_test_runner_never_reuses_or_removes_the_release_service():
