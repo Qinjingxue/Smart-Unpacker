@@ -812,6 +812,10 @@ function Invoke-NuitkaStandaloneBuild {
         }
     }
 
+    foreach ($module in @("ssl", "_ssl")) {
+        $arguments += "--nofollow-import-to=$module"
+    }
+
     $arguments += $EntryPath
     Invoke-Native -FilePath $PythonPath -Arguments $arguments
 }
