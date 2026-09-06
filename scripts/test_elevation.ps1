@@ -63,23 +63,58 @@ function Invoke-TestScriptElevated {
         $commandParts += ConvertTo-PowerShellValueLiteral -Value $parameterValue
     }
 
+    $diagnosticPath = Join-Path ([IO.Path]::GetTempPath()) (
+        "sunpack-elevated-test-{0}-{1}.log" -f $PID, [guid]::NewGuid().ToString("N")
+    )
+    $diagnosticLiteral = ConvertTo-PowerShellSingleQuotedLiteral -Value $diagnosticPath
     $elevatedCommand = (
         '$ErrorActionPreference = ''Stop''; ' +
-        'trap { Write-Error $_; exit 1 }; ' +
-        ($commandParts -join " ") +
+        'try { ' +
+        ($commandParts -join " ") + ' *>&1 | Out-File -LiteralPath ' + $diagnosticLiteral + ' -Encoding UTF8; ' +
+        'if (-not $?) { exit 1 } ' +
+        '} catch { ($_ | Format-List * -Force | Out-String) | Out-File -LiteralPath ' +
+        $diagnosticLiteral + ' -Append -Encoding UTF8; exit 1 }; ' +
         '; exit 0'
     )
     $encodedCommand = [Convert]::ToBase64String(
         [Text.Encoding]::Unicode.GetBytes($elevatedCommand)
     )
     $hostPath = (Get-Process -Id $PID).Path
-    $process = Start-Process `
-        -FilePath $hostPath `
-        -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
-        -WorkingDirectory (Split-Path -Parent $ScriptPath) `
-        -Verb RunAs `
-        -WindowStyle Hidden `
-        -Wait `
-        -PassThru
-    return [int]$process.ExitCode
+    $process = $null
+    try {
+        $process = Start-Process `
+            -FilePath $hostPath `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
+            -WorkingDirectory (Split-Path -Parent $ScriptPath) `
+            -Verb RunAs `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+        $exitCode = [int]$process.ExitCode
+        if ($exitCode -ne 0) {
+            [Console]::Error.WriteLine("Elevated test process failed. Diagnostic log: {0}", $diagnosticPath)
+            if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+                foreach ($line in Get-Content -LiteralPath $diagnosticPath) {
+                    [Console]::Error.WriteLine([string]$line)
+                }
+            } else {
+                [Console]::Error.WriteLine("The elevated process did not produce its diagnostic log.")
+            }
+        } elseif (Test-Path -LiteralPath $diagnosticPath) {
+            Remove-Item -LiteralPath $diagnosticPath -Force
+        }
+        return $exitCode
+    } catch {
+        [Console]::Error.WriteLine("Failed to launch or wait for elevated test process: {0}", $_.Exception.Message)
+        if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+            foreach ($line in Get-Content -LiteralPath $diagnosticPath) {
+                [Console]::Error.WriteLine([string]$line)
+            }
+        }
+        throw
+    } finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+    }
 }

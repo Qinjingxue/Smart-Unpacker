@@ -165,13 +165,13 @@ python -m pytest tests\unit\test_model_runtime.py
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-直接 pytest 会跳过需要 NTFS Watch Broker 的用例。需要运行任意这类 pytest 命令时，使用统一入口；它会创建随机命名的测试服务和独立管道，并在结束时清理，不会触碰本机已安装的发布服务：
+直接 pytest 会跳过需要 NTFS Watch Broker 的用例。完整验收通过 `run_acceptance_tests.ps1` 在同一个 PowerShell 流程中准备依赖和一次临时测试服务，然后直接调用 pytest；所有测试结束后由自动提权 PowerShell 卸载服务，不会触碰本机已安装的发布服务：
 
 ```powershell
-.\scripts\run_watch_tests.ps1 -Mode pytest -Arguments @("tests\integration\test_watch_ntfs_usn.py", "-q")
+.\run_acceptance_tests.ps1 -NoWait
 ```
 
-`python -m benchmarks watch ...` 会自动进入同一个隔离运行器。CI 环境不会弹 UAC；runner 未提权时会立即失败，避免等待交互进程而卡住。
+CI 环境不会弹 UAC；验收服务管理器未提权时会立即失败，避免等待交互进程而卡住。
 
 项目 CI 风格测试：
 

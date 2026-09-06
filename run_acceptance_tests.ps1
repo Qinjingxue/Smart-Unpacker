@@ -513,6 +513,26 @@ function Wait-BeforeExit {
     $null = Read-Host
 }
 
+function Invoke-TestWatchServiceAction {
+    param(
+        [Parameter(Mandatory = $true)][string]$PowerShellHost,
+        [Parameter(Mandatory = $true)][string]$ManagerScript,
+        [Parameter(Mandatory = $true)][ValidateSet("Install", "Uninstall")][string]$Action,
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [Parameter(Mandatory = $true)][string]$PipeName,
+        [string]$BrokerPath = ""
+    )
+
+    $arguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ManagerScript,
+        "-Action", $Action, "-ServiceName", $ServiceName, "-PipeName", $PipeName
+    )
+    if ($BrokerPath) {
+        $arguments += @("-BrokerPath", $BrokerPath)
+    }
+    Invoke-Native -FilePath $PowerShellHost -Arguments $arguments
+}
+
 trap {
     Write-Host ("ERROR: " + $_.Exception.Message) -ForegroundColor Red
     Wait-BeforeExit
@@ -525,37 +545,97 @@ Assert-AcceptanceTestTools -RepoRoot $repoRoot
 $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
-Invoke-TestStep -Label "Parallel CLI, unit, and functional tests" -Command @(
-    $python,
-    "-m", "pytest", "-q",
-    "-n", [string]$ParallelWorkers,
-    "--dist", "worksteal",
-    "tests/cli", "tests/unit", "tests/functional",
-    "--durations=20"
-)
 $rustTarget = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $brokerPath = Join-Path $repoRoot (".cache\rust-target\{0}\{1}\release\sunpack-watch-broker.exe" -f $Arch, $rustTarget)
 if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
     $brokerPath = Join-Path $repoRoot "native\target\release\sunpack-watch-broker.exe"
 }
-$watchRunner = Join-Path $repoRoot "scripts\run_watch_tests.ps1"
+$brokerPath = [IO.Path]::GetFullPath($brokerPath)
+if (-not (Test-Path -LiteralPath $brokerPath -PathType Leaf)) {
+    throw "Watch Broker executable not found: $brokerPath"
+}
+$watchServiceManager = Join-Path $repoRoot "scripts\manage_test_watch_service.ps1"
 $powerShellHost = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-$watchCommand = @(
-    $powerShellHost, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watchRunner,
-    "-Mode", "acceptance", "-PythonPath", $python, "-BrokerPath", $brokerPath,
-    "-Arch", $Arch, "-SkipBuild",
-    "-ParallelWorkers", [string]$ParallelWorkers,
-    "-TimeoutSeconds", [string]$StepTimeoutSeconds
+$watchServiceRunId = [guid]::NewGuid().ToString("N")
+$watchServiceName = "SunPackWatchBrokerTest_$watchServiceRunId"
+$watchPipeName = "\\.\pipe\SunPack.WatchBroker.Test.$watchServiceRunId"
+$watchBrokerSha256 = (Get-FileHash -LiteralPath $brokerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$watchEnvironmentNames = @(
+    "SUNPACK_WATCH_BROKER_SERVICE_NAME",
+    "SUNPACK_WATCH_BROKER_PIPE_NAME",
+    "SUNPACK_WATCH_BROKER_BINARY_PATH",
+    "SUNPACK_WATCH_BROKER_BINARY_SHA256"
 )
-Invoke-TestStep `
-    -Label "Integration and real watch tests (isolated ordinary-user Broker)" `
-    -Command $watchCommand `
-    -TimeoutSeconds (($StepTimeoutSeconds * 2) + 120)
-Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
-Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
-Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py", "config", "--json", "show")
+$watchEnvironmentBackup = @{}
+foreach ($name in $watchEnvironmentNames) {
+    $watchEnvironmentBackup[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+$watchServiceInstalled = $false
+$watchServiceCleanupFailed = $false
+
+try {
+    $env:SUNPACK_WATCH_BROKER_SERVICE_NAME = $watchServiceName
+    $env:SUNPACK_WATCH_BROKER_PIPE_NAME = $watchPipeName
+    $env:SUNPACK_WATCH_BROKER_BINARY_PATH = $brokerPath
+    $env:SUNPACK_WATCH_BROKER_BINARY_SHA256 = $watchBrokerSha256
+
+    Write-Host ""
+    Write-Host "==> Installing temporary Watch Broker service" -ForegroundColor Cyan
+    Invoke-TestWatchServiceAction `
+        -PowerShellHost $powerShellHost `
+        -ManagerScript $watchServiceManager `
+        -Action Install `
+        -ServiceName $watchServiceName `
+        -PipeName $watchPipeName `
+        -BrokerPath $brokerPath
+    $watchServiceInstalled = $true
+
+    Invoke-TestStep -Label "Parallel CLI, unit, and functional tests" -Command @(
+        $python,
+        "-m", "pytest", "-q",
+        "-n", [string]$ParallelWorkers,
+        "--dist", "worksteal",
+        "tests/cli", "tests/unit", "tests/functional",
+        "--durations=20"
+    )
+    Invoke-TestStep -Label "Parallel integration and real tests" -Command @(
+        $python,
+        "-m", "pytest", "-q",
+        "-n", [string]$ParallelWorkers,
+        "--dist", "worksteal",
+        "tests/integration", "tests/real",
+        "--durations=20"
+    )
+    Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
+    Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
+    Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
+    Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
+    Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py", "config", "--json", "show")
+} finally {
+    if ($watchServiceInstalled) {
+        Write-Host ""
+        Write-Host "==> Uninstalling temporary Watch Broker service" -ForegroundColor Cyan
+        try {
+            Invoke-TestWatchServiceAction `
+                -PowerShellHost $powerShellHost `
+                -ManagerScript $watchServiceManager `
+                -Action Uninstall `
+                -ServiceName $watchServiceName `
+                -PipeName $watchPipeName
+        } catch {
+            $watchServiceCleanupFailed = $true
+            Write-Host ("    FAIL - could not uninstall temporary Watch Broker service: " + $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+    foreach ($name in $watchEnvironmentNames) {
+        $previousValue = $watchEnvironmentBackup[$name]
+        if ($null -eq $previousValue) {
+            Remove-Item -LiteralPath ("Env:" + $name) -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -LiteralPath ("Env:" + $name) -Value $previousValue
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan
@@ -569,6 +649,9 @@ foreach ($result in $script:StepResults) {
 
 Write-Host ""
 $failedResults = @($script:StepResults | Where-Object { $_.ExitCode -ne 0 })
+if ($watchServiceCleanupFailed) {
+    $failedResults += [pscustomobject]@{ Label = "Temporary Watch Broker service cleanup"; ExitCode = -1; DurationSeconds = 0 }
+}
 if ($failedResults.Count -gt 0) {
     Write-Host ("{0} acceptance test step(s) failed; all scheduled steps have completed." -f $failedResults.Count) -ForegroundColor Red
 } else {

@@ -1,7 +1,4 @@
-import hashlib
 from pathlib import Path
-import shutil
-import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -277,76 +274,20 @@ def test_installer_smoke_uses_process_exit_code_for_started_processes():
     assert "Command failed with exit code" in script
 
 
-def test_service_test_entries_relaunch_themselves_elevated():
-    helper = (ROOT / "scripts" / "test_elevation.ps1").read_text(encoding="utf-8")
-    entry_paths = (
-        ROOT / "scripts" / "test_windows_installer.ps1",
-        ROOT / "scripts" / "run_watch_tests.ps1",
-    )
-
-    assert "-Verb RunAs" in helper
-    assert "-EncodedCommand" in helper
-    assert '"-NonInteractive"' in helper
-    assert "-WindowStyle Hidden" in helper
-    assert "'; exit 0'" in helper
-    assert "-Wait" in helper
-    assert "-PassThru" in helper
-    assert "return [int]$process.ExitCode" in helper
-    assert "$env:CI" in helper
-    assert "$env:GITHUB_ACTIONS" in helper
-    assert "interactive UAC relaunch is disabled in CI" in helper
-    assert helper.index("interactive UAC relaunch is disabled in CI") < helper.index("Start-Process")
-    for path in entry_paths:
-        script = path.read_text(encoding="utf-8")
-        assert "test_elevation.ps1" in script, path
-        assert "Invoke-TestScriptElevated" in script, path
-        assert "-BoundParameters $PSBoundParameters" in script, path
-        assert "exit $elevatedExitCode" in script, path
-
-    watch_runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
-    assert "Assert-PytestReportComplete" in watch_runner
-    assert "collected no correctness tests" in watch_runner
-    assert "correctness tests" in watch_runner and "skipped" in watch_runner
-
-    service_entry = (ROOT / "scripts" / "test_watch_broker_service.ps1").read_text(encoding="utf-8")
+def test_acceptance_runs_watch_suites_in_current_powershell():
     acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
-    assert "run_watch_tests.ps1" in service_entry
-    assert 'Mode = "service-suite"' in service_entry
-    assert "run_watch_tests.ps1" in acceptance
-    assert '"-Mode", "acceptance"' in acceptance
 
-
-def test_watch_test_runner_reuses_current_powershell_host_and_dotnet_hash(tmp_path):
-    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
-    watch_runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
-
-    assert "[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName" in acceptance
-    assert '$powerShellHost, "-NoProfile"' in acceptance
-    assert '"powershell", "-NoProfile"' not in acceptance
-    assert "Get-SunPackFileSha256 -LiteralPath $BrokerPath" in watch_runner
-
-    power_shell = shutil.which("pwsh") or shutil.which("powershell")
-    assert power_shell is not None
-    helper = ROOT / "scripts" / "powershell_runtime.ps1"
-    payload = b"SunPack SHA-256 runtime test\x00\xff"
-    target = tmp_path / "payload.bin"
-    target.write_bytes(payload)
-    helper_literal = str(helper).replace("'", "''")
-    target_literal = str(target).replace("'", "''")
-    command = (
-        "function global:Get-FileHash { throw 'Get-FileHash must not be called' }; "
-        f". '{helper_literal}'; Get-SunPackFileSha256 -LiteralPath '{target_literal}'"
-    )
-
-    completed = subprocess.run(
-        [power_shell, "-NoProfile", "-Command", command],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8-sig",
-    )
-
-    assert completed.stdout.strip() == hashlib.sha256(payload).hexdigest()
+    assert "run_watch_tests.ps1" not in acceptance
+    assert '"tests/integration"' in acceptance
+    assert '"tests/real"' in acceptance
+    assert '"tests/integration", "tests/real"' in acceptance
+    assert '"-m", "requires_watch_broker"' not in acceptance
+    assert '"-m", "not requires_watch_broker"' not in acceptance
+    assert '"-n", "0"' not in acceptance
+    assert "-Action Install" in acceptance
+    assert "-Action Uninstall" in acceptance
+    assert "CompletionReportPath" not in acceptance
+    assert "RequiredCompletionSuites" not in acceptance
 
 
 def test_packaged_smoke_tests_shutdown_the_persistent_runtime_before_installer_test():
@@ -367,42 +308,15 @@ def test_packaged_smoke_tests_shutdown_the_persistent_runtime_before_installer_t
     assert "Get-CimInstance Win32_Process" in build
 
 
-def test_watch_test_runner_never_reuses_or_removes_the_release_service():
-    runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
-    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+def test_elevated_test_failures_are_persisted_and_replayed():
+    helper = (ROOT / "scripts" / "test_elevation.ps1").read_text(encoding="utf-8")
 
-    assert '"SunPackWatchBrokerTest_$runId"' in runner
-    assert '"\\\\.\\pipe\\SunPack.WatchBroker.Test.$runId"' in runner
-    assert 'if ($serviceName -eq "SunPackWatchBroker"' in runner
-    assert "Stop-Service -Name $serviceName" in runner
-    assert "sc.exe delete $serviceName" in runner
-    assert 'Get-Service -Name "SunPackWatchBroker"' not in acceptance
-    assert 'Stop-Service -Name "SunPackWatchBroker"' not in acceptance
-    assert "sc.exe delete SunPackWatchBroker" not in acceptance
-
-
-def test_watch_test_runner_uses_an_ephemeral_local_standard_user():
-    runner = (ROOT / "scripts" / "run_watch_tests.ps1").read_text(encoding="utf-8")
-    account_description = "Ephemeral SunPack Broker test user"
-
-    assert "New-LocalUser" in runner
-    assert f'-Description "{account_description}"' in runner
-    assert len(account_description) <= 48
-    assert 'Get-LocalGroup -SID "S-1-5-32-545"' in runner
-    assert "[Diagnostics.ProcessStartInfo]::new()" in runner
-    assert "$startInfo.UserName = $script:standardUserName" in runner
-    assert "$startInfo.Password = $script:standardUserPassword" in runner
-    assert "$startInfo.LoadUserProfile = $true" in runner
-    assert "Assert-StandardTestUserToken" in runner
-    assert 'Join-Path $env:SystemDrive "SunPackTestTemp"' in runner
-    assert '"TEMP" = $script:standardUserWorkRoot' in runner
-    assert '"PYTEST_ADDOPTS" = "-o cache_dir=' in runner
-    assert "Assert-StandardTestUserUsn" in runner
-    assert "watch_candidate_for_path" in runner
-    assert "/remove:g" in runner
-    assert "/T /C" not in runner
-    assert "Remove-LocalUser -SID $standardUser.SID" in runner
-    assert "Invoke-OrdinaryPython" not in runner
+    assert "sunpack-elevated-test-" in helper
+    assert "*>&1 | Out-File" in helper
+    assert "Format-List * -Force" in helper
+    assert "Elevated test process failed. Diagnostic log:" in helper
+    assert "Get-Content -LiteralPath $diagnosticPath" in helper
+    assert "The elevated process did not produce its diagnostic log." in helper
 
 
 def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
