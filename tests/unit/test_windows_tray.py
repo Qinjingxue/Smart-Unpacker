@@ -102,6 +102,38 @@ def test_tray_close_and_destroy_have_distinct_responsibilities():
     assert calls == [("destroy", 123), ("quit", 0)]
 
 
+def test_taskbar_created_message_restores_tray_icon():
+    calls = []
+    tray = object.__new__(WindowsTrayIcon)
+    tray._taskbar_created_message = 0xC123
+    tray._icon_registered = True
+
+    def add_icon(hwnd):
+        calls.append((hwnd, tray._icon_registered))
+        tray._icon_registered = True
+
+    tray._add_icon = add_icon
+
+    assert tray._wndproc(123, tray._taskbar_created_message, 0, 0) == 0
+    assert calls == [(123, False)]
+    assert tray._icon_registered is True
+
+
+def test_taskbar_restore_keeps_icon_unregistered_when_add_fails():
+    tray = object.__new__(WindowsTrayIcon)
+    tray._icon_registered = True
+    tray._add_icon = lambda _hwnd: (_ for _ in ()).throw(OSError("add failed"))
+
+    try:
+        tray._restore_icon(123)
+    except OSError as exc:
+        assert str(exc) == "add failed"
+    else:
+        raise AssertionError("restore must report a failed NIM_ADD")
+
+    assert tray._icon_registered is False
+
+
 def test_global_tray_callback_contains_python_exceptions(monkeypatch):
     errors = []
     instance = SimpleNamespace(

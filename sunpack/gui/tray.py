@@ -45,6 +45,8 @@ ID_EXIT = 1004
 ID_TOGGLE_STARTUP = 1005
 ID_OPEN_BUILTIN_PASSWORDS = 1006
 
+TASKBAR_CREATED_MESSAGE_NAME = "TaskbarCreated"
+
 
 class WNDCLASS(ctypes.Structure):
     _fields_ = [
@@ -146,6 +148,8 @@ class WindowsTrayIcon:
         self.kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
         self.user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASS)]
         self.user32.RegisterClassW.restype = wintypes.ATOM
+        self.user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+        self.user32.RegisterWindowMessageW.restype = wintypes.UINT
         self.user32.CreateWindowExW.argtypes = [
             wintypes.DWORD,
             wintypes.LPCWSTR,
@@ -191,6 +195,11 @@ class WindowsTrayIcon:
         self._hwnd = None
         self._icon = None
         self._icon_registered = False
+        self._taskbar_created_message = self.user32.RegisterWindowMessageW(
+            TASKBAR_CREATED_MESSAGE_NAME
+        )
+        if not self._taskbar_created_message:
+            raise ctypes.WinError()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -301,6 +310,12 @@ class WindowsTrayIcon:
         self.shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
         self._icon_registered = False
 
+    def _restore_icon(self, hwnd) -> None:
+        # Explorer discards notification-area icons when it recreates the
+        # taskbar, even though the owning process and window remain alive.
+        self._icon_registered = False
+        self._add_icon(hwnd)
+
     def _load_icon(self):
         for icon_path in _candidate_icon_paths():
             if icon_path.exists():
@@ -311,6 +326,9 @@ class WindowsTrayIcon:
         return self.user32.LoadIconW(None, ctypes.c_wchar_p(IDI_APPLICATION))
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == getattr(self, "_taskbar_created_message", None):
+            self._restore_icon(hwnd)
+            return 0
         if msg == WM_TRAYICON and lparam in {WM_RBUTTONUP, WM_LBUTTONDBLCLK}:
             self._show_menu(hwnd)
             return 0
