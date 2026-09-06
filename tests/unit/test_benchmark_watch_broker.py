@@ -30,6 +30,8 @@ def test_temporary_watch_broker_service_installs_and_always_uninstalls(tmp_path,
         ),
     )
     monkeypatch.setenv(watch_broker.SERVICE_ENV, "original-service")
+    for name in (watch_broker.PIPE_ENV, watch_broker.BINARY_ENV, watch_broker.HASH_ENV):
+        monkeypatch.delenv(name, raising=False)
 
     with pytest.raises(RuntimeError, match="scenario failed"):
         with watch_broker.temporary_watch_broker_service():
