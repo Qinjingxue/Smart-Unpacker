@@ -424,7 +424,7 @@ CATALOG = {
         "watch.failure.no_complete_outcome": "监控处理未返回完整目标结果",
         "watch.failure.unknown_nested": "未知的内层压缩包错误",
         "watch.failure.nested_password": "内层压缩包密码错误：{message}",
-        "watch.failure.nested_missing_volume": "内层压缩包缺少分卷：{message}",
+        "watch.failure.nested_missing_volume": "嵌套压缩包内层分卷缺失：{message}",
         "passwords.builtin_file_header": "# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。",
         "cli.scan.help": "只扫描候选归档，不修改文件系统。",
         "cli.scan.paths": "要扫描的文件或目录。",
