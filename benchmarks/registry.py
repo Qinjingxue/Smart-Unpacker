@@ -9,7 +9,6 @@ class Scenario:
     name: str
     module: str
     description: str
-    requires_watch_broker: bool = False
 
 
 _ROWS = [
@@ -46,7 +45,6 @@ SCENARIOS = {
         name,
         module,
         description,
-        requires_watch_broker=(group == "watch"),
     )
     for group, name, module, description in _ROWS
 }

@@ -136,7 +136,7 @@ def pytest_collection_modifyitems(config, items):
         )
     )
     skip_broker = pytest.mark.skip(
-        reason="run through scripts/run_watch_tests.ps1 to provision an isolated Watch Broker"
+        reason="requires an isolated, ephemeral Watch Broker test service"
     )
     for item in items:
         item_path = Path(str(item.path)).as_posix()

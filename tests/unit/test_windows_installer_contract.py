@@ -277,7 +277,6 @@ def test_installer_smoke_uses_process_exit_code_for_started_processes():
 def test_acceptance_runs_watch_suites_in_current_powershell():
     acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
 
-    assert "run_watch_tests.ps1" not in acceptance
     assert '"tests/integration"' in acceptance
     assert '"tests/real"' in acceptance
     assert '"tests/integration", "tests/real"' in acceptance
