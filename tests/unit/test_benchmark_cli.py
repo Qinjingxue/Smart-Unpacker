@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from benchmarks import cli
 
 
@@ -35,6 +37,12 @@ def test_clean_requires_an_explicit_target() -> None:
 def test_watch_scenario_runs_in_a_subprocess(monkeypatch) -> None:
     observed: dict[str, object] = {}
 
+    @contextmanager
+    def fake_broker_service():
+        observed["broker_entered"] = True
+        yield
+        observed["broker_exited"] = True
+
     def fake_run(module: str, arguments: list[str], timeout: float) -> int:
         observed["module"] = module
         observed["arguments"] = arguments
@@ -42,10 +50,16 @@ def test_watch_scenario_runs_in_a_subprocess(monkeypatch) -> None:
         return 17
 
     monkeypatch.setattr(cli, "_run_scenario_in_subprocess", fake_run)
+    monkeypatch.setattr(
+        "benchmarks.watch_broker.temporary_watch_broker_service",
+        fake_broker_service,
+    )
 
     assert cli.main(["--timeout", "12", "watch", "real-file", "--runs", "2"]) == 17
     assert observed == {
         "module": "benchmarks.scenarios.watch_real_file",
         "arguments": ["--runs", "2"],
         "timeout": 12.0,
+        "broker_entered": True,
+        "broker_exited": True,
     }

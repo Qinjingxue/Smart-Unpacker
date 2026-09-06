@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import hashlib
+import base64
 import os
+import platform
+import shutil
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from uuid import uuid4
 
 
 SERVICE_ENV = "SUNPACK_WATCH_BROKER_SERVICE_NAME"
@@ -13,6 +17,9 @@ BINARY_ENV = "SUNPACK_WATCH_BROKER_BINARY_PATH"
 HASH_ENV = "SUNPACK_WATCH_BROKER_BINARY_SHA256"
 TEST_SERVICE_PREFIX = "SunPackWatchBrokerTest_"
 TEST_PIPE_PREFIX = r"\\.\pipe\SunPack.WatchBroker.Test."
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SERVICE_MANAGER = REPO_ROOT / "scripts" / "manage_test_watch_service.ps1"
+MANAGED_ENVIRONMENT = (SERVICE_ENV, PIPE_ENV, BINARY_ENV, HASH_ENV)
 
 
 def isolated_broker_environment() -> bool:
@@ -26,11 +33,131 @@ def _binary_sha256(path: str) -> str:
     declared = os.environ.get(HASH_ENV, "").strip().lower()
     if declared:
         return declared
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    escaped_path = str(Path(path).resolve()).replace("'", "''")
+    hash_command = (
+        "Import-Module Microsoft.PowerShell.Utility; "
+        f"(Get-FileHash -LiteralPath '{escaped_path}' -Algorithm SHA256).Hash.ToLowerInvariant()"
+    )
+    encoded_command = base64.b64encode(hash_command.encode("utf-16-le")).decode("ascii")
+    completed = subprocess.run(
+        [
+            _powershell_host(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded_command,
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"PowerShell could not hash the Watch Broker executable: {detail}")
+    digest = completed.stdout.strip().lower()
+    if len(digest) != 64:
+        raise RuntimeError(f"PowerShell returned an invalid Watch Broker SHA-256: {digest!r}")
+    return digest
+
+
+def _powershell_host() -> str:
+    host = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if host is None:
+        raise RuntimeError("PowerShell is required to manage the temporary Watch Broker service")
+    return host
+
+
+def _ensure_watch_broker_binary() -> Path:
+    configured = os.environ.get(BINARY_ENV, "").strip()
+    if configured:
+        binary = Path(configured).resolve()
+        if not binary.is_file():
+            raise RuntimeError(f"configured Watch Broker executable does not exist: {binary}")
+        return binary
+
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        build_arch, rust_target = "x64", "x86_64-pc-windows-msvc"
+    elif machine in {"arm64", "aarch64"}:
+        build_arch, rust_target = "arm64", "aarch64-pc-windows-msvc"
+    else:
+        raise RuntimeError(f"unsupported Windows architecture for Watch Broker: {platform.machine()}")
+
+    target_dir = REPO_ROOT / ".cache" / "rust-target" / build_arch
+    manifest = REPO_ROOT / "native" / "sunpack_watch_broker" / "Cargo.toml"
+    binary = target_dir / rust_target / "release" / "sunpack-watch-broker.exe"
+    print("==> Building temporary Watch Broker service", flush=True)
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--manifest-path",
+            str(manifest),
+            "--release",
+            "--target",
+            rust_target,
+            "--target-dir",
+            str(target_dir),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+    if not binary.is_file():
+        raise RuntimeError(f"Watch Broker build did not produce the expected executable: {binary}")
+    return binary
+
+
+def _run_service_manager(action: str, service_name: str, pipe_name: str, binary: Path) -> None:
+    command = [
+        _powershell_host(),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SERVICE_MANAGER),
+        "-Action",
+        action,
+        "-ServiceName",
+        service_name,
+        "-PipeName",
+        pipe_name,
+    ]
+    if action == "Install":
+        command.extend(["-BrokerPath", str(binary)])
+    subprocess.run(command, cwd=REPO_ROOT, check=True)
+
+
+@contextmanager
+def temporary_watch_broker_service() -> Iterator[None]:
+    """Build and expose one isolated Broker service for a watch benchmark run."""
+    binary = _ensure_watch_broker_binary()
+    run_id = uuid4().hex
+    service_name = f"{TEST_SERVICE_PREFIX}{run_id}"
+    pipe_name = f"{TEST_PIPE_PREFIX}{run_id}"
+    previous = {name: os.environ.get(name) for name in MANAGED_ENVIRONMENT}
+    installed = False
+    try:
+        os.environ[SERVICE_ENV] = service_name
+        os.environ[PIPE_ENV] = pipe_name
+        os.environ[BINARY_ENV] = str(binary)
+        os.environ[HASH_ENV] = _binary_sha256(str(binary))
+        print(f"==> Installing temporary Watch Broker service: {service_name}", flush=True)
+        _run_service_manager("Install", service_name, pipe_name, binary)
+        installed = True
+        yield
+    finally:
+        try:
+            if installed:
+                print(f"==> Uninstalling temporary Watch Broker service: {service_name}", flush=True)
+                _run_service_manager("Uninstall", service_name, pipe_name, binary)
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 @contextmanager

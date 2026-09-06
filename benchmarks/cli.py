@@ -106,4 +106,9 @@ def main(argv: list[str] | None = None) -> int:
         _parser().error(f"unknown {args.group} scenario {args.scenario!r}; choose one of: {names}")
     if args.timeout <= 0:
         _parser().error("--timeout must be positive")
+    if args.group == "watch":
+        from .watch_broker import temporary_watch_broker_service
+
+        with temporary_watch_broker_service():
+            return _run_scenario_in_subprocess(selected.module, list(args.scenario_args), args.timeout)
     return _run_scenario_in_subprocess(selected.module, list(args.scenario_args), args.timeout)
