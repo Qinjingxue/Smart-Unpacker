@@ -223,32 +223,23 @@ function Set-ContextMenuCommand {
     Set-Item -Path $commandKey -Value $CommandLine
 }
 
-function Get-DefaultMenuText {
+function Get-MenuLanguage {
     param([string]$RepoRoot)
 
     $configPath = Join-Path $RepoRoot "sunpack_config.json"
     if (-not (Test-Path -LiteralPath $configPath)) {
-        return "SunPack"
+        return "en"
     }
 
     try {
         $payload = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
         $language = [string]$payload.cli.language
         if ($language.Trim().ToLower().StartsWith("zh")) {
-            return New-ChineseMenuText
+            return "zh"
         }
     } catch {
     }
-    return "SunPack"
-}
-
-function New-ChineseMenuText {
-    return -join @(
-        [char]0x667A,
-        [char]0x80FD,
-        [char]0x89E3,
-        [char]0x538B
-    )
+    return "en"
 }
 
 function New-ChineseText {
@@ -258,9 +249,9 @@ function New-ChineseText {
 }
 
 function Get-SubMenuTexts {
-    param([string]$MenuText)
+    param([string]$Language)
 
-    if ($MenuText -eq (New-ChineseMenuText)) {
+    if ($Language -eq "zh") {
         return @{
             Prompt = New-ChineseText @(0x4EA4, 0x4E92, 0x8F93, 0x5165, 0x5BC6, 0x7801, 0x89E3, 0x538B)
             Direct = New-ChineseText @(0x76F4, 0x63A5, 0x89E3, 0x538B)
@@ -280,7 +271,8 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $launcher = Resolve-Launcher -RepoRoot $repoRoot -PreferredAppPath $AppPath -PreferredPythonPath $PythonPath
 $resolvedIconPath = if ($IconPath) { (Resolve-Path -LiteralPath $IconPath).Path } else { $launcher.IconPath }
-$resolvedMenuText = if ($MenuText) { $MenuText } else { Get-DefaultMenuText -RepoRoot $repoRoot }
+$menuLanguage = Get-MenuLanguage -RepoRoot $repoRoot
+$resolvedMenuText = if ($MenuText) { $MenuText } else { "sunpack" }
 
 $folderKey = "HKCU:\Software\Classes\Directory\shell\SunPack"
 $backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\SunPack"
@@ -288,7 +280,7 @@ $folderSubCommandsName = "SunPack.FolderContextMenu"
 $backgroundSubCommandsName = "SunPack.BackgroundContextMenu"
 $folderSubCommandsKey = "HKCU:\Software\Classes\$folderSubCommandsName"
 $backgroundSubCommandsKey = "HKCU:\Software\Classes\$backgroundSubCommandsName"
-$subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText
+$subMenuTexts = Get-SubMenuTexts -Language $menuLanguage
 
 $folderToken = ConvertTo-RootSafeDirectoryToken -Token "%1"
 $backgroundToken = ConvertTo-RootSafeDirectoryToken -Token "%V"
@@ -303,6 +295,7 @@ $backgroundUnwatchCommand = New-WatchRemoveCommandString -Launcher $launcher -Ta
 
 if ($DryRun) {
     [pscustomobject]@{
+        menu_text = $resolvedMenuText
         folder_prompt = $folderPromptCommand
         folder_direct = $folderDirectCommand
         folder_watch = $folderWatchCommand

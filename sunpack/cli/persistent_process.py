@@ -146,13 +146,15 @@ def _client_terminal_columns(stream) -> int:
 
 
 def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
+    request_cwd = str(payload.get("cwd") or os.getcwd())
+    i18n = I18nContext(load_cli_language_from_config(request_cwd))
     if not runtime_id_available():
         if payload.get("shutdown"):
             return {"exit_code": 0, "stdout": "", "stderr": ""}
         return {
             "exit_code": 2,
             "stdout": "",
-            "stderr": "SunPack persistent process requires the native launcher runtime identity.\n",
+            "stderr": i18n.t("cli.persistent_identity_required") + "\n",
         }
     response = _try_send(payload)
     if response is not None:
@@ -161,7 +163,6 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         return {"exit_code": 0, "stdout": "", "stderr": ""}
     import subprocess
 
-    request_cwd = str(payload.get("cwd") or os.getcwd())
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         process = subprocess.Popen(
@@ -177,7 +178,7 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "exit_code": 1,
             "stdout": "",
-            "stderr": f"SunPack persistent process failed to start: {exc}\n",
+            "stderr": i18n.t("cli.persistent_launch_failed", error=exc) + "\n",
         }
 
     deadline = time.monotonic() + _SERVER_STARTUP_TIMEOUT_SECONDS
@@ -192,9 +193,9 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
             if runtime_exit_code not in (None, 0):
                 break
         time.sleep(0.025)
-    error = I18nContext(load_cli_language_from_config(request_cwd)).t("cli.persistent_start_timeout")
+    error = i18n.t("cli.persistent_start_timeout")
     if runtime_exit_code not in (None, 0):
-        error += f"\nRuntime exited with code {runtime_exit_code}."
+        error += "\n" + i18n.t("cli.persistent_runtime_exited", code=runtime_exit_code)
     return {
         "exit_code": 1,
         "stdout": "",
@@ -631,8 +632,9 @@ async def run_server() -> int:
         return 1
     try:
         require_runtime_id()
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr, flush=True)
+    except RuntimeError:
+        i18n = I18nContext(load_cli_language_from_config())
+        print(i18n.t("cli.persistent_identity_required"), file=sys.stderr, flush=True)
         return 2
     import secrets
 

@@ -31,7 +31,8 @@ def test_installer_optionally_registers_watch_autostart():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
     assert 'Name: "autostart"' in script
-    assert "Start SunPack Watch when Windows starts" in script
+    assert "english.TaskAutostart=Start sunpack Watch when Windows starts" in script
+    assert "chinesesimplified.TaskAutostart=Windows 启动时运行 sunpack 监控" in script
     assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in script
     assert 'ValueName: "SunPackWatchService"' in script
     assert 'ValueData: """{app}\\sunpack.exe"" watch start"' in script

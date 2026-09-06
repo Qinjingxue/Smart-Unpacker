@@ -48,6 +48,7 @@ from sunpack.filesystem.watcher.scanner import (
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateEntry, WatchStateStore
 from sunpack.filesystem.watcher.toast import NullWatchNotificationSink
+from sunpack.i18n import I18nContext
 from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
@@ -159,6 +160,8 @@ class WatchScheduler:
         wake_callback: Callable[[], None] | None = None,
     ):
         self.config = config
+        cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
+        self.i18n = I18nContext(cli_config.get("language", "en"))
         watch_config = dict(DEFAULT_WATCH_CONFIG)
         if isinstance(config.get("watch"), dict):
             watch_config.update(config["watch"])
@@ -1226,7 +1229,10 @@ class WatchScheduler:
             self._cleanup_probe_workspace(request.probe_workspace)
             failure_payloads = [_failure_to_dict(failure) for failure in missing_volume_failures]
             payload = {**failure_payloads[0], "blockers": [BLOCKER_MISSING_VOLUME]}
-            error = str(getattr(missing_volume_failures[0], "message", "") or "possible missing split volume")
+            error = str(
+                getattr(missing_volume_failures[0], "message", "")
+                or self.i18n.t("failure.possible_missing_volume")
+            )
             if group is not None:
                 self.state.record_group_suspended(
                     group,
@@ -1271,6 +1277,7 @@ class WatchScheduler:
                     nested_reasons[0],
                     primary_failure,
                     fallback=raw_error,
+                    i18n=self.i18n,
                 )
                 failure_payloads = [_failure_to_dict(failure) for failure in nested_failures]
                 blockers = [BLOCKER_PASSWORD] if "password" in nested_reasons else []
@@ -1316,7 +1323,7 @@ class WatchScheduler:
                 self._notify("failed", request.notification_id, [error], failure_payloads)
                 return WatchRunResult(processed=1, failed=1, errors=[error])
 
-            error = "watch extraction rejected partial content"
+            error = self.i18n.t("watch.failure.partial_rejected")
             if group is not None:
                 self.state.record_group_terminal(group, status="failed")
             self.state.mark(
@@ -1338,7 +1345,7 @@ class WatchScheduler:
 
         failed = list(summary.failed_tasks)
         if failed:
-            error = failed[0] if failed else "watch extraction failed"
+            error = failed[0] if failed else self.i18n.t("watch.failure.extraction_failed")
             failures = summary_failures
             failure_payloads = [_failure_to_dict(failure) for failure in failures]
             is_password_failure = bool(
@@ -1374,6 +1381,7 @@ class WatchScheduler:
                         nested_missing_volume_failures,
                     )[0],
                     fallback=error,
+                    i18n=self.i18n,
                 )
             primary_failures = (
                 candidate_password_failures
@@ -1443,7 +1451,7 @@ class WatchScheduler:
             return WatchRunResult(processed=1)
         if outcome_kind != OutcomeKind.COMPLETE_SUCCESS:
             self._cleanup_probe_workspace(request.probe_workspace)
-            error = "watch pipeline returned no complete target outcome"
+            error = self.i18n.t("watch.failure.no_complete_outcome")
             if group is not None:
                 self.state.record_group_terminal(group, status="failed_terminal")
             self.log.write("failed_terminal", path=candidate.path, error=error, failures=[])
@@ -2126,19 +2134,23 @@ def _nested_related_failures(password_failures, missing_volume_failures) -> list
     return [*password_failures, *missing_volume_failures]
 
 
-def _nested_failure_error(reason: str, failure, *, fallback: str = "") -> str:
-    if reason == "password":
-        label = "密码错误"
-    else:
-        label = "分卷缺失"
+def _nested_failure_error(
+    reason: str,
+    failure,
+    *,
+    fallback: str = "",
+    i18n: I18nContext | None = None,
+) -> str:
+    i18n = i18n or I18nContext()
     if fallback:
         message = fallback
     elif isinstance(failure, dict):
         message = failure.get("message") or ""
     else:
         message = getattr(failure, "message", "") if failure is not None else ""
-    message = str(message or "unknown nested archive failure")
-    return f"嵌套压缩包内层{label}：{message}"
+    message = str(message or i18n.t("watch.failure.unknown_nested"))
+    key = "watch.failure.nested_password" if reason == "password" else "watch.failure.nested_missing_volume"
+    return i18n.t(key, message=message)
 
 
 def _add_nested_failure_details(payload: dict, reasons: list[str]) -> dict:

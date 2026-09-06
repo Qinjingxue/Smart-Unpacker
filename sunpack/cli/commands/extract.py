@@ -52,7 +52,7 @@ async def handle(args, ctx):
     reporter = ctx.reporter
     target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
     if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths)
+        return result_for_missing(COMMAND, args, missing_paths, ctx)
 
     from sunpack.cli.runtime_state import runtime_host
 
@@ -89,7 +89,7 @@ async def handle(args, ctx):
         )
         clipboard_passwords = collect_clipboard_passwords(config)
     except Exception as exc:
-        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
+        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[ctx.t("cli.operation_failed", error=exc)])
 
     common_root = resolve_common_root(target_paths)
     config.setdefault("output", {})["common_root"] = common_root
@@ -99,7 +99,7 @@ async def handle(args, ctx):
     else:
         reporter.info(ctx.t("cli.extract.target_paths", count=len(target_paths)))
         for path in target_paths:
-            reporter.detail(f"  - {path}")
+            reporter.detail(ctx.t("cli.detail_item_path", path=path))
     reporter.detail(ctx.t("cli.extract.common_root", root=common_root))
 
     attempts = []

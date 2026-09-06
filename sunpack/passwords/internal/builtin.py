@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from sunpack.config.cli_settings import load_cli_language_from_config
+from sunpack.i18n import I18nContext
 from sunpack.support.resource_lifecycle import open_service_file, read_task_text, write_task_text
 
 from sunpack.passwords.internal.lists import dedupe_passwords, read_password_file
@@ -60,7 +62,8 @@ def _ensure_builtin_password_file(path: Path) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open_service_file(path, "w", encoding="utf-8") as handle:
-            handle.write("# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。\n")
+            i18n = I18nContext(load_cli_language_from_config())
+            handle.write(i18n.t("passwords.builtin_file_header") + "\n")
             for password in DEFAULT_BUILTIN_PASSWORDS:
                 handle.write(password + "\n")
     except Exception:

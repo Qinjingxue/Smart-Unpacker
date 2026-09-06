@@ -13,6 +13,8 @@ LAUNCHER_SOURCE = REPO_ROOT / "native" / "sevenzip_bridge" / "src" / "launcher.c
 LAUNCHER_LITERALS = {
     "cli.press_enter": ("kPressEnterEn", "kPressEnterZh"),
     "cli.persistent_start_timeout": ("kPersistentTimeoutEn", "kPersistentTimeoutZh"),
+    "cli.native_runtime_launch_failed": ("kRuntimeLaunchFailedEn", "kRuntimeLaunchFailedZh"),
+    "cli.native_runtime_exited": ("kRuntimeExitedEn", "kRuntimeExitedZh"),
 }
 
 
@@ -35,3 +37,10 @@ def test_launcher_no_longer_prints_hardcoded_messages():
     source = LAUNCHER_SOURCE.read_text(encoding="utf-8")
     assert 'write_stream(STD_OUTPUT_HANDLE, "Press Enter to continue...")' not in source
     assert 'write_stream(STD_ERROR_HANDLE, "SunPack persistent process did not start in time.\\n")' not in source
+
+
+def test_user_facing_product_labels_use_sunpack_name():
+    assert CATALOG["en"]["cli.description"] == "sunpack command line interface."
+    assert CATALOG["zh"]["cli.description"] == "sunpack 命令行界面。"
+    assert CATALOG["en"]["tray.tip"] == "sunpack"
+    assert CATALOG["zh"]["tray.tip"] == "sunpack"

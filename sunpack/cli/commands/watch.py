@@ -70,7 +70,7 @@ async def handle(args, ctx):
         if action == "startup":
             return _handle_startup(args)
     except Exception as exc:
-        return EXIT_TASK_FAILED, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
+        return EXIT_TASK_FAILED, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.operation_failed", error=exc)])
     return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.watch.unknown_action", action=action)])
 
 

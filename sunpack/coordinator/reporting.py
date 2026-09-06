@@ -336,7 +336,7 @@ class RunReporter:
         relation = self.i18n.t("report.relation.from", parent=parent) if parent else ""
         detail = str(row.get("detail") or "")
         if detail and (self.verbose or state == "error"):
-            detail = f"：{detail}"
+            detail = self.i18n.t("report.detail.error", error=detail)
         else:
             detail = ""
         fixed = f"{prefix}[{plain_label}] [{bar}] {percent:3d}%  "

@@ -35,7 +35,7 @@ def handle(args, ctx):
             clipboard_passwords=clipboard_passwords,
         )
     except Exception as exc:
-        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
+        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.operation_failed", error=exc)])
 
     if not args.json:
         reporter.info(ctx.t("cli.passwords.summary"))

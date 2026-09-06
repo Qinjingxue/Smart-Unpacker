@@ -7,6 +7,8 @@ from sunpack.cli.cli_types import CliCommandResult, CliPasswordSummary
 from sunpack.config.loader import apply_config_overrides
 from sunpack.config.schema import normalize_config_value
 from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
+from sunpack.config.cli_settings import load_cli_language_from_config
+from sunpack.i18n import I18nContext
 from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
 from sunpack.passwords.internal.clipboard import read_clipboard_passwords
 
@@ -84,9 +86,12 @@ def resolve_common_root(paths: list[str]) -> str:
 
 def collect_cli_passwords(
     args,
-    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
-    input_prompt: str = "password> ",
+    prompt_text: str | None = None,
+    input_prompt: str | None = None,
 ) -> list[str]:
+    i18n = I18nContext(load_cli_language_from_config())
+    prompt_text = prompt_text or i18n.t("cli.password_prompt")
+    input_prompt = input_prompt or i18n.t("cli.password_input_prompt")
     passwords = list(getattr(args, "password", []) or [])
     if getattr(args, "password_file", None):
         passwords.extend(read_password_file(args.password_file))
@@ -103,9 +108,12 @@ def collect_clipboard_passwords(config: dict | None) -> list[str]:
 
 
 def prompt_for_passwords(
-    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
-    input_prompt: str = "password> ",
+    prompt_text: str | None = None,
+    input_prompt: str | None = None,
 ) -> list[str]:
+    i18n = I18nContext(load_cli_language_from_config())
+    prompt_text = prompt_text or i18n.t("cli.password_prompt")
+    input_prompt = input_prompt or i18n.t("cli.password_input_prompt")
     passwords = []
     print(prompt_text, flush=True)
     while True:
@@ -124,9 +132,11 @@ def prompt_for_passwords(
 
 async def prompt_for_passwords_async(
     ctx,
-    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
-    input_prompt: str = "password> ",
+    prompt_text: str | None = None,
+    input_prompt: str | None = None,
 ) -> list[str]:
+    prompt_text = prompt_text or ctx.t("cli.password_prompt")
+    input_prompt = input_prompt or ctx.t("cli.password_input_prompt")
     passwords = []
     print(prompt_text, file=ctx.stdout, flush=True)
     while True:
@@ -140,9 +150,11 @@ async def prompt_for_passwords_async(
 async def collect_cli_passwords_async(
     args,
     ctx,
-    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
-    input_prompt: str = "password> ",
+    prompt_text: str | None = None,
+    input_prompt: str | None = None,
 ) -> list[str]:
+    prompt_text = prompt_text or ctx.t("cli.password_prompt")
+    input_prompt = input_prompt or ctx.t("cli.password_input_prompt")
     passwords = list(getattr(args, "password", []) or [])
     if getattr(args, "password_file", None):
         password_file = str(args.password_file)
@@ -220,8 +232,8 @@ def apply_runtime_config_overrides(config: dict, args, *, base_dir: str | None =
     return overrides
 
 
-def result_for_missing(command: str, args, missing_paths: list[str]) -> tuple[int, CliCommandResult]:
-    errors = [f"Target not found: {path}" for path in missing_paths]
+def result_for_missing(command: str, args, missing_paths: list[str], ctx) -> tuple[int, CliCommandResult]:
+    errors = [ctx.t("cli.target_not_found", path=path) for path in missing_paths]
     return EXIT_USAGE, CliCommandResult(
         command=command,
         inputs={"paths": list(getattr(args, "paths", []) or [])},

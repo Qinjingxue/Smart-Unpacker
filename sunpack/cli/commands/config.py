@@ -40,13 +40,14 @@ def handle(args, ctx):
         elif args.config_action == "validate":
             item = validate_config_payload(payload)
             if not item["ok"]:
-                for error in item["errors"]:
-                    reporter.error(ctx.t("cli.config.validation_error", error=error))
+                localized_errors = [ctx.t("cli.config.validation_error", error=error) for error in item["errors"]]
+                for error in localized_errors:
+                    reporter.error(error)
                 return EXIT_USAGE, CliCommandResult(
                     command=COMMAND,
                     inputs={"action": args.config_action},
                     summary={"config_path": str(config_path), "changed": False, "valid": False},
-                    errors=list(item["errors"]),
+                    errors=localized_errors,
                     items=[item],
                 )
             reporter.info(ctx.t("cli.config.valid_config"))
@@ -58,7 +59,7 @@ def handle(args, ctx):
                 errors=[ctx.t("cli.config.unknown_config_command", action=args.config_action)],
             )
     except Exception as exc:
-        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
+        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.operation_failed", error=exc)])
 
     return 0, CliCommandResult(
         command=COMMAND,

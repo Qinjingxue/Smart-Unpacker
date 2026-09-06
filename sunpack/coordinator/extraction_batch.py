@@ -1574,9 +1574,9 @@ class ExtractionBatchRunner:
             completeness=getattr(verification, "completeness", ""),
             integrity=getattr(verification, "assessment_status", ""),
             decision=getattr(verification, "decision_hint", ""),
-        ) + (
-            f", coverage={getattr(getattr(verification, 'archive_coverage', None), 'completeness', '')}, "
-            f"attempts={outcome.attempts}, steps={steps}"
+            coverage=getattr(getattr(verification, "archive_coverage", None), "completeness", ""),
+            attempts=outcome.attempts,
+            steps=steps,
         )
 
 

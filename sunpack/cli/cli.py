@@ -213,7 +213,7 @@ async def async_main(
             command=getattr(args, "command", ""),
             inputs={"argv": argv},
             summary={},
-            errors=[str(exc)],
+            errors=[ctx.t("cli.runtime_failure", error=exc)],
         )
         reporter.emit_result(result)
         await maybe_pause(args, ctx, EXIT_RUNTIME, result)

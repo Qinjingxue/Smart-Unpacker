@@ -512,14 +512,32 @@ void write_stream(DWORD handle_id, const std::string& text) {
 }
 
 // Localized strings printed directly by this launcher. Keep in sync with the
-// sunpack/i18n/catalog.py keys cli.press_enter and cli.persistent_start_timeout.
+// sunpack/i18n/catalog.py keys cli.press_enter, cli.persistent_start_timeout,
+// cli.native_runtime_launch_failed, and cli.native_runtime_exited.
 constexpr wchar_t kPressEnterEn[] = L"Press Enter to continue...";
 constexpr wchar_t kPressEnterZh[] = L"按回车键继续...";
 constexpr wchar_t kPersistentTimeoutEn[] = L"SunPack persistent process did not start in time.";
 constexpr wchar_t kPersistentTimeoutZh[] = L"SunPack 持久进程未能及时启动。";
+constexpr wchar_t kRuntimeLaunchFailedEn[] = L"sunpack runtime failed to launch (Win32 error {error}).";
+constexpr wchar_t kRuntimeLaunchFailedZh[] = L"sunpack 运行时启动失败（Win32 错误 {error}）。";
+constexpr wchar_t kRuntimeExitedEn[] = L"sunpack runtime exited before becoming ready, exit code {code}.";
+constexpr wchar_t kRuntimeExitedZh[] = L"sunpack 运行时尚未就绪便已退出，退出码为 {code}。";
 
 std::string localized(const std::string& language, const wchar_t* english, const wchar_t* chinese) {
     return utf8(language == "zh" ? chinese : english);
+}
+
+std::string localized_value(
+    const std::string& language,
+    const wchar_t* english,
+    const wchar_t* chinese,
+    const std::string& placeholder,
+    const std::string& value
+) {
+    std::string text = localized(language, english, chinese);
+    const std::size_t offset = text.find(placeholder);
+    if (offset != std::string::npos) text.replace(offset, placeholder.size(), value);
+    return text;
 }
 
 }  // namespace
@@ -547,6 +565,7 @@ int wmain(int argc, wchar_t** argv) {
     int code = 1;
     bool ok = request(context, request_arguments, shutdown, code, invocation_cwd);
     if (!ok && !shutdown) {
+        const std::string language = cli_language_from_config(launcher_cwd, invocation_cwd);
         DWORD spawn_error = ERROR_SUCCESS;
         HANDLE runtime_process = nullptr;
         DWORD runtime_exit_code = STILL_ACTIVE;
@@ -563,13 +582,26 @@ int wmain(int argc, wchar_t** argv) {
             }
             if (runtime_process != nullptr) CloseHandle(runtime_process);
         } else {
-            std::string startup_error = "SunPack runtime failed to launch (Win32 error "
-                                         + std::to_string(static_cast<unsigned long>(spawn_error)) + ").\n";
+            std::string startup_error = localized_value(
+                language,
+                kRuntimeLaunchFailedEn,
+                kRuntimeLaunchFailedZh,
+                "{error}",
+                std::to_string(static_cast<unsigned long>(spawn_error))
+            ) + "\n";
             write_stream(STD_ERROR_HANDLE, startup_error);
         }
         if (runtime_failed) {
-            write_stream(STD_ERROR_HANDLE, "SunPack runtime exited before becoming ready, exit code "
-                                               + std::to_string(static_cast<unsigned long>(runtime_exit_code)) + ".\n");
+            write_stream(
+                STD_ERROR_HANDLE,
+                localized_value(
+                    language,
+                    kRuntimeExitedEn,
+                    kRuntimeExitedZh,
+                    "{code}",
+                    std::to_string(static_cast<unsigned long>(runtime_exit_code))
+                ) + "\n"
+            );
         }
     }
     if (!ok && shutdown) code = 0;

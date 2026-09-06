@@ -621,7 +621,7 @@ def test_partial_result_is_rejected_and_probe_output_is_discarded(tmp_path, monk
     assert result.processed == 1
     assert result.succeeded == 0
     assert result.failed == 1
-    assert result.errors == ["watch extraction rejected partial content"]
+    assert result.errors == ["Watch extraction rejected partial content"]
     assert not (tmp_path / "out" / "sample" / "recovered.bin").exists()
     probe_root = tmp_path / ".sunpack_watch_probes"
     assert probe_root.is_dir()
@@ -2114,7 +2114,7 @@ def test_nested_password_failure_notifies_but_keeps_password_blocker(tmp_path, m
     archive_path.write_bytes(b"PK\x03\x04payload")
     notifications = CapturingNotificationSink()
     watcher = WatchScheduler(
-        {"watch": {"clipboard_monitor_enabled": False}},
+        {"cli": {"language": "zh"}, "watch": {"clipboard_monitor_enabled": False}},
         [str(watch_root)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
@@ -2136,7 +2136,7 @@ def test_nested_password_failure_notifies_but_keeps_password_blocker(tmp_path, m
         "scope": "nested_archive",
         "reason": "password",
     }
-    assert failed_event[2][0].startswith("嵌套压缩包内层密码错误：")
+    assert failed_event[2][0].startswith("内层压缩包密码错误：")
     assert not any(event[0] == "suppressed" for event in notifications.events)
 
 
@@ -2175,7 +2175,7 @@ def test_nested_missing_volume_notifies_without_missing_volume_blocker(tmp_path,
     failed_event = next(event for event in notifications.events if event[0] == "failed")
     assert result.failed == 1
     assert not watcher.state.entries
-    assert failed_event[2][0].startswith("嵌套压缩包内层分卷缺失：")
+    assert failed_event[2][0].startswith("Nested archive missing volume:")
     assert failed_event[3][0]["details"] == {
         "scope": "nested_archive",
         "reason": "missing_volume",

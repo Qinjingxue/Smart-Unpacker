@@ -30,7 +30,7 @@ def handle(args, ctx):
     reporter = ctx.reporter
     target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
     if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths)
+        return result_for_missing(COMMAND, args, missing_paths, ctx)
 
     config = load_request_config(ctx.cwd)
     orchestrator = ScanOrchestrator(config, DetectionOptions(deep_scan=bool(args.deep_detect)))

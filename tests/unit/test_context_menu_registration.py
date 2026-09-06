@@ -32,6 +32,7 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         encoding="utf-8-sig",
     )
     commands = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert commands["menu_text"] == "sunpack"
 
     for key in ("folder_prompt", "background_prompt"):
         expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")

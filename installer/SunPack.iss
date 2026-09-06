@@ -51,11 +51,44 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+
+[CustomMessages]
+english.TaskAddToPath=Add sunpack to the current user's PATH
+english.TaskContextMenu=Register the sunpack folder context menu
+english.TaskAutostart=Start sunpack Watch when Windows starts
+english.GroupShellIntegration=Shell integration:
+english.GroupBackgroundWatch=Background watch:
+english.WatchBrokerDisplayName=sunpack Watch Broker
+english.WatchBrokerDescription=Provides minimal privileged NTFS USN journal reads while sunpack Watch is running.
+english.BrokerExecutableMissing=Packaged Watch Broker executable is missing: %s
+english.BrokerCreateFailed=Failed to create %s (sc.exe exit code %d).
+english.BrokerSidTypeFailed=Failed to set the service SID type (sc.exe exit code %d).
+english.BrokerSecurityFailed=Failed to secure the Watch Broker service (sc.exe exit code %d).
+english.PrepareRuntimeRunning=sunpack runtime processes are still running. Please stop them and run the installer again.
+english.PrepareBrokerRemoveFailed=The existing sunpack Watch Broker service could not be removed. Restart Windows and run the installer again.
+english.PrepareOldFilesRemoveFailed=Some old sunpack files could not be removed. Close sunpack and run the installer again.
+english.UninstallStopFailed=sunpack runtime processes or the Watch Broker service could not be stopped. Please restart Windows and run the uninstaller again.
+chinesesimplified.TaskAddToPath=将 sunpack 添加到当前用户的 PATH
+chinesesimplified.TaskContextMenu=注册 sunpack 文件夹右键菜单
+chinesesimplified.TaskAutostart=Windows 启动时运行 sunpack 监控
+chinesesimplified.GroupShellIntegration=资源管理器集成：
+chinesesimplified.GroupBackgroundWatch=后台监控：
+chinesesimplified.WatchBrokerDisplayName=sunpack 监控代理服务
+chinesesimplified.WatchBrokerDescription=在 sunpack 监控运行期间，以最小权限读取 NTFS USN 日志。
+chinesesimplified.BrokerExecutableMissing=安装包中缺少 Watch Broker 可执行文件：%s
+chinesesimplified.BrokerCreateFailed=无法创建 %s（sc.exe 退出码 %d）。
+chinesesimplified.BrokerSidTypeFailed=无法设置服务 SID 类型（sc.exe 退出码 %d）。
+chinesesimplified.BrokerSecurityFailed=无法设置 Watch Broker 服务权限（sc.exe 退出码 %d）。
+chinesesimplified.PrepareRuntimeRunning=sunpack 运行时进程仍在运行。请先停止这些进程，然后重新运行安装程序。
+chinesesimplified.PrepareBrokerRemoveFailed=无法删除现有 sunpack Watch Broker 服务。请重启 Windows，然后重新运行安装程序。
+chinesesimplified.PrepareOldFilesRemoveFailed=无法删除部分旧版 sunpack 文件。请关闭 sunpack，然后重新运行安装程序。
+chinesesimplified.UninstallStopFailed=无法停止 sunpack 运行时进程或 Watch Broker 服务。请重启 Windows，然后重新运行卸载程序。
 
 [Tasks]
-Name: "addtopath"; Description: "Add SunPack to the current user's PATH"; GroupDescription: "Shell integration:"
-Name: "contextmenu"; Description: "Register the SunPack folder context menu"; GroupDescription: "Shell integration:"
-Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"; Flags: unchecked
+Name: "addtopath"; Description: "{cm:TaskAddToPath}"; GroupDescription: "{cm:GroupShellIntegration}"
+Name: "contextmenu"; Description: "{cm:TaskContextMenu}"; GroupDescription: "{cm:GroupShellIntegration}"
+Name: "autostart"; Description: "{cm:TaskAutostart}"; GroupDescription: "{cm:GroupBackgroundWatch}"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt,builtin_passwords.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -160,7 +193,7 @@ var
 begin
   BrokerPath := ExpandConstant('{app}\service\sunpack-watch-broker.exe');
   if not FileExists(BrokerPath) then
-    RaiseException('Packaged Watch Broker executable is missing: ' + BrokerPath);
+    RaiseException(Format(CustomMessage('BrokerExecutableMissing'), [BrokerPath]));
   { sc.exe must receive literal quote characters as part of binPath. The
     outer AddQuotes groups the argument; the backslash-escaped inner quotes
     are persisted in the SCM ImagePath value. }
@@ -168,16 +201,16 @@ begin
   Parameters :=
     'create ' + WatchBrokerServiceName +
     ' binPath= ' + AddQuotes(QuotedImagePath) +
-    ' type= own start= demand obj= LocalSystem DisplayName= ' + AddQuotes('SunPack Watch Broker');
+    ' type= own start= demand obj= LocalSystem DisplayName= ' + AddQuotes(CustomMessage('WatchBrokerDisplayName'));
   if (not RunServiceControl(Parameters, ResultCode)) or (ResultCode <> 0) then
-    RaiseException(Format('Failed to create %s (sc.exe exit code %d).', [WatchBrokerServiceName, ResultCode]));
+    RaiseException(Format(CustomMessage('BrokerCreateFailed'), [WatchBrokerServiceName, ResultCode]));
   if (not RunServiceControl('sidtype ' + WatchBrokerServiceName + ' unrestricted', ResultCode)) or (ResultCode <> 0) then
-    RollBackBrokerInstallAndRaise(Format('Failed to set the service SID type (sc.exe exit code %d).', [ResultCode]));
+    RollBackBrokerInstallAndRaise(Format(CustomMessage('BrokerSidTypeFailed'), [ResultCode]));
   if (not RunServiceControl('sdset ' + WatchBrokerServiceName + ' ' + WatchBrokerServiceSddl, ResultCode)) or (ResultCode <> 0) then
-    RollBackBrokerInstallAndRaise(Format('Failed to secure the Watch Broker service (sc.exe exit code %d).', [ResultCode]));
+    RollBackBrokerInstallAndRaise(Format(CustomMessage('BrokerSecurityFailed'), [ResultCode]));
   RunServiceControl(
     'description ' + WatchBrokerServiceName + ' ' +
-    AddQuotes('Provides minimal privileged NTFS USN journal reads while SunPack Watch is running.'),
+    AddQuotes(CustomMessage('WatchBrokerDescription')),
     ResultCode
   );
 end;
@@ -443,12 +476,12 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   if not StopExistingProcessesAndWait then
   begin
-    Result := 'SunPack runtime processes are still running. Please stop them and run the installer again.';
+    Result := CustomMessage('PrepareRuntimeRunning');
     Exit;
   end;
   if not StopAndDeleteBrokerService then
   begin
-    Result := 'The existing SunPack Watch Broker service could not be removed. Restart Windows and run the installer again.';
+    Result := CustomMessage('PrepareBrokerRemoveFailed');
     Exit;
   end;
   RunContextMenuScript(False);
@@ -456,7 +489,7 @@ begin
   RemoveUserPath;
   if not ClearInstallDirectory then
   begin
-    Result := 'Some old SunPack files could not be removed. Close SunPack and run the installer again.';
+    Result := CustomMessage('PrepareOldFilesRemoveFailed');
     Exit;
   end;
   Result := '';
@@ -469,7 +502,7 @@ begin
   if Result then
     Result := StopAndDeleteBrokerService;
   if not Result then
-    MsgBox('SunPack runtime processes or the Watch Broker service could not be stopped. Please restart Windows and run the uninstaller again.', mbError, MB_OK);
+    MsgBox(CustomMessage('UninstallStopFailed'), mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

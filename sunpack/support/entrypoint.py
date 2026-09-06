@@ -14,7 +14,11 @@ def main() -> int:
     try:
         public_argv = consume_runtime_id(sys.argv[1:])
     except ValueError as exc:
-        print(f"SunPack startup failed: {exc}", file=sys.stderr, flush=True)
+        from sunpack.config.cli_settings import load_cli_language_from_config
+        from sunpack.i18n import I18nContext
+
+        i18n = I18nContext(load_cli_language_from_config())
+        print(i18n.t("cli.startup_failed", error=exc), file=sys.stderr, flush=True)
         return 2
     # Existing CLI and GUI entry points read sys.argv directly. Remove the
     # process-local private bootstrap arguments before either is entered.
