@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ffi::{c_void, OsString};
 use std::io;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,7 +46,6 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 const PIPE_BUFFER_BYTES: u32 = 4096;
 const MAX_CONNECTED_CLIENTS: u32 = 64;
 const CLIENT_CONNECT_TIMEOUT_MS: u32 = 5_000;
-const ACCEPT_POLL_MS: u32 = 250;
 const LAST_CLIENT_DEBOUNCE: Duration = Duration::from_secs(1);
 const MAX_VOLUME_CONTEXTS: usize = 64;
 const VOLUME_CONTEXT_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -144,16 +143,18 @@ fn serve_watch_lifetimes(stop_event: HANDLE) -> io::Result<()> {
     let journals = Arc::new(JournalDispatcher::default());
     let active_leases = Arc::new(AtomicUsize::new(0));
     let connected_clients = Arc::new(AtomicUsize::new(0));
+    let ever_had_lease = Arc::new(AtomicBool::new(false));
+    let state_changed = OwnedHandle::auto_reset_event()?;
     let mut workers = Vec::new();
     let mut first_instance = true;
-    let mut had_lease = false;
     let mut idle_since = None;
+    let mut pending_accept: Option<PendingPipeAccept> = None;
     loop {
         workers.retain(|worker: &thread::JoinHandle<()>| !worker.is_finished());
         let leases = active_leases.load(Ordering::Acquire);
         let clients = connected_clients.load(Ordering::Acquire);
+        let had_lease = ever_had_lease.load(Ordering::Acquire);
         if leases > 0 {
-            had_lease = true;
             idle_since = None;
         } else if had_lease && clients == 0 {
             let since = idle_since.get_or_insert_with(Instant::now);
@@ -167,36 +168,91 @@ fn serve_watch_lifetimes(stop_event: HANDLE) -> io::Result<()> {
             break;
         }
 
-        if clients >= MAX_CONNECTED_CLIENTS as usize {
-            match unsafe { WaitForSingleObject(stop_event, ACCEPT_POLL_MS) } {
-                WAIT_OBJECT_0 => break,
-                WAIT_FAILED => return Err(io::Error::last_os_error()),
-                _ => continue,
-            }
+        if clients < MAX_CONNECTED_CLIENTS as usize && pending_accept.is_none() {
+            pending_accept = Some(PendingPipeAccept::start(first_instance)?);
+        }
+        if pending_accept
+            .as_ref()
+            .is_some_and(PendingPipeAccept::completed_synchronously)
+        {
+            let pipe = pending_accept.take().unwrap().finish()?;
+            first_instance = false;
+            connected_clients.fetch_add(1, Ordering::AcqRel);
+            let worker_journals = Arc::clone(&journals);
+            let worker_leases = Arc::clone(&active_leases);
+            let worker_clients = Arc::clone(&connected_clients);
+            let worker_ever_had_lease = Arc::clone(&ever_had_lease);
+            let worker_stop_event = stop_event as isize;
+            let worker_state_changed = state_changed.raw() as isize;
+            workers.push(thread::spawn(move || {
+                let _ = serve_client(
+                    pipe,
+                    worker_stop_event as HANDLE,
+                    worker_state_changed as HANDLE,
+                    worker_journals,
+                    &worker_leases,
+                    &worker_ever_had_lease,
+                );
+                worker_clients.fetch_sub(1, Ordering::AcqRel);
+                unsafe { SetEvent(worker_state_changed as HANDLE) };
+            }));
+            continue;
         }
 
-        let pipe = create_pipe(first_instance)?;
-        match connect_overlapped(pipe.raw(), stop_event, ACCEPT_POLL_MS)? {
-            WaitResult::Stopped => break,
-            WaitResult::TimedOut => continue,
-            WaitResult::Completed => {}
+        let idle_deadline = if clients != 0 || leases != 0 {
+            None
+        } else if had_lease {
+            idle_since.map(|since| since + LAST_CLIENT_DEBOUNCE)
+        } else {
+            Some(started + Duration::from_millis(CLIENT_CONNECT_TIMEOUT_MS as u64))
+        };
+        let timeout_ms = deadline_timeout_ms(idle_deadline);
+        let wait = if let Some(accept) = pending_accept.as_ref() {
+            let handles = [stop_event, accept.event(), state_changed.raw()];
+            unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, timeout_ms) }
+        } else {
+            let handles = [stop_event, state_changed.raw()];
+            unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, timeout_ms) }
+        };
+        if wait == WAIT_OBJECT_0 {
+            break;
         }
-        first_instance = false;
-        connected_clients.fetch_add(1, Ordering::AcqRel);
-        let worker_journals = Arc::clone(&journals);
-        let worker_leases = Arc::clone(&active_leases);
-        let worker_clients = Arc::clone(&connected_clients);
-        let worker_stop_event = stop_event as isize;
-        workers.push(thread::spawn(move || {
-            let _ = serve_client(
-                pipe,
-                worker_stop_event as HANDLE,
-                worker_journals,
-                &worker_leases,
-            );
-            worker_clients.fetch_sub(1, Ordering::AcqRel);
-        }));
+        if wait == WAIT_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        if wait == WAIT_TIMEOUT {
+            continue;
+        }
+        if pending_accept.is_some() && wait == WAIT_OBJECT_0 + 1 {
+            let pipe = pending_accept.take().unwrap().finish()?;
+            first_instance = false;
+            connected_clients.fetch_add(1, Ordering::AcqRel);
+            let worker_journals = Arc::clone(&journals);
+            let worker_leases = Arc::clone(&active_leases);
+            let worker_clients = Arc::clone(&connected_clients);
+            let worker_ever_had_lease = Arc::clone(&ever_had_lease);
+            let worker_stop_event = stop_event as isize;
+            let worker_state_changed = state_changed.raw() as isize;
+            workers.push(thread::spawn(move || {
+                let _ = serve_client(
+                    pipe,
+                    worker_stop_event as HANDLE,
+                    worker_state_changed as HANDLE,
+                    worker_journals,
+                    &worker_leases,
+                    &worker_ever_had_lease,
+                );
+                worker_clients.fetch_sub(1, Ordering::AcqRel);
+                unsafe { SetEvent(worker_state_changed as HANDLE) };
+            }));
+            continue;
+        }
+        let state_index = if pending_accept.is_some() { 2 } else { 1 };
+        if wait != WAIT_OBJECT_0 + state_index {
+            return Err(io::Error::last_os_error());
+        }
     }
+    drop(pending_accept);
     for worker in workers {
         let _ = worker.join();
     }
@@ -206,10 +262,12 @@ fn serve_watch_lifetimes(stop_event: HANDLE) -> io::Result<()> {
 fn serve_client(
     pipe: OwnedHandle,
     stop_event: HANDLE,
+    state_changed: HANDLE,
     journals: Arc<JournalDispatcher>,
     active_leases: &AtomicUsize,
+    ever_had_lease: &AtomicBool,
 ) -> io::Result<()> {
-    let mut lease = LeaseGuard::new(active_leases);
+    let mut lease = LeaseGuard::new(active_leases, ever_had_lease, state_changed);
     loop {
         let mut request_bytes = [0u8; REQUEST_BYTES];
         let read_timeout = if lease.active {
@@ -301,21 +359,31 @@ fn request_shape_is_valid(request: &Request) -> bool {
 
 struct LeaseGuard<'a> {
     counter: &'a AtomicUsize,
+    ever_had_lease: &'a AtomicBool,
+    state_changed: HANDLE,
     active: bool,
 }
 
 impl<'a> LeaseGuard<'a> {
-    fn new(counter: &'a AtomicUsize) -> Self {
+    fn new(
+        counter: &'a AtomicUsize,
+        ever_had_lease: &'a AtomicBool,
+        state_changed: HANDLE,
+    ) -> Self {
         Self {
             counter,
+            ever_had_lease,
+            state_changed,
             active: false,
         }
     }
 
     fn acquire(&mut self) {
         if !self.active {
+            self.ever_had_lease.store(true, Ordering::Release);
             self.counter.fetch_add(1, Ordering::AcqRel);
             self.active = true;
+            unsafe { SetEvent(self.state_changed) };
         }
     }
 }
@@ -324,6 +392,7 @@ impl Drop for LeaseGuard<'_> {
     fn drop(&mut self) {
         if self.active {
             self.counter.fetch_sub(1, Ordering::AcqRel);
+            unsafe { SetEvent(self.state_changed) };
         }
     }
 }
@@ -473,23 +542,100 @@ enum IoResult {
     TimedOut,
 }
 
-fn connect_overlapped(pipe: HANDLE, stop_event: HANDLE, timeout_ms: u32) -> io::Result<WaitResult> {
-    let event = OwnedHandle::event()?;
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    overlapped.hEvent = event.raw();
-    let connected = unsafe { ConnectNamedPipe(pipe, &mut overlapped) };
-    if connected != 0 {
-        return Ok(WaitResult::Completed);
+struct PendingPipeAccept {
+    pipe: Option<OwnedHandle>,
+    event: OwnedHandle,
+    overlapped: Box<OVERLAPPED>,
+    pending: bool,
+}
+
+impl PendingPipeAccept {
+    fn start(first_instance: bool) -> io::Result<Self> {
+        let pipe = create_pipe(first_instance)?;
+        let event = OwnedHandle::event()?;
+        let mut overlapped = Box::new(unsafe { std::mem::zeroed::<OVERLAPPED>() });
+        overlapped.hEvent = event.raw();
+        let connected = unsafe { ConnectNamedPipe(pipe.raw(), overlapped.as_mut()) };
+        let pending = if connected != 0 {
+            false
+        } else {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_PIPE_CONNECTED {
+                false
+            } else if error == ERROR_IO_PENDING {
+                true
+            } else {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+        };
+        Ok(Self {
+            pipe: Some(pipe),
+            event,
+            overlapped,
+            pending,
+        })
     }
-    let error = unsafe { GetLastError() };
-    if error == ERROR_PIPE_CONNECTED {
-        return Ok(WaitResult::Completed);
+
+    fn completed_synchronously(&self) -> bool {
+        !self.pending
     }
-    if error != ERROR_IO_PENDING {
-        return Err(io::Error::from_raw_os_error(error as i32));
+
+    fn event(&self) -> HANDLE {
+        self.event.raw()
     }
-    let result = wait_io(pipe, stop_event, event.raw(), &mut overlapped, timeout_ms)?;
-    Ok(result.0)
+
+    fn finish(mut self) -> io::Result<OwnedHandle> {
+        if self.pending {
+            let mut transferred = 0u32;
+            if unsafe {
+                GetOverlappedResult(
+                    self.pipe.as_ref().unwrap().raw(),
+                    self.overlapped.as_mut(),
+                    &mut transferred,
+                    0,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.pending = false;
+        }
+        Ok(self.pipe.take().unwrap())
+    }
+
+    fn cancel(&mut self) {
+        if !self.pending {
+            return;
+        }
+        let pipe = self.pipe.as_ref().unwrap().raw();
+        unsafe {
+            CancelIoEx(pipe, self.overlapped.as_mut());
+            WaitForSingleObject(self.event.raw(), INFINITE);
+        }
+        let mut transferred = 0u32;
+        unsafe {
+            GetOverlappedResult(pipe, self.overlapped.as_mut(), &mut transferred, 0);
+        }
+        self.pending = false;
+    }
+}
+
+impl Drop for PendingPipeAccept {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn deadline_timeout_ms(deadline: Option<Instant>) -> u32 {
+    let Some(deadline) = deadline else {
+        return INFINITE;
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return 0;
+    }
+    let milliseconds = remaining.as_millis().saturating_add(1);
+    milliseconds.min((INFINITE - 1) as u128) as u32
 }
 
 fn read_overlapped(
@@ -603,6 +749,15 @@ unsafe impl Sync for OwnedHandle {}
 impl OwnedHandle {
     fn event() -> io::Result<Self> {
         let handle = unsafe { CreateEventW(null(), 1, 0, null()) };
+        if handle.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn auto_reset_event() -> io::Result<Self> {
+        let handle = unsafe { CreateEventW(null(), 0, 0, null()) };
         if handle.is_null() {
             Err(io::Error::last_os_error())
         } else {

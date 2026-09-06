@@ -6,7 +6,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Clone)]
 struct NativeResourceRecord {
@@ -20,6 +21,12 @@ struct NativeResourceRecord {
 struct NativeRegistry {
     resources: HashMap<u64, NativeResourceRecord>,
     promotions: HashMap<u64, Vec<PathBuf>>,
+}
+
+#[derive(Default)]
+struct NativeRegistryState {
+    registry: Mutex<NativeRegistry>,
+    changed: Condvar,
 }
 
 pub(crate) struct NativeResourceGuard {
@@ -164,6 +171,7 @@ impl NativeResourceGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let paths = paths.into_iter().map(normalized_path).collect::<Vec<_>>();
         let mut registry = registry()
+            .registry
             .lock()
             .map_err(|_| io::Error::other("native resource registry poisoned"))?;
         if registry
@@ -190,8 +198,11 @@ impl NativeResourceGuard {
     }
 
     pub(crate) fn release(&self) {
-        if let Ok(mut registry) = registry().lock() {
-            registry.resources.remove(&self.id);
+        let state = registry();
+        if let Ok(mut registry) = state.registry.lock() {
+            if registry.resources.remove(&self.id).is_some() {
+                state.changed.notify_all();
+            }
         }
     }
 }
@@ -202,9 +213,9 @@ impl Drop for NativeResourceGuard {
     }
 }
 
-fn registry() -> &'static Mutex<NativeRegistry> {
-    static REGISTRY: OnceLock<Mutex<NativeRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(NativeRegistry::default()))
+fn registry() -> &'static NativeRegistryState {
+    static REGISTRY: OnceLock<NativeRegistryState> = OnceLock::new();
+    REGISTRY.get_or_init(NativeRegistryState::default)
 }
 
 fn normalized_path(path: PathBuf) -> PathBuf {
@@ -257,7 +268,7 @@ pub(crate) fn native_begin_promotion(roots: Vec<String>) -> PyResult<u64> {
         .map(PathBuf::from)
         .map(normalized_path)
         .collect::<Vec<_>>();
-    let mut registry = registry().lock().map_err(|_| {
+    let mut registry = registry().registry.lock().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("native resource registry poisoned")
     })?;
     if registry
@@ -276,7 +287,7 @@ pub(crate) fn native_begin_promotion(roots: Vec<String>) -> PyResult<u64> {
 
 #[pyfunction]
 pub(crate) fn native_end_promotion(token: u64) -> PyResult<()> {
-    let mut registry = registry().lock().map_err(|_| {
+    let mut registry = registry().registry.lock().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("native resource registry poisoned")
     })?;
     if registry.promotions.remove(&token).is_none() {
@@ -294,16 +305,71 @@ pub(crate) fn native_resource_snapshot(py: Python<'_>, roots: Vec<String>) -> Py
         .map(PathBuf::from)
         .map(normalized_path)
         .collect::<Vec<_>>();
-    let registry = registry().lock().map_err(|_| {
+    let registry = registry().registry.lock().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("native resource registry poisoned")
     })?;
+    resource_snapshot_to_python(py, matching_resources(&registry, &roots))
+}
+
+#[pyfunction]
+pub(crate) fn native_wait_for_resources(
+    py: Python<'_>,
+    roots: Vec<String>,
+    timeout_seconds: f64,
+) -> PyResult<Py<PyList>> {
+    if !timeout_seconds.is_finite() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "native resource wait timeout must be finite",
+        ));
+    }
+    let roots = roots
+        .into_iter()
+        .map(PathBuf::from)
+        .map(normalized_path)
+        .collect::<Vec<_>>();
+    let timeout = Duration::from_secs_f64(timeout_seconds.clamp(0.0, u32::MAX as f64));
+    let records = py
+        .detach(move || {
+            let state = registry();
+            let registry = state
+                .registry
+                .lock()
+                .map_err(|_| io::Error::other("native resource registry poisoned"))?;
+            let (registry, _) = state
+                .changed
+                .wait_timeout_while(registry, timeout, |registry| {
+                    registry
+                        .resources
+                        .values()
+                        .any(|record| roots.is_empty() || overlaps(record, &roots))
+                })
+                .map_err(|_| io::Error::other("native resource registry poisoned"))?;
+            Ok::<_, io::Error>(matching_resources(&registry, &roots))
+        })
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    resource_snapshot_to_python(py, records)
+}
+
+fn matching_resources(
+    registry: &NativeRegistry,
+    roots: &[PathBuf],
+) -> Vec<(u64, NativeResourceRecord)> {
+    registry
+        .resources
+        .iter()
+        .filter(|(_, record)| roots.is_empty() || overlaps(record, roots))
+        .map(|(id, record)| (*id, record.clone()))
+        .collect()
+}
+
+fn resource_snapshot_to_python(
+    py: Python<'_>,
+    records: Vec<(u64, NativeResourceRecord)>,
+) -> PyResult<Py<PyList>> {
     let output = PyList::empty(py);
-    for (id, record) in registry.resources.iter() {
-        if !roots.is_empty() && !overlaps(record, &roots) {
-            continue;
-        }
+    for (id, record) in records {
         let item = PyDict::new(py);
-        item.set_item("resource_id", *id)?;
+        item.set_item("resource_id", id)?;
         item.set_item("kind", record.kind)?;
         item.set_item(
             "paths",
@@ -324,6 +390,7 @@ pub(crate) fn native_resource_snapshot(py: Python<'_>, roots: Vec<String>) -> Py
 pub(crate) fn snapshot_under(root: &Path) -> Vec<(u64, &'static str, Vec<PathBuf>)> {
     let root = normalized_path(root.to_path_buf());
     registry()
+        .registry
         .lock()
         .map(|registry| {
             registry

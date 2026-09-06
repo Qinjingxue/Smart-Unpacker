@@ -213,9 +213,8 @@ class PipelineEngine:
         try:
             with resource_scope.activate():
                 target_paths = [target.path for target in submission.targets]
-                while not self._path_leases.try_acquire(submission.request_id, target_paths):
-                    cancellation.raise_if_cancelled()
-                    await asyncio.sleep(0.01)
+                cancellation.raise_if_cancelled()
+                await self._path_leases.acquire(submission.request_id, target_paths)
                 runtime = self._request_runtime_factory(
                     self._services,
                     submission,
@@ -234,7 +233,7 @@ class PipelineEngine:
                 await resource_scope.aclose()
             finally:
                 self._services.output_reservations.release(submission.request_id)
-                self._path_leases.release(submission.request_id)
+                await self._path_leases.release(submission.request_id)
                 self._active_requests.pop(submission.request_id, None)
                 CURRENT_ORIGIN.reset(origin_marker)
                 self._notify_state_changed()
@@ -308,26 +307,25 @@ class PipelineEngine:
 class _PathLeaseRegistry:
     def __init__(self):
         self._owned: dict[str, set[str]] = {}
+        self._changed = asyncio.Condition()
 
-    def try_acquire(self, owner: str, paths: Iterable[str]) -> bool:
+    async def acquire(self, owner: str, paths: Iterable[str]) -> None:
         normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
-        if self._conflicts(owner, normalized):
-            return False
-        self._owned.setdefault(owner, set()).update(normalized)
-        return True
+        async with self._changed:
+            await self._changed.wait_for(lambda: not self._conflicts(owner, normalized))
+            self._owned.setdefault(owner, set()).update(normalized)
 
-    def try_replace(self, owner: str, paths: Iterable[str]) -> bool:
+    async def replace(self, owner: str, paths: Iterable[str]) -> None:
         normalized = {os.path.abspath(os.path.normpath(path)) for path in paths if path}
-        previous = self._owned.pop(owner, None)
-        if self._conflicts(owner, normalized):
-            if previous is not None:
-                self._owned[owner] = previous
-            return False
-        self._owned[owner] = normalized
-        return True
+        async with self._changed:
+            await self._changed.wait_for(lambda: not self._conflicts(owner, normalized))
+            self._owned[owner] = normalized
+            self._changed.notify_all()
 
-    def release(self, owner: str) -> None:
-        self._owned.pop(owner, None)
+    async def release(self, owner: str) -> None:
+        async with self._changed:
+            if self._owned.pop(owner, None) is not None:
+                self._changed.notify_all()
 
     def _conflicts(self, owner: str, candidates: set[str]) -> bool:
         for current_owner, current_paths in self._owned.items():
@@ -629,9 +627,8 @@ class _RequestRuntime:
                     for path in (task.all_parts or [task.main_path])
                 ]
                 lease_paths = [*all_targets, *member_paths]
-                while not self.path_leases.try_replace(request_id, lease_paths):
-                    cancellation.raise_if_cancelled()
-                    await asyncio.sleep(0.01)
+                cancellation.raise_if_cancelled()
+                await self.path_leases.replace(request_id, lease_paths)
                 self.batch_runner.set_progress_round(
                     round_index,
                     direct=submission.direct and round_index == 1,
@@ -703,8 +700,7 @@ class _RequestRuntime:
 
     async def _ensure_task_lease(self, task) -> None:
         paths = task.all_parts or [task.main_path]
-        while not self.path_leases.try_acquire(self.submission.request_id, paths):
-            await asyncio.sleep(0.01)
+        await self.path_leases.acquire(self.submission.request_id, paths)
 
     def _plan_task_isolated(self, task):
         stage = ArchiveInputPlanningStage(self.config)

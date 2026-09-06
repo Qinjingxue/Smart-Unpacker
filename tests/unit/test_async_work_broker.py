@@ -83,6 +83,43 @@ def test_broker_reports_busy_and_idle_state_changes():
     asyncio.run(scenario())
 
 
+def test_graceful_close_waits_once_for_idle_notification():
+    async def scenario():
+        broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=2)
+        started = threading.Event()
+        release = threading.Event()
+        wait_calls = 0
+        original_wait = broker._idle_event.wait
+
+        async def counted_wait():
+            nonlocal wait_calls
+            wait_calls += 1
+            await original_wait()
+
+        broker._idle_event.wait = counted_wait
+
+        def operation():
+            started.set()
+            assert release.wait(timeout=2)
+            return "done"
+
+        active = asyncio.create_task(
+            broker.run("verify", "item", operation, request_id="request")
+        )
+        await asyncio.to_thread(started.wait, 1.0)
+        closing = asyncio.create_task(broker.close())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert wait_calls == 1
+
+        release.set()
+        assert await active == "done"
+        await asyncio.wait_for(closing, timeout=1.0)
+        assert wait_calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_broker_dispatches_waiting_foreground_before_watch_without_preemption():
     async def scenario():
         broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=8)

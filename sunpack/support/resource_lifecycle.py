@@ -346,7 +346,7 @@ def lifecycle_registration(
             if remaining <= 0:
                 roots = ", ".join(item.path for item in conflict[1])
                 raise ResourceBusyError(f"resource registration blocked by promotion roots: {roots}")
-            _CHANGED.wait(min(remaining, 0.05))
+            _CHANGED.wait(remaining)
         yield identities
 
 
@@ -500,6 +500,7 @@ class TaskResourceScope:
         self._resource_ids: list[str] = []
         self._active_operations = 0
         self._active_file_operations: dict[FileIdentity, int] = {}
+        self._async_idle_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
         with _CHANGED:
             existing = _TASK_SCOPES.get(task_id)
             if existing is not None and existing.state is not ScopeState.CLOSED:
@@ -594,6 +595,7 @@ class TaskResourceScope:
             if identity_token is not None:
                 _CURRENT_FILE_IDENTITIES.reset(identity_token)
             _CURRENT_OPERATION_STACK.reset(operation_token)
+            idle_waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
             with _CHANGED:
                 self._active_operations = max(0, self._active_operations - 1)
                 for identity in identities:
@@ -602,7 +604,15 @@ class TaskResourceScope:
                         self._active_file_operations[identity] = remaining
                     else:
                         self._active_file_operations.pop(identity, None)
+                if not self._active_operations and self._async_idle_waiters:
+                    idle_waiters = tuple(self._async_idle_waiters)
+                    self._async_idle_waiters.clear()
                 _CHANGED.notify_all()
+            for loop, event in idle_waiters:
+                try:
+                    loop.call_soon_threadsafe(event.set)
+                except RuntimeError:
+                    pass
 
     def begin_promotion(self, *, timeout: float) -> None:
         deadline = time.monotonic() + max(0.0, float(timeout))
@@ -622,7 +632,7 @@ class TaskResourceScope:
                         f"task {self.task_id} still has "
                         f"{self._active_operations - own_operations} concurrent operations"
                     )
-                _CHANGED.wait(min(remaining, 0.05))
+                _CHANGED.wait(remaining)
 
     def end_promotion(self) -> None:
         with _CHANGED:
@@ -654,7 +664,7 @@ class TaskResourceScope:
                     raise ResourceBusyError(
                         f"task {self.task_id} still has {self._active_operations} active operations"
                     )
-                _CHANGED.wait(min(remaining, 0.05))
+                _CHANGED.wait(remaining)
             records = [
                 _RESOURCES[resource_id]
                 for resource_id in self._resource_ids
@@ -674,26 +684,44 @@ class TaskResourceScope:
 
     async def aclose(self, *, timeout: float = 30.0) -> ReleaseReport:
         deadline = time.monotonic() + max(0.0, float(timeout))
+        waiter: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         with _CHANGED:
             if self.state is ScopeState.CLOSED:
                 return ReleaseReport(0, 0)
             self.state = ScopeState.QUIESCING
-        while True:
-            with _CHANGED:
-                active_operations = self._active_operations
-                if not active_operations:
-                    records = [
-                        _RESOURCES[resource_id]
-                        for resource_id in self._resource_ids
-                        if resource_id in _RESOURCES
-                        and _RESOURCES[resource_id].state is not ResourceState.RELEASED
-                    ]
-                    break
-            if time.monotonic() >= deadline:
+            if self._active_operations:
+                waiter = (asyncio.get_running_loop(), asyncio.Event())
+                self._async_idle_waiters.append(waiter)
+        if waiter is not None:
+            event = waiter[1]
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                with _CHANGED:
+                    active_operations = self._active_operations
+                if active_operations:
+                    raise ResourceBusyError(
+                        f"task {self.task_id} still has {active_operations} active operations"
+                    ) from None
+            finally:
+                with _CHANGED:
+                    if waiter in self._async_idle_waiters:
+                        self._async_idle_waiters.remove(waiter)
+        with _CHANGED:
+            active_operations = self._active_operations
+            if active_operations:
                 raise ResourceBusyError(
                     f"task {self.task_id} still has {active_operations} active operations"
                 )
-            await asyncio.sleep(0)
+            records = [
+                _RESOURCES[resource_id]
+                for resource_id in self._resource_ids
+                if resource_id in _RESOURCES
+                and _RESOURCES[resource_id].state is not ResourceState.RELEASED
+            ]
         report = _release_records(records)
         with _CHANGED:
             self.state = ScopeState.CLOSED
@@ -934,7 +962,7 @@ def _wait_for_task_resources(
                     + "; active operations: "
                     + _format_active_file_operations(active_operations)
                 )
-            _CHANGED.wait(min(remaining, 0.05))
+            _CHANGED.wait(remaining)
 
 
 def _own_open_files_under(roots: Sequence[FileIdentity]) -> tuple[str, ...]:
@@ -998,16 +1026,23 @@ def _wait_for_native_resources(
     *,
     deadline: float,
 ) -> tuple[dict[str, Any], ...]:
-    while True:
-        resources = _native_resources_under(roots)
-        if not resources:
-            return ()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ResourceBusyError(
-                "promotion found live native resources: " + repr(resources)
+    try:
+        import sunpack_native
+
+        resources = tuple(
+            dict(item)
+            for item in sunpack_native.native_wait_for_resources(
+                [item.path for item in roots],
+                max(0.0, deadline - time.monotonic()),
             )
-        time.sleep(min(remaining, 0.005))
+        )
+    except Exception as exc:
+        raise ResourceLifecycleError(f"native resource wait failed: {exc}") from exc
+    if resources:
+        raise ResourceBusyError(
+            "promotion found live native resources: " + repr(resources)
+        )
+    return ()
 
 
 @contextlib.contextmanager
@@ -1045,7 +1080,7 @@ def promotion_barrier(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ResourceBusyError("timed out waiting for an overlapping promotion barrier")
-                _CHANGED.wait(min(remaining, 0.05))
+                _CHANGED.wait(remaining)
             _ACTIVE_PROMOTIONS[token] = root_identities
             _CHANGED.notify_all()
         except BaseException:

@@ -157,11 +157,17 @@ class AsyncWorkBroker:
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_thread_id: int | None = None
         self._state_changed_callback: Callable[[], None] | None = None
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
 
     def set_state_changed_callback(self, callback: Callable[[], None] | None) -> None:
         self._state_changed_callback = callback
 
     def _notify_state_changed(self) -> None:
+        if self._active or self.pending_jobs:
+            self._idle_event.clear()
+        else:
+            self._idle_event.set()
         callback = self._state_changed_callback
         if callback is not None:
             callback()
@@ -319,8 +325,8 @@ class AsyncWorkBroker:
                     self._pending_slots.release()
             self._queues.clear()
             self._request_order.clear()
-        while graceful and (self._active or self.pending_jobs):
-            await asyncio.sleep(0)
+        if graceful and (self._active or self.pending_jobs):
+            await self._idle_event.wait()
         self._executor.shutdown(wait=graceful, cancel_futures=not graceful)
 
     def _dispatch(self) -> None:

@@ -17,6 +17,7 @@ from sunpack_native import (
     native_begin_promotion,
     native_end_promotion,
     native_resource_snapshot,
+    native_wait_for_resources,
     reader_cache_stats,
     release_reader_resources_under,
 )
@@ -197,6 +198,32 @@ def test_native_registry_reports_reader_until_object_and_pool_are_released(tmp_p
     release_archive_sessions_under(os.fspath(tmp_path))
 
     assert list(native_resource_snapshot([os.fspath(tmp_path)])) == []
+
+
+def test_native_registry_wait_is_notified_when_reader_is_released(tmp_path):
+    path = tmp_path / "native-wait.bin"
+    path.write_bytes(b"payload")
+    session = NativeArchiveSession(os.fspath(path))
+    waiting = threading.Event()
+    completed = threading.Event()
+    result = []
+
+    def wait_for_release() -> None:
+        waiting.set()
+        result.extend(native_wait_for_resources([os.fspath(tmp_path)], 1.0))
+        completed.set()
+
+    worker = threading.Thread(target=wait_for_release)
+    worker.start()
+    assert waiting.wait(1.0)
+    assert not completed.wait(0.05)
+
+    session.close()
+    release_reader_resources_under(os.fspath(tmp_path))
+    worker.join(1.0)
+
+    assert completed.is_set()
+    assert result == []
 
 
 def test_reader_pool_release_closes_file_behind_retained_native_view(tmp_path):

@@ -86,7 +86,7 @@ def _close_entry(entry: _SessionEntry) -> None:
                     f"archive session {entry.key[0]} is still borrowed by tasks "
                     f"{sorted(entry.borrowers)}"
                 )
-            _CHANGED.wait(min(remaining, 0.05))
+            _CHANGED.wait(remaining)
         if entry.closed:
             return
     _native_close(entry.session)

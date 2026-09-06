@@ -64,6 +64,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        io::resource_lifecycle::native_wait_for_resources,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         io::resource_lifecycle::native_begin_promotion,
         m
     )?)?;
