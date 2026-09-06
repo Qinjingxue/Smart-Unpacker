@@ -24,8 +24,6 @@ AppVersion={#AppVersion}
 AppVerName=SunPack {#AppVersion} ({#TargetArch}, {#RepairSystem})
 AppPublisher=SunPack
 DefaultDirName={autopf}\SunPack
-DefaultGroupName=SunPack
-DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBaseFilename}
@@ -71,15 +69,14 @@ Type: filesandordirs; Name: "{localappdata}\SunPack"
 Type: filesandordirs; Name: "{commonappdata}\SunPack\Service"
 Type: dirifempty; Name: "{commonappdata}\SunPack"
 
+[InstallDelete]
+Type: files; Name: "{userprograms}\SunPack\SunPack Command Prompt.lnk"
+Type: files; Name: "{userprograms}\SunPack\Uninstall SunPack.lnk"
+Type: files; Name: "{userprograms}\SunPack\SunPack Watch Notifications.lnk"
+Type: dirifempty; Name: "{userprograms}\SunPack"
+
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
-
-[Icons]
-Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"
-Name: "{group}\Uninstall SunPack"; Filename: "{uninstallexe}"
-
-[Run]
-Filename: "{app}\sunpack-runtime.exe"; Parameters: "--register-toast"; StatusMsg: "Registering watch notifications..."; Flags: runhidden waituntilterminated
 
 [UninstallRun]
 Filename: "{app}\sunpack-runtime.exe"; Parameters: "--unregister-toast"; RunOnceId: "SunPackToast"; Flags: runhidden waituntilterminated skipifdoesntexist

@@ -39,13 +39,19 @@ def test_installer_optionally_registers_watch_autostart():
     assert "uninsdeletevalue" in script
 
 
-def test_installer_registers_and_unregisters_toast_through_main_runtime():
+def test_installer_does_not_register_start_menu_entries():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
-    assert 'Filename: "{app}\\sunpack-runtime.exe"' in script
-    assert 'Parameters: "--register-toast"' in script
+    assert "DefaultGroupName" not in script
+    assert "DisableProgramGroupPage" not in script
+    assert "[Icons]" not in script
+    assert "[Run]" not in script
+    assert 'Parameters: "--register-toast"' not in script
     assert 'Parameters: "--unregister-toast"' in script
     assert "[UninstallRun]" in script
+    assert 'Name: "{userprograms}\\SunPack\\SunPack Command Prompt.lnk"' in script
+    assert 'Name: "{userprograms}\\SunPack\\Uninstall SunPack.lnk"' in script
+    assert 'Name: "{userprograms}\\SunPack\\SunPack Watch Notifications.lnk"' in script
 
 
 def test_installer_owns_a_minimal_demand_start_watch_broker_service():

@@ -127,7 +127,7 @@ Copy-Item native\toast_host\build-x64\Release\sunpack_toast.dll tools\sunpack_to
 
 只有持续运行的 watch 创建 `ToastManager`。它在主程序内的专用线程上加载 DLL、维护 WinRT apartment 和 COM 按钮回调，并处理进度限频与完成通知 TTL；停止或重载 watch 时等待该线程释放资源。普通 CLI 请求和独立的 `watch start --once` 不创建通知管理器。watch 与 CLI 共用引擎时，通知仍仅来自 watch 调度器。
 
-发行包只携带 `tools\sunpack_toast.dll`，无需通知辅助进程。安装与卸载由 `sunpack-runtime.exe --register-toast` / `--unregister-toast` 处理通知身份；Windows 的冷激活也进入主程序的 `--toast-activated` 入口，不启动解压引擎或 watch。
+发行包只携带 `tools\sunpack_toast.dll`，无需通知辅助进程。通知身份在 watch 首次创建通知管理器时按需注册，卸载时由 `sunpack-runtime.exe --unregister-toast` 清理；Windows 的冷激活也进入主程序的 `--toast-activated` 入口，不启动解压引擎或 watch。安装器不会创建开始菜单入口。
 
 ## Smoke Checks
 
