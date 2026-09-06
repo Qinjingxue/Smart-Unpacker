@@ -29,7 +29,8 @@ function Invoke-TestStep {
         [string]$Label,
         [Parameter(Mandatory = $true)]
         [string[]]$Command,
-        [int]$TimeoutSeconds = $StepTimeoutSeconds
+        [int]$TimeoutSeconds = $StepTimeoutSeconds,
+        [switch]$QuietOutput
     )
 
     Write-Host ""
@@ -43,6 +44,13 @@ function Invoke-TestStep {
     $startTime = Get-Date
     $joinedCommand = $Command -join " "
     $junitReportPath = $null
+    $stdoutPath = $null
+    $stderrPath = $null
+
+    if ($QuietOutput) {
+        $stdoutPath = [System.IO.Path]::GetTempFileName()
+        $stderrPath = [System.IO.Path]::GetTempFileName()
+    }
 
     if ($Command.Length -ge 3 -and $Command[1] -eq "-m" -and $Command[2] -eq "pytest") {
         $junitReportPath = Join-Path ([System.IO.Path]::GetTempPath()) (
@@ -57,10 +65,17 @@ function Invoke-TestStep {
 
     $process = $null
     try {
-        $process = Start-Process -FilePath $Command[0] `
-            -ArgumentList $argsList `
-            -NoNewWindow `
-            -PassThru
+        $startProcessArgs = @{
+            FilePath = $Command[0]
+            ArgumentList = $argsList
+            NoNewWindow = $true
+            PassThru = $true
+        }
+        if ($QuietOutput) {
+            $startProcessArgs.RedirectStandardOutput = $stdoutPath
+            $startProcessArgs.RedirectStandardError = $stderrPath
+        }
+        $process = Start-Process @startProcessArgs
 
         $timeoutMs = [Math]::Max(1, $TimeoutSeconds) * 1000
         if (-not $process.WaitForExit($timeoutMs)) {
@@ -141,6 +156,11 @@ function Invoke-TestStep {
         }
         if ($junitReportPath -and (Test-Path -LiteralPath $junitReportPath)) {
             Remove-Item -LiteralPath $junitReportPath -Force
+        }
+        foreach ($outputPath in @($stdoutPath, $stderrPath)) {
+            if ($outputPath -and (Test-Path -LiteralPath $outputPath)) {
+                Remove-Item -LiteralPath $outputPath -Force
+            }
         }
     }
 }
@@ -627,11 +647,11 @@ try {
         "tests/integration", "tests/real",
         "--durations=20"
     )
-    Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
-    Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
-    Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
-    Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
-    Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py", "config", "--json", "show")
+    Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help") -QuietOutput
+    Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json") -QuietOutput
+    Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json") -QuietOutput
+    Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack.py", "inspect", (Join-Path $repoRoot "tests"), "--json") -QuietOutput
+    Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py", "config", "--json", "show") -QuietOutput
 } finally {
     if ($watchServiceInstalled) {
         Write-Host ""
