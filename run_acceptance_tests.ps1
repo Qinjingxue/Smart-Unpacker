@@ -15,6 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$unelevatedRunner = Join-Path $repoRoot "scripts\run_unelevated_process.py"
 Set-Location $repoRoot
 
 if ($ParallelWorkers -le 0) {
@@ -63,11 +64,24 @@ function Invoke-TestStep {
         Write-Host ("    " + $joinedCommand) -ForegroundColor DarkGray
     }
 
+    # The acceptance script may itself require elevation to install the temporary
+    # Watch Broker service. Always put the actual test/smoke command behind the
+    # existing token-switching helper so pytest and all of its descendants run
+    # with the interactive user's normal token.
+    $runnerArguments = @(
+        $unelevatedRunner,
+        "--cwd", $repoRoot,
+        "--timeout-seconds", [string]$TimeoutSeconds,
+        "--",
+        $Command[0]
+    )
+    $runnerArguments += $argsList
+
     $process = $null
     try {
         $startProcessArgs = @{
             FilePath = $Command[0]
-            ArgumentList = $argsList
+            ArgumentList = $runnerArguments
             NoNewWindow = $true
             PassThru = $true
         }

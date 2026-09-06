@@ -289,6 +289,15 @@ def test_acceptance_runs_watch_suites_in_current_powershell():
     assert "RequiredCompletionSuites" not in acceptance
 
 
+def test_acceptance_test_steps_run_through_unelevated_runner():
+    acceptance = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+
+    assert '$unelevatedRunner = Join-Path $repoRoot "scripts\\run_unelevated_process.py"' in acceptance
+    assert "$runnerArguments += $argsList" in acceptance
+    assert "ArgumentList = $runnerArguments" in acceptance
+    assert "run_unelevated_process.py" in acceptance
+
+
 def test_packaged_smoke_tests_shutdown_the_persistent_runtime_before_installer_test():
     build = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
 
