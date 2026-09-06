@@ -391,12 +391,13 @@ function Get-EnvironmentRefreshReasons {
         "send2trash",
         "watchdog",
         "zstandard",
-        "torch",
-        "torch_geometric",
         "numpy",
         "requests",
         "charset_normalizer"
     )
+    if ($RepairSystem -eq "full") {
+        $requiredPythonModules += @("torch", "torch_geometric")
+    }
     if (-not (Test-PythonImports -PythonPath $VenvPython -Modules $requiredPythonModules)) {
         $reasons.Add(".venv is missing or cannot import runtime, test, or model modules")
     }
@@ -413,19 +414,12 @@ function Get-EnvironmentRefreshReasons {
         $reasons.Add("sunpack_native is missing new native repair APIs")
     }
 
-    $nativeOrigin = Get-ModuleOrigin -PythonPath $VenvPython -ModuleName "sunpack_native"
-    if (-not $nativeOrigin -or -not (Test-Path -LiteralPath $nativeOrigin)) {
+    $nativeExtension = Get-NativeExtensionPath -PythonPath $VenvPython
+    if (-not $nativeExtension) {
         $reasons.Add("sunpack_native is not importable from .venv")
-    } else {
-        $nativeSourceRoot = Join-Path $RepoRoot "native"
-        $nativeSourceNewest = Get-NewestSourceWriteTime -Root $nativeSourceRoot -Include @("*.rs", "Cargo.toml", "Cargo.lock")
-        $nativeInstalledTime = (Get-Item -LiteralPath $nativeOrigin).LastWriteTimeUtc
-        if ($nativeInstalledTime -lt $nativeSourceNewest) {
-            $reasons.Add("installed sunpack_native is older than Rust sources")
-        }
     }
 
-    $toolsRoot = Join-Path $RepoRoot "tools"
+    $toolsRoot = if ($Arch -eq "arm64") { Join-Path $RepoRoot "tools-arm64" } else { Join-Path $RepoRoot "tools" }
     $requiredTools = @(
         (Join-Path $toolsRoot "7z.exe"),
         (Join-Path $toolsRoot "7zCon.sfx"),
@@ -453,14 +447,8 @@ function Get-EnvironmentRefreshReasons {
         return $reasons
     }
 
-    $wrapperRoot = Join-Path $RepoRoot "native\sevenzip_bridge"
-    $wrapperSourceNewest = Get-NewestSourceWriteTime -Root $wrapperRoot -Include @("*.cpp", "*.h", "*.hpp", "CMakeLists.txt")
-    $wrapperOldest = Get-OldestExistingWriteTime -Paths @(
-        (Join-Path $toolsRoot "sunpack_sevenzip.dll"),
-        (Join-Path $toolsRoot "sunpack_sevenzip_worker.exe")
-    )
-    if ($wrapperOldest -lt $wrapperSourceNewest) {
-        $reasons.Add("7z wrapper tools are older than C++ sources")
+    if (-not (Test-EnvironmentManifest -RepoRoot $RepoRoot)) {
+        $reasons.Add("environment manifest is missing or does not match current sources/artifacts")
     }
 
     return $reasons
@@ -501,6 +489,13 @@ function Ensure-AcceptanceEnvironment {
         "-Arch", $Arch,
         "-RepairSystem", $RepairSystem
     )
+
+    # Verify persistence immediately; a successful setup subprocess is not
+    # sufficient evidence that every artifact was refreshed.
+    $remainingReasons = @(Get-EnvironmentRefreshReasons -RepoRoot $RepoRoot -VenvPython $VenvPython)
+    if ($remainingReasons.Count -gt 0) {
+        throw ("Environment refresh completed but the environment is still stale:`n  - " + ($remainingReasons -join "`n  - "))
+    }
 }
 
 function Wait-BeforeExit {
@@ -511,6 +506,32 @@ function Wait-BeforeExit {
     Write-Host ""
     Write-Host $Message -ForegroundColor DarkGray
     $null = Read-Host
+}
+
+function Get-NativeExtensionPath {
+    param([Parameter(Mandatory = $true)][string]$PythonPath)
+
+    $origin = Get-ModuleOrigin -PythonPath $PythonPath -ModuleName "sunpack_native"
+    if (-not $origin -or -not (Test-Path -LiteralPath $origin -PathType Leaf)) {
+        return ""
+    }
+    $moduleRoot = Split-Path -Parent $origin
+    $extension = Get-ChildItem -LiteralPath $moduleRoot -Filter "sunpack_native*.pyd" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -eq $extension) {
+        return ""
+    }
+    return $extension.FullName
+}
+
+function Test-EnvironmentManifest {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $manifestScript = Join-Path $RepoRoot "scripts\environment_manifest.ps1"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $manifestScript `
+        -RepoRoot $RepoRoot -Arch $Arch -RepairSystem $RepairSystem -Check *> $null
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Invoke-TestWatchServiceAction {
