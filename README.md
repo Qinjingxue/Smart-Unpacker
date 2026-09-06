@@ -4,13 +4,17 @@ SunPack是一个Windows-only的命令行工具，交互模式包含右键菜单�
 
 主要功能是自动化处理压缩包归档文件，省去繁琐的手动处理流程
 
-主要支持7z，rar，zip格式。xz，bzip2，gzip，tar，zstd格式也有实验性支持，其他格式不支持。支持处理分卷，SFX等各种载体压缩包。
+主要支持7z，rar，zip格式。xz，bzip2，gzip，tar，zstd格式也有实验性支持，其他格式不支持。支持处理分卷，SFX等各种载体压缩包
+
+Sunpack依靠二进制特征识别压缩包，不依靠后缀，在面对混乱后缀分卷时也采用启发式算法识别，具有一定容错能力（不同格式容错能力不同），也能够处理二进制数据类似于[无效数据][压缩数据][无效数据]的文件
 
 使用方式包含直接使用命令处理文件和使用watch模式后台监控
 
-项目包含四部分，前台命令启动器（sunpack.exe），后台常驻程序（sunpack-runtime.exe），压缩包处理程序（sunpack_sevenzip_worker.exe），NTFS文件系统日志监控服务（sunpack-watch-broker.exe）
+Sunpack包含四部分，前台命令启动器（sunpack.exe），后台常驻程序（sunpack-runtime.exe），压缩包处理程序（sunpack_sevenzip_worker.exe），NTFS文件系统日志监控服务（sunpack-watch-broker.exe）
 
 默认Sunpack为了性能不处理小于1MB的文件，如需调整，可更改sunpack_config.json中的"range": "r >= 1 MB"
+
+Sunpack默认采用Lite版本，Full版本包含机器学习压缩数据修复训练系统，但该系统目前因复杂度过高，效果有限而暂停开发
 
 ## 命令速览
 
