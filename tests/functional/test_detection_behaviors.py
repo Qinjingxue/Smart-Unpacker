@@ -287,7 +287,7 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertEqual(bag.get("file.container_type"), "pe")
         self.assertEqual(bag.get("file.probe_offset"), 434176)
 
-    def test_offset_zero_zip_identity_precedes_recursive_embedded_scan(self):
+    def test_zero_start_zip_identity_precedes_recursive_embedded_scan(self):
         bag = FactBag()
         bag.set("file.path", "application.exe")
         bag.set("candidate.entry_path", "application.exe")
@@ -303,6 +303,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             "central_directory_walk_ok": True,
             "local_header_links_ok": True,
             "archive_offset": 0,
+            "archive_starts_at_zero": True,
         })
         config = with_detection_pipeline(
             {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
@@ -317,6 +318,38 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertTrue(decision.should_extract)
         self.assertEqual(decision.deciding_rule, "zip_structure_accept")
         self.assertNotIn("par_packer", decision.stop_reason)
+
+    def test_prefixed_zip_identity_defers_to_runtime_bundle(self):
+        bag = FactBag()
+        bag.set("file.path", "application.exe")
+        bag.set("candidate.entry_path", "application.exe")
+        bag.set("candidate.embedded_scan_allowed", True)
+        bag.set("executable.carrier", {
+            "kind": "runtime_bundle",
+            "runtime_profile": "par_packer",
+            "is_executable": True,
+        })
+        bag.set("zip.eocd_structure", {
+            "plausible": True,
+            "central_directory_present": True,
+            "central_directory_walk_ok": True,
+            "local_header_links_ok": True,
+            "archive_offset": 0,
+            "archive_starts_at_zero": False,
+        })
+        config = with_detection_pipeline(
+            {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
+            precheck=[
+                {"name": "zip_structure_accept", "enabled": True},
+                {"name": "embedded_payload_identity", "enabled": True},
+            ],
+        )
+
+        decision = DetectionScheduler(config).evaluate_bag(bag)
+
+        self.assertFalse(decision.should_extract)
+        self.assertEqual(decision.deciding_rule, "embedded_payload_identity")
+        self.assertIn("par_packer", decision.stop_reason)
 
 
 if __name__ == "__main__":

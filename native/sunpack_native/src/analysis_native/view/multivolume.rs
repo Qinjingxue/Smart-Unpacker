@@ -73,6 +73,27 @@ impl AnalysisMultiVolumeView {
         Ok(PyBytes::new(py, &data))
     }
 
+    #[pyo3(signature = (spanned, empty, zip64_eocd_offset=None))]
+    fn probe_zip_archive_start(
+        &self,
+        py: Python<'_>,
+        spanned: bool,
+        empty: bool,
+        zip64_eocd_offset: Option<u64>,
+    ) -> PyResult<Py<PyDict>> {
+        self.ensure_open()?;
+        let kind = zip_archive_start_kind(
+            &self.reader,
+            spanned,
+            empty,
+            zip64_eocd_offset,
+        )?;
+        let result = PyDict::new(py);
+        result.set_item("archive_starts_at_zero", !kind.is_empty())?;
+        result.set_item("archive_start_kind", kind)?;
+        Ok(result.unbind())
+    }
+
     #[pyo3(signature = (start_offset, max_blocks_to_walk=4096))]
     fn probe_rar(
         &self,

@@ -275,6 +275,7 @@ def test_modern_split_zip_with_camouflaged_names_runs_full_pipeline(tmp_path):
     tasks = ArchiveTaskProvider(config).scan_targets([str(mixed)])
 
     assert len(tasks) == 1
+    assert tasks[0].matched_rules == ["zip_structure_accept"]
     descriptor = tasks[0].archive_input()
     assert descriptor.volume_style == "zip_spanned"
     assert [part.volume_number for part in descriptor.parts] == [1, 2, 3, 4]

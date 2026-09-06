@@ -76,6 +76,7 @@ def test_lite_keeps_precheck_detection_but_skips_scoring_execution():
             {
                 "plausible": True,
                 "archive_offset": 0,
+                "archive_starts_at_zero": True,
                 "central_directory_present": True,
                 "central_directory_walk_ok": True,
                 "local_header_links_ok": True,

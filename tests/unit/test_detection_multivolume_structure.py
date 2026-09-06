@@ -1,6 +1,7 @@
 import struct
 from binascii import crc32
 
+from sunpack.analysis.view import MultiVolumeBinaryView
 from sunpack.contracts.detection import FactBag
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.modules.format_structure.rar import process_rar_structure
@@ -108,11 +109,87 @@ def test_zip_detection_finds_directory_and_eocd_in_later_volume(tmp_path):
     result = process_zip_eocd_structure(_context(parts, "zip_zero_numbered", "zip.eocd_structure"))
 
     assert result["plausible"] is True
+    assert result["archive_starts_at_zero"] is True
+    assert result["archive_start_kind"] == "local_header"
     assert result["central_directory_walk_ok"] is True
     assert result["local_header_links_ok"] is True
     assert result["password_required"] is False
     assert result["password_state"] == "not_required"
     assert result["encryption_scan_complete"] is True
+
+
+def test_zip_detection_accepts_spanned_split_marker_at_logical_zero(tmp_path):
+    marker = b"PK\x07\x08"
+    name = b"a"
+    local = struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, 0, 0, 0, 0, 0, 0, 1, 0) + name
+    central = struct.pack(
+        "<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, len(marker),
+    ) + name
+    eocd = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 1, 1, 1, 1, len(central), 0, 0)
+    parts = [tmp_path / "a.z01", tmp_path / "a.zip"]
+    parts[0].write_bytes(marker + local)
+    parts[1].write_bytes(central + eocd)
+
+    result = process_zip_eocd_structure(_context(parts, "zip_spanned", "zip.eocd_structure"))
+
+    assert result["plausible"] is True
+    assert result["is_multi_disk"] is True
+    assert result["archive_starts_at_zero"] is True
+    assert result["archive_start_kind"] == "split_marker"
+
+
+def test_zip_detection_accepts_empty_eocd_at_logical_zero(tmp_path):
+    part = tmp_path / "empty.zip"
+    part.write_bytes(struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 0, 0, 0, 0, 0))
+
+    result = process_zip_eocd_structure(_context([part], "", "zip.eocd_structure"))
+
+    assert result["plausible"] is True
+    assert result["archive_starts_at_zero"] is True
+    assert result["archive_start_kind"] == "empty_eocd"
+
+
+def test_zip_start_probe_reuses_multivolume_native_reader_cache(tmp_path):
+    part = tmp_path / "cached.zip"
+    part.write_bytes(b"PK\x03\x04payload")
+
+    with MultiVolumeBinaryView([part], cache_bytes=1024) as view:
+        first = dict(view._native.probe_zip_archive_start(False, False, None))
+        first_stats = view.stats()
+        second = dict(view._native.probe_zip_archive_start(False, False, None))
+        second_stats = view.stats()
+
+    assert first == second == {
+        "archive_starts_at_zero": True,
+        "archive_start_kind": "local_header",
+    }
+    assert first_stats.read_bytes == 8
+    assert second_stats.read_bytes == first_stats.read_bytes
+    assert second_stats.cache_hits == first_stats.cache_hits + 1
+
+
+def test_zip_detection_does_not_treat_prefixed_absolute_offsets_as_zero_start(tmp_path):
+    prefix = b"MZ" + (b"\x00" * 30)
+    name = b"a"
+    local = struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, 0, 0, 0, 0, 0, 0, 1, 0) + name
+    central = struct.pack(
+        "<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, len(prefix),
+    ) + name
+    eocd = struct.pack(
+        "<4sHHHHIIH", b"PK\x05\x06", 0, 0, 1, 1,
+        len(central), len(prefix) + len(local), 0,
+    )
+    part = tmp_path / "application.exe"
+    part.write_bytes(prefix + local + central + eocd)
+
+    result = process_zip_eocd_structure(_context([part], "", "zip.eocd_structure"))
+
+    assert result["plausible"] is True
+    assert result["archive_offset"] == 0
+    assert result["archive_starts_at_zero"] is False
+    assert result["archive_start_kind"] == ""
 
 
 def test_zip_detection_emits_password_required_for_encrypted_central_entry(tmp_path):

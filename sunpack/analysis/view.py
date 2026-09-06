@@ -220,7 +220,22 @@ class MultiVolumeBinaryView:
         return dict(self._native.signature_prepass(int(head_bytes), int(tail_bytes)))
 
     def probe_zip(self, *, eocd_offset: int, max_cd_entries_to_walk: int = 64) -> dict | None:
-        return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
+        result = _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
+        is_empty = (
+            int(result.get("total_entries") or 0) == 0
+            and int(result.get("central_directory_size") or 0) == 0
+        )
+        zip64_eocd_offset = (
+            int(result.get("zip64_eocd_offset") or 0)
+            if result.get("zip64_eocd_present")
+            else None
+        )
+        result.update(dict(self._native.probe_zip_archive_start(
+            bool(result.get("is_multi_disk")) or self.volume_style == "zip_spanned",
+            is_empty,
+            zip64_eocd_offset,
+        )))
+        return result
 
     def probe_rar(self, *, start_offset: int, max_blocks_to_walk: int = 4096) -> dict | None:
         return dict(self._native.probe_rar(int(start_offset), int(max_blocks_to_walk)))
@@ -414,6 +429,8 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         "encryption_scan_complete": False,
         "local_header_links_ok": False,
         "local_header_links_checked": 0,
+        "archive_starts_at_zero": False,
+        "archive_start_kind": "",
     })
     eocd = view.read_at(eocd_offset, 22)
     if len(eocd) < 22 or eocd[:4] != b"PK\x05\x06":

@@ -105,6 +105,8 @@ impl AnalysisBinaryView {
         result.set_item("encryption_scan_complete", false)?;
         result.set_item("local_header_links_ok", false)?;
         result.set_item("local_header_links_checked", 0usize)?;
+        result.set_item("archive_starts_at_zero", false)?;
+        result.set_item("archive_start_kind", "")?;
         result.set_item("content_integrity_warning", "")?;
         result.set_item("evidence", PyList::empty(py))?;
 
@@ -200,6 +202,14 @@ impl AnalysisBinaryView {
                 u32::from(disk_number) + 1
             },
         )?;
+        let archive_start_kind = zip_archive_start_kind(
+            &self.reader,
+            is_multi_disk,
+            effective_total_entries == 0 && effective_central_directory_size == 0,
+            zip64_present.then_some(zip64_eocd_offset),
+        )?;
+        result.set_item("archive_starts_at_zero", !archive_start_kind.is_empty())?;
+        result.set_item("archive_start_kind", archive_start_kind)?;
         if is_multi_disk {
             result.set_item("error", "zip_multi_disk")?;
             let evidence = PyList::empty(py);

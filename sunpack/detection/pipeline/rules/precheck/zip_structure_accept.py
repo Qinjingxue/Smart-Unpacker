@@ -6,9 +6,6 @@ from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.registry import register_rule
 
 
-ZIP_START_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
-
-
 @register_rule(name="zip_structure_accept", layer="precheck")
 class ZipStructureAcceptRule(RuleBase):
     routing_formats = {"zip"}
@@ -34,6 +31,8 @@ class ZipStructureAcceptRule(RuleBase):
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
         structure = facts.get("zip.eocd_structure") or {}
         if not structure.get("plausible"):
+            return RuleEffect.pass_()
+        if not structure.get("archive_starts_at_zero"):
             return RuleEffect.pass_()
         if int(structure.get("archive_offset") or 0) != 0:
             return RuleEffect.pass_()

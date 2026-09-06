@@ -956,6 +956,29 @@ impl AnalysisBinaryView {
     }
 }
 
+fn zip_archive_start_kind(
+    reader: &ManagedReader,
+    spanned: bool,
+    empty: bool,
+    zip64_eocd_offset: Option<u64>,
+) -> PyResult<&'static str> {
+    // Keep this check on the same ManagedReader as the structural probe.  It
+    // therefore shares the existing read budget, concurrency gate, and both
+    // request/global caches instead of reopening the source from Python.
+    let head = reader.read_at(0, 8).map_err(reader_error_to_py)?;
+    if head.starts_with(ZIP_LOCAL) {
+        Ok("local_header")
+    } else if empty && head.starts_with(ZIP_EOCD) {
+        Ok("empty_eocd")
+    } else if spanned && head.as_slice() == b"PK\x07\x08PK\x03\x04" {
+        Ok("split_marker")
+    } else if empty && zip64_eocd_offset == Some(0) && head.starts_with(ZIP64_EOCD) {
+        Ok("zip64_eocd")
+    } else {
+        Ok("")
+    }
+}
+
 impl AnalysisMultiVolumeView {
     fn ensure_open(&self) -> PyResult<()> {
         if self.closed {

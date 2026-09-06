@@ -1,7 +1,19 @@
+import struct
 import zlib
 
 from sunpack.analysis.structure_pipeline.modules._read_fault import read_fault_damage_flags
 from sunpack_native import AnalysisBinaryView
+
+
+def test_native_zip_probe_reports_empty_archive_start_at_zero(tmp_path):
+    archive = tmp_path / "empty.zip"
+    archive.write_bytes(struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 0, 0, 0, 0, 0))
+
+    result = dict(AnalysisBinaryView(str(archive)).probe_zip(0, 16))
+
+    assert result["plausible"] is True
+    assert result["archive_starts_at_zero"] is True
+    assert result["archive_start_kind"] == "empty_eocd"
 
 
 def test_zip_tail_read_fault_names_eocd_and_suggests_missing_volume(tmp_path):
