@@ -6,6 +6,7 @@ import time
 from typing import Any, List
 
 from sunpack.contracts.failures import FailureInfo
+from sunpack.contracts.results import ArchiveCleanupResult
 from sunpack.i18n import I18nContext
 
 
@@ -197,6 +198,7 @@ class RunReporter:
         failed_tasks: List[str],
         recovered_outputs: List[dict] | None = None,
         failures: List[FailureInfo] | None = None,
+        cleanup_results: List[ArchiveCleanupResult] | None = None,
     ):
         recovered = list(recovered_outputs or [])
         partial_count = len(recovered)
@@ -242,6 +244,14 @@ class RunReporter:
         else:
             if not self.quiet:
                 self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
+
+        cleanup_failures = [
+            item for item in cleanup_results or [] if item.status == "failed"
+        ]
+        if cleanup_failures and not self.quiet:
+            self._print(self.i18n.t("cleanup.incomplete", count=len(cleanup_failures)))
+            for item in cleanup_failures:
+                self._print(f"  {item.path}: {item.message}")
 
         if not self.quiet:
             self._print("-" * 54)

@@ -1463,7 +1463,7 @@ class WatchScheduler:
             request.predicted_final_dirs,
             request.probe_workspace,
         )
-        await MappedOutputCommitter(self.pipeline_engine.work_broker, output_path_map).commit(
+        response = await MappedOutputCommitter(self.pipeline_engine.work_broker, output_path_map).commit(
             request.config,
             response,
         )
@@ -1482,7 +1482,17 @@ class WatchScheduler:
             status="done",
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
-        self._notify("succeeded", request.notification_id, generated_output_dirs)
+        cleanup_failed = [item for item in response.summary.cleanup_results if item.status == "failed"]
+        self.log.write("cleanup", path=candidate.path,
+                       results=[{"path": item.path, "status": item.status, "attempts": item.attempts,
+                                 "error_code": item.error_code, "message": item.message}
+                                for item in response.summary.cleanup_results],
+                       retry_count=sum(max(0, item.attempts - 1) for item in response.summary.cleanup_results))
+        if cleanup_failed:
+            self._notify("succeeded", request.notification_id, generated_output_dirs,
+                         [self.i18n.t("cleanup.incomplete", count=len(cleanup_failed))])
+        else:
+            self._notify("succeeded", request.notification_id, generated_output_dirs)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
 
     def _notify(self, action: str, *args) -> None:

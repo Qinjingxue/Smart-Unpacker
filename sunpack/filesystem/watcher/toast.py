@@ -28,7 +28,7 @@ class WatchNotificationSink(Protocol):
 
     def progress(self, request_id: str, task: Any, event: dict[str, Any]) -> None: ...
 
-    def succeeded(self, request_id: str, output_dirs: list[str]) -> None: ...
+    def succeeded(self, request_id: str, output_dirs: list[str], warnings: list[str] | None = None) -> None: ...
 
     def failed(
         self,
@@ -49,7 +49,7 @@ class NullWatchNotificationSink:
     def progress(self, request_id: str, task: Any, event: dict[str, Any]) -> None:
         pass
 
-    def succeeded(self, request_id: str, output_dirs: list[str]) -> None:
+    def succeeded(self, request_id: str, output_dirs: list[str], warnings: list[str] | None = None) -> None:
         pass
 
     def failed(
@@ -216,8 +216,8 @@ class WatchToastCoordinator:
             task_progress.total_bytes = total
             self._publish_progress_locked()
 
-    def succeeded(self, request_id: str, output_dirs: list[str]) -> None:
-        self._terminal(request_id, "success", output_dirs=output_dirs)
+    def succeeded(self, request_id: str, output_dirs: list[str], warnings: list[str] | None = None) -> None:
+        self._terminal(request_id, "success", output_dirs=output_dirs, errors=warnings)
 
     def failed(
         self,
@@ -428,6 +428,9 @@ class WatchToastCoordinator:
                 title = self.i18n.t("toast.final.success.title")
                 body = self.i18n.t("toast.final.success.body", succeeded=len(succeeded), duration=duration)
                 ttl = self._success_ttl_ms
+            warnings = [error for request in succeeded for error in request.errors]
+            if warnings:
+                body += "\n" + "\n".join(warnings)
             self.host.publish(ToastSnapshot(
                 kind=kind,
                 batch_id=self._batch_id,

@@ -134,7 +134,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.all_parts, [str(archive_path), str(launcher_path)])
 
-    def test_extractor_retries_after_disk_space_error(self):
+    def test_extractor_retries_unclassified_process_failure_without_space_heuristic(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive_path = Path(tmp) / "sample.zip"
             archive_path.write_bytes(b"zip")
@@ -146,7 +146,7 @@ class ExtractionExecutionTests(unittest.TestCase):
                 calls.append(required_gb)
                 return True
 
-            extractor = ExtractionScheduler(ensure_space=ensure_space, max_retries=2)
+            extractor = ExtractionScheduler(max_retries=2)
             extractor.password_resolver = FakePasswordResolver()
             extractor.metadata_scanner = FakeMetadataScanner()
             extractor.rename_scheduler = FakeStager()
@@ -163,7 +163,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
-            self.assertIn(10, calls)
+            self.assertEqual(calls, [])
 
     def test_extractor_retries_transient_failure_and_cleans_partial_output(self):
         with tempfile.TemporaryDirectory() as tmp:

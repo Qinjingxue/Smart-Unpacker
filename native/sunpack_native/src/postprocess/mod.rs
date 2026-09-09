@@ -73,35 +73,49 @@ pub(crate) fn flatten_single_branch_directories(
 
 #[pyfunction]
 pub(crate) fn delete_files_batch(py: Python<'_>, paths: Vec<String>) -> PyResult<Py<PyList>> {
+    let rows = py.detach(|| {
+        paths
+            .into_iter()
+            .map(|raw| {
+                let result = fs::remove_file(&raw);
+                let (status, error, error_code) = match result {
+                    Ok(()) => ("deleted", String::new(), 0),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ("missing", String::new(), 0)
+                    }
+                    Err(error) => (
+                        "error",
+                        error.to_string(),
+                        error.raw_os_error().unwrap_or(0),
+                    ),
+                };
+                (raw, status, error, error_code)
+            })
+            .collect::<Vec<_>>()
+    });
     let results = PyList::empty(py);
-    for raw in paths {
-        let path = PathBuf::from(&raw);
+    for (raw, status, error, error_code) in rows {
         let item = PyDict::new(py);
-        item.set_item("path", normalize_path(&path))?;
-        item.set_item(
-            "filename",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(""),
-        )?;
-        if !path.exists() {
-            item.set_item("status", "missing")?;
-            item.set_item("error", "")?;
-        } else {
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    item.set_item("status", "deleted")?;
-                    item.set_item("error", "")?;
-                }
-                Err(error) => {
-                    item.set_item("status", "error")?;
-                    item.set_item("error", error.to_string())?;
-                }
-            }
-        }
+        item.set_item("path", normalize_path(Path::new(&raw)))?;
+        item.set_item("status", status)?;
+        item.set_item("error", error)?;
+        item.set_item("error_code", error_code)?;
         results.append(item)?;
     }
     Ok(results.unbind())
+}
+
+#[pyfunction]
+pub(crate) fn cleanup_file_identity(
+    py: Python<'_>,
+    path: String,
+) -> PyResult<Option<(u32, u64, u64, u64)>> {
+    let identity = py.detach(|| crate::filesystem::file_identity(Path::new(&path)));
+    match identity {
+        Ok(identity) => Ok(Some(identity)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn scan_watch_dir_recursive(

@@ -2,6 +2,7 @@ import os
 import sys
 from typing import Any, Dict, Iterable
 
+from sunpack.contracts.results import ArchiveCleanupResult
 from sunpack.contracts.run_context import RunContext
 from sunpack.postprocess.internal.cleanup import ArchiveCleanup
 from sunpack.postprocess.internal.flatten import DirectoryFlattener
@@ -35,18 +36,23 @@ class PostProcessActions:
         flatten_outputs: bool | None = None,
         archives_to_clean: Iterable[Iterable[str]] | None = None,
         flatten_targets: Iterable[str] | None = None,
-    ):
+        previous_cleanup: dict[str, ArchiveCleanupResult] | None = None,
+    ) -> list[ArchiveCleanupResult]:
+        results: list[ArchiveCleanupResult] = []
         if cleanup_archives:
-            self.cleanup.cleanup_success_archives(self._consume_archives_to_clean(archives_to_clean))
+            results = self.cleanup.cleanup_success_archives(self._consume_archives_to_clean(archives_to_clean), previous_cleanup)
+            if archives_to_clean is None and self.context is not None:
+                self.context.unpacked_archives = [[item.path] for item in results if item.status == "failed"]
 
         if flatten_outputs is None:
             flatten_outputs = self.config.get("post_extract", {}).get("flatten_single_directory", True)
         if flatten_outputs:
             for index, target in enumerate(self._consume_flatten_targets(flatten_targets)):
                 self.flattener.flatten_dirs(target, announce=index == 0)
+        return results
 
-    def cleanup_archive_file(self, path: str, reason: str | None = None):
-        self.cleanup.cleanup_archive_file(path, reason)
+    def cleanup_archive_file(self, path: str, reason: str | None = None) -> ArchiveCleanupResult:
+        return self.cleanup.cleanup_archive_file(path, reason)
 
     def t(self, key: str, **params) -> str:
         return self.i18n.t(key, **params)

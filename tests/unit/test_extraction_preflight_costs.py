@@ -9,7 +9,7 @@ from sunpack.extraction.internal.workflow.single_archive_extractor import Single
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 
 
-def test_successful_first_attempt_checks_free_space_once(tmp_path):
+def test_successful_first_attempt_does_not_query_python_disk_space(tmp_path):
     archive = tmp_path / "input.7z"
     archive.write_bytes(b"dummy")
     output = tmp_path / "out"
@@ -30,7 +30,7 @@ def test_successful_first_attempt_checks_free_space_once(tmp_path):
         seven_z_path="", password_store=SimpleNamespace(has_candidates=lambda: False),
         password_resolver=SimpleNamespace(password_tester=SimpleNamespace(passwords=[])),
         metadata_scanner=SimpleNamespace(scan_for_task=lambda *_args, **_kwargs: SimpleNamespace(selected_codepage=None, decoded_names=[], error=None)),
-        rename_scheduler=rename, ensure_space=lambda amount: calls.append(amount) or True,
+        rename_scheduler=rename,
         retry_policy=SimpleNamespace(max_retries=1),
         split_entry_resolver=SimpleNamespace(resolve=lambda archive, parts, split: (archive, parts, split)),
         sevenzip_runner=runner,
@@ -40,7 +40,7 @@ def test_successful_first_attempt_checks_free_space_once(tmp_path):
     result = extractor.extract(task, str(output))
 
     assert result.success
-    assert calls == [5]
+    assert calls == []
 
 
 def test_validated_encrypted_rar_skips_empty_password_resource_analysis(tmp_path, monkeypatch):
@@ -126,7 +126,6 @@ def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damag
             error=None,
         )),
         rename_scheduler=SimpleNamespace(),
-        ensure_space=lambda _amount: True,
         retry_policy=SimpleNamespace(
             max_retries=1,
             can_retry=lambda *_args: False,

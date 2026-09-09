@@ -49,6 +49,7 @@ def test_finalize_response_gates_only_paths_that_will_be_mutated(
 
         def apply(self, **kwargs):
             apply_calls.append(kwargs)
+            return []
 
     monkeypatch.setattr(engine_module, "promotion_barrier", recording_barrier)
     monkeypatch.setattr(engine_module, "PostProcessActions", RecordingActions)
@@ -70,5 +71,6 @@ def test_finalize_response_gates_only_paths_that_will_be_mutated(
         {
             "archives_to_clean": [[str(archive)]],
             "flatten_targets": [str(output)],
+            "previous_cleanup": None,
         }
     ]

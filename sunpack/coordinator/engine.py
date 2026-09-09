@@ -5,7 +5,7 @@ import asyncio
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, TextIO
 
@@ -20,7 +20,6 @@ from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
 from sunpack.coordinator.nested_extraction_policy import EMBEDDED_SCAN_ALLOWED_FACT
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.reporting import RunReporter
-from sunpack.coordinator.space_guard import ExtractionSpaceGuard
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.coordinator.target_groups import relation_group_to_fact_bag
 from sunpack.extraction.scheduler import ExtractionScheduler
@@ -63,16 +62,7 @@ class DirectOutputCommitter:
         self._stdout = stdout
 
     async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse:
-        await self._broker.run(
-            "postprocess",
-            response.request_id,
-            _finalize_response,
-            config,
-            response,
-            stdout=self._stdout,
-            request_id=response.request_id,
-        )
-        return response
+        return await _commit_response(self._broker, config, response, stdout=self._stdout)
 
 
 class IdentityOutputCommitter:
@@ -88,16 +78,22 @@ class MappedOutputCommitter:
         self._output_path_map = dict(output_path_map)
 
     async def commit(self, config: dict, response: PipelineResponse) -> PipelineResponse:
-        await self._broker.run(
-            "postprocess",
-            response.request_id,
-            _finalize_response,
-            config,
-            response,
-            output_path_map=self._output_path_map,
-            request_id=response.request_id,
-        )
-        return response
+        return await _commit_response(self._broker, config, response, output_path_map=self._output_path_map)
+
+
+async def _commit_response(broker, config, response, *, output_path_map=None, stdout=None):
+    response = await broker.run("postprocess", response.request_id, _finalize_response,
+                                config, response, output_path_map=output_path_map,
+                                stdout=stdout, request_id=response.request_id)
+    for delay in (0.1, 0.3):
+        pending = [item for item in response.summary.cleanup_results if item.retryable and item.attempts < 3]
+        if not pending:
+            break
+        await asyncio.sleep(delay)
+        response = await broker.run("postprocess", response.request_id, _finalize_response,
+                                    config, response, stdout=stdout, retry_results=pending,
+                                    request_id=response.request_id)
+    return response
 
 
 class PipelineEngine:
@@ -221,10 +217,26 @@ class PipelineEngine:
                     submission.detection_options or self.detection_options,
                     self._path_leases,
                 )
+                start_time = time.time()
                 response = await runtime.execute_async(self._broker, cancellation)
                 self._remember_recent_passwords(response.recent_passwords)
                 committer = output_committer or DirectOutputCommitter(self._broker, stdout=stdout)
-                return await committer.commit(submission.config, response)
+                response = await committer.commit(submission.config, response)
+                if getattr(response.summary, "_postprocess_completed", False):
+                    await self._broker.run(
+                        "report",
+                        submission.request_id,
+                        runtime.reporter.log_final_summary,
+                        start_time,
+                        response.summary.success_count,
+                        response.summary.failed_tasks,
+                        recovered_outputs=response.summary.recovered_outputs,
+                        failures=response.summary.failures,
+                        cleanup_results=response.summary.cleanup_results,
+                        request_id=submission.request_id,
+                        cancellation=cancellation,
+                    )
+                return response
         except asyncio.CancelledError:
             cancellation.cancel()
             raise
@@ -448,7 +460,6 @@ class _RequestRuntime:
             language=self.language,
             stdout=submission.stdout,
         )
-        self.space_guard = ExtractionSpaceGuard(self.context, self.postprocess)
         self.task_scanner = ArchiveTaskScanner(
             self.config,
             self.context,
@@ -472,6 +483,7 @@ class _RequestRuntime:
         request_runner = services.sevenzip_runner.fork()
         request_runner.request_id = submission.request_id
         request_runner.origin = submission.origin
+        request_runner.disk_space_policy = dict(performance.get("disk_space", {}))
         self.extractor = ExtractionScheduler(
             cli_passwords=submission.user_passwords,
             builtin_passwords=submission.builtin_passwords,
@@ -485,7 +497,6 @@ class _RequestRuntime:
             sevenzip_runner=request_runner,
             output_stream=submission.stdout,
         )
-        self.extractor.ensure_space = self.space_guard.ensure_space
         self.extractor.set_progress_callback(self._report_progress)
         self.batch_runner = ExtractionBatchRunner(
             self.context,
@@ -545,20 +556,9 @@ class _RequestRuntime:
         broker: AsyncWorkBroker,
         cancellation: CancellationToken,
     ) -> PipelineResponse:
-        start_time = time.time()
         submission = self.submission
         request_id = submission.request_id
         all_targets = [target.path for target in submission.targets]
-        first_target = all_targets[0] if all_targets else os.getcwd()
-        monitor_root = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
-        await broker.run(
-            "space_bind",
-            request_id,
-            self.space_guard.bind_root,
-            monitor_root,
-            request_id=request_id,
-            cancellation=cancellation,
-        )
         ownership = _RequestOwnership([submission], self.config)
         recursion = self._new_recursion()
         round_index = 1
@@ -675,18 +675,6 @@ class _RequestRuntime:
                 self.context,
                 recent_passwords=self.extractor.recent_passwords,
             )[request_id]
-            await broker.run(
-                "report",
-                request_id,
-                self.reporter.log_final_summary,
-                start_time,
-                response.summary.success_count,
-                response.summary.failed_tasks,
-                recovered_outputs=response.summary.recovered_outputs,
-                failures=response.summary.failures,
-                request_id=request_id,
-                cancellation=cancellation,
-            )
             return response
         finally:
             self.extractor.set_progress_callback(None)
@@ -726,7 +714,11 @@ def _finalize_response(
     *,
     output_path_map: Mapping[str, str] | None = None,
     stdout=None,
-) -> None:
+    retry_results=None,
+) -> PipelineResponse:
+    if getattr(response.summary, "_postprocess_completed", False) and retry_results is None:
+        return replace(response, artifacts=PipelineArtifacts(archives_to_clean=tuple(
+            (item.path,) for item in response.summary.cleanup_results if item.status == "failed")))
     mapping = {path_key(old): os.path.abspath(new) for old, new in (output_path_map or {}).items()}
 
     def remap(path: str) -> str:
@@ -750,6 +742,12 @@ def _finalize_response(
     ]
     flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
     shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
+    previous = None
+    if retry_results is not None:
+        archives_to_clean = [[item.path] for item in retry_results]
+        flatten_targets = []
+        shell_refresh_paths = []
+        previous = {path_key(item.path): item for item in retry_results}
     post_extract = config.get("post_extract", {})
     flatten_enabled = post_extract.get("flatten_single_directory", True)
     cleanup_mode = post_extract.get("archive_cleanup_mode", "recycle")
@@ -761,16 +759,25 @@ def _finalize_response(
             mutation_roots,
             cache_releasers=(release_archive_sessions_under,),
         ):
-            PostProcessActions(config, stdout=stdout).apply(
+            cleanup_results = PostProcessActions(config, stdout=stdout).apply(
                 archives_to_clean=archives_to_clean,
                 flatten_targets=flatten_targets,
+                previous_cleanup=previous,
             )
     else:
-        PostProcessActions(config, stdout=stdout).apply(
+        cleanup_results = PostProcessActions(config, stdout=stdout).apply(
             archives_to_clean=archives_to_clean,
             flatten_targets=flatten_targets,
+            previous_cleanup=previous,
         )
     notify_shell_directories_updated(shell_refresh_paths)
+    merged = {path_key(item.path): item for item in response.summary.cleanup_results}
+    merged.update({path_key(item.path): item for item in cleanup_results})
+    response.summary.cleanup_results = list(merged.values())
+    response.summary._postprocess_completed = True
+    artifacts = PipelineArtifacts(archives_to_clean=tuple(
+        (item.path,) for item in merged.values() if item.status == "failed"))
+    return replace(response, artifacts=artifacts)
 
 
 class _RequestOwnership:

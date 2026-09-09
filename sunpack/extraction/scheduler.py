@@ -18,7 +18,6 @@ class ExtractionScheduler:
         self,
         cli_passwords: list[str] | None = None,
         builtin_passwords: list[str] | None = None,
-        ensure_space: Optional[Callable[[int], bool]] = None,
         max_retries: int = 3,
         process_config: dict | None = None,
         output_config: dict | None = None,
@@ -38,7 +37,6 @@ class ExtractionScheduler:
         self.seven_z_path = ""
         self.rename_scheduler = RenameScheduler()
         self.split_entry_resolver = SplitEntryResolver()
-        self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.output_config = output_config if isinstance(output_config, dict) else None
         self.extraction_config = extraction_config
@@ -128,7 +126,6 @@ class ExtractionScheduler:
             password_resolver=self.password_resolver,
             metadata_scanner=self.metadata_scanner,
             rename_scheduler=self.rename_scheduler,
-            ensure_space=self.ensure_space,
             retry_policy=self.retry_policy,
             split_entry_resolver=self.split_entry_resolver,
             sevenzip_runner=self.sevenzip_runner,

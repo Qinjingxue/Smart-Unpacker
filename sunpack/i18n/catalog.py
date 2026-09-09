@@ -1,5 +1,7 @@
 CATALOG = {
     "en": {
+        "failure.space_query": "Could not query output volume free space.",
+        "cleanup.incomplete": "Extraction completed; {count} source files could not be cleaned up.",
         "cli.description": "sunpack command line interface.",
         "cli.usage": "sunpack [-h] <command> [command options] [paths...]",
         "cli.examples": "Examples:",
@@ -311,6 +313,8 @@ CATALOG = {
         "metadata.latin_noise_count": "Detected {count} suspicious Latin symbol noise character(s)",
     },
     "zh": {
+        "failure.space_query": "无法查询输出卷可用空间。",
+        "cleanup.incomplete": "解压完成，{count} 个源文件未能清理。",
         "cli.description": "sunpack 命令行界面。",
         "cli.usage": "sunpack [-h] <command> [command options] [paths...]",
         "cli.examples": "示例：",

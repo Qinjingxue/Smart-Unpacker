@@ -42,7 +42,6 @@ class SingleArchiveExtractor:
         password_resolver,
         metadata_scanner,
         rename_scheduler,
-        ensure_space: Callable[[int], bool],
         retry_policy: ExtractRetryPolicy,
         split_entry_resolver: SplitEntryResolver,
         sevenzip_runner: SevenZipRunner,
@@ -57,7 +56,6 @@ class SingleArchiveExtractor:
         self.password_resolver = password_resolver
         self.metadata_scanner = metadata_scanner
         self.rename_scheduler = rename_scheduler
-        self.ensure_space = ensure_space
         self.retry_policy = retry_policy
         self.split_entry_resolver = split_entry_resolver
         self.sevenzip_runner = sevenzip_runner
@@ -185,17 +183,6 @@ class SingleArchiveExtractor:
 
         self._log(self.i18n.t("extract.log.start", archive=archive))
 
-        if not self.ensure_space(5):
-            failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
-            return self._failed(
-                archive,
-                out_dir,
-                all_parts,
-                self._localized_failure(failure),
-                failure=failure,
-                diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
-            )
-
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
@@ -212,24 +199,7 @@ class SingleArchiveExtractor:
         with _phase(phase_timer, f"{phase_prefix}_startupinfo"):
             startupinfo = self._startupinfo()
         retry_count = 0
-        # The initial preflight already checked the same requirement.  Recheck
-        # only after an extraction attempt, when disk usage may have changed.
-        space_checked = True
         while retry_count < self.retry_policy.max_retries:
-            with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
-                has_space = space_checked or self.ensure_space(5)
-                space_checked = False
-            if not has_space:
-                self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACTION_ABORT)
-                failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
-                return self._failed(
-                    archive,
-                    out_dir,
-                    all_parts,
-                    self._localized_failure(failure),
-                    failure=failure,
-                    diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
-                )
             try:
                 with _phase(phase_timer, f"{phase_prefix}_mkdir_retry"):
                     os.makedirs(out_dir, exist_ok=True)
@@ -437,17 +407,6 @@ class SingleArchiveExtractor:
 
             if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
                 retry_count += 1
-                if self.retry_policy.needs_space_recheck(run_result, err) and not self.ensure_space(10):
-                    self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACTION_ABORT)
-                    failure = self._failure_info(FailureKind.PROCESS_ERROR, "retry_preflight", "failure.insufficient_space")
-                    return self._failed(
-                        archive,
-                        out_dir,
-                        all_parts,
-                        self._localized_failure(failure),
-                        failure=failure,
-                        diagnostics={"failure_stage": "retry_preflight", "failure_kind": "disk_space"},
-                    )
                 self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACT_RETRY)
                 self._log(self.i18n.t("extract.log.temp_retry", attempt=retry_count + 1, max_attempts=self.retry_policy.max_retries, archive=archive))
                 self.retry_policy.backoff(retry_count)
@@ -855,18 +814,6 @@ class SingleArchiveExtractor:
         split_info = split_info or task.split_info
         all_parts = list(task.all_parts or [archive])
         self._log(self.i18n.t("extract.log.embedded_start", archive=archive, count=len(segments)))
-        with _phase(phase_timer, f"{phase_prefix}_ensure_space_initial"):
-            has_space = self.ensure_space(5)
-        if not has_space:
-            failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
-            return self._failed(
-                archive,
-                out_dir,
-                all_parts,
-                self._localized_failure(failure),
-                failure=failure,
-                diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
-            )
         try:
             with _phase(phase_timer, f"{phase_prefix}_mkdir_initial"):
                 os.makedirs(out_dir, exist_ok=True)

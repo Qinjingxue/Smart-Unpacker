@@ -18,10 +18,6 @@ class ExtractRetryPolicy:
             is_split_archive=is_split_archive,
         )
 
-    def needs_space_recheck(self, run_result, err_text: str) -> bool:
-        err_lower = (err_text or "").lower()
-        return "no space" in err_lower or "write error" in err_lower or getattr(run_result, "returncode", None) == 8
-
     def backoff(self, retry_count: int) -> None:
         time.sleep(min(2.0, 0.5 * (2 ** max(0, retry_count - 1))))
 

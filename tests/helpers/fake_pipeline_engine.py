@@ -66,6 +66,7 @@ class FakePipelineEngine:
         config.setdefault("builtin_passwords", list(self.builtin_passwords))
         runner = self.runner_factory(config)
         summary = runner.run_targets(paths)
+        summary.cleanup_results = []
         self._recent_passwords = list(getattr(runner, "recent_passwords", ()) or ())
         context = getattr(runner, "context", SimpleNamespace(flatten_candidates=(), unpacked_archives=()))
         recovered_outputs = getattr(context, "recovered_outputs", ()) or ()

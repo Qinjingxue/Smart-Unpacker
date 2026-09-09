@@ -198,6 +198,20 @@ async def handle(args, ctx):
             "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
             "use_builtin_passwords": not args.no_builtin_passwords,
             "password_retry_count": retry_count,
+            "cleanup_retry_count": sum(
+                max(0, item.attempts - 1) for item in summary.cleanup_results
+            ),
+            "cleanup_results": [
+                {
+                    "path": item.path,
+                    "mode": item.mode,
+                    "status": item.status,
+                    "attempts": item.attempts,
+                    "error_code": item.error_code,
+                    "message": item.message,
+                }
+                for item in summary.cleanup_results
+            ],
         },
         errors=failed_tasks,
         items=[password_summary_item(password_summary)],

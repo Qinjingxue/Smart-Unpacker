@@ -3,8 +3,21 @@ import sys
 from typing import Iterable
 
 from send2trash import send2trash
+from sunpack_native import cleanup_file_identity as _native_cleanup_file_identity
 from sunpack_native import delete_files_batch as _native_delete_files_batch
+from sunpack.contracts.results import ArchiveCleanupResult
 from sunpack.i18n import I18nContext
+
+
+def _identity(path: str) -> tuple:
+    value = _native_cleanup_file_identity(path)
+    if value is None:
+        raise FileNotFoundError(path)
+    return tuple(int(part) for part in value)
+
+
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
 
 
 class ArchiveCleanup:
@@ -16,61 +29,84 @@ class ArchiveCleanup:
     def _print(self, value: str) -> None:
         print(value, file=self.stdout, flush=True)
 
-    def cleanup_success_archives(self, archives_to_clean: Iterable[Iterable[str]]):
-        archives = [list(parts) for parts in archives_to_clean]
-        if self.mode == "keep":
-            self._print(self.i18n.t("cleanup.keep_done"))
-        else:
-            self._print(self.i18n.t("cleanup.start"))
-
-        if not archives:
-            self._print(self.i18n.t("cleanup.none"))
-            return
-
-        if self.mode == "delete":
-            self._delete_archive_files([path for parts in archives for path in parts])
-            return
-
-        for parts in archives:
+    def cleanup_success_archives(
+        self,
+        archives_to_clean: Iterable[Iterable[str]],
+        previous: dict[str, ArchiveCleanupResult] | None = None,
+    ) -> list[ArchiveCleanupResult]:
+        unique_paths = {}
+        for parts in archives_to_clean:
             for path in parts:
-                self.cleanup_archive_file(path)
-
-    def cleanup_archive_file(self, path: str, reason: str | None = None):
-        archive_path = os.path.normpath(path)
-        if not os.path.exists(archive_path):
-            self._print(self.i18n.t("cleanup.file_missing", path=archive_path))
-            return
-
-        filename = os.path.basename(archive_path)
-        display_reason = reason if reason is not None else self.i18n.t("cleanup.label")
-        if self.mode == "keep":
-            self._print(self.i18n.t("cleanup.keep_file", reason=display_reason, filename=filename))
-            return
-
-        if self.mode == "delete":
-            self._delete_archive_files([archive_path], reason=display_reason)
-            return
-
-        self._print(self.i18n.t("cleanup.recycle", reason=display_reason, filename=filename))
-        try:
-            send2trash(archive_path)
-        except Exception as exc:
-            self._print(self.i18n.t("cleanup.recycle_failed", filename=filename, error=exc))
-
-    def _delete_archive_files(self, paths: list[str], reason: str | None = None):
-        display_reason = reason if reason is not None else self.i18n.t("cleanup.label")
-        existing = []
+                unique_paths.setdefault(_path_key(path), os.path.normpath(path))
+        paths = list(unique_paths.values())
+        if previous is None:
+            self._print(self.i18n.t("cleanup.keep_done" if self.mode == "keep" else "cleanup.start"))
+            if not paths:
+                self._print(self.i18n.t("cleanup.none"))
+        results: list[ArchiveCleanupResult] = []
+        pending: list[tuple[str, int, tuple]] = []
         for path in paths:
-            archive_path = os.path.normpath(path)
-            filename = os.path.basename(archive_path)
-            if not os.path.exists(archive_path):
-                self._print(self.i18n.t("cleanup.file_missing", path=archive_path))
+            prior = (previous or {}).get(_path_key(path))
+            attempts = prior.attempts + 1 if prior else 1
+            if self.mode == "keep":
+                results.append(ArchiveCleanupResult(path, self.mode, "kept", attempts))
                 continue
-            self._print(self.i18n.t("cleanup.delete", reason=display_reason, filename=filename))
-            existing.append(archive_path)
-        for item in _native_delete_files_batch(existing):
-            if str(item.get("status") or "") != "error":
+            identity = ()
+            try:
+                identity = _identity(path)
+                if prior and not prior.source_matches(identity):
+                    results.append(ArchiveCleanupResult(path, self.mode, "failed", attempts,
+                                                       0, "Source file identity changed",
+                                                       source_identity=identity))
+                    continue
+            except FileNotFoundError:
+                results.append(ArchiveCleanupResult(path, self.mode, "missing", attempts))
                 continue
-            filename = str(item.get("filename") or os.path.basename(str(item.get("path") or "")))
-            error = str(item.get("error") or "")
-            self._print(self.i18n.t("cleanup.delete_failed", filename=filename, error=error))
+            except Exception as exc:
+                results.append(ArchiveCleanupResult(path, self.mode, "failed", attempts,
+                                                   int(getattr(exc, "winerror", 0) or 0), str(exc)))
+                continue
+            self._print(self.i18n.t("cleanup.delete" if self.mode == "delete" else "cleanup.recycle",
+                                    reason=self.i18n.t("cleanup.label"), filename=os.path.basename(path)))
+            pending.append((path, attempts, identity))
+        if self.mode == "delete":
+            try:
+                native_results = list(_native_delete_files_batch([item[0] for item in pending]))
+            except Exception as exc:
+                code = int(getattr(exc, "winerror", 0) or 0)
+                return [
+                    *results,
+                    *(
+                        ArchiveCleanupResult(path, self.mode, "failed", attempts, code,
+                                             str(exc), source_identity=identity)
+                        for path, attempts, identity in pending
+                    ),
+                ]
+            for index, (path, attempts, identity) in enumerate(pending):
+                item = native_results[index] if index < len(native_results) else {
+                    "status": "error",
+                    "error": "Native cleanup returned no result",
+                    "error_code": 0,
+                }
+                native_status = str(item.get("status") or "error")
+                status = native_status if native_status in {"deleted", "missing"} else "failed"
+                results.append(ArchiveCleanupResult(path, self.mode, status, attempts,
+                                                   int(item.get("error_code") or 0),
+                                                   str(item.get("error") or ""),
+                                                   source_identity=identity))
+        else:
+            for path, attempts, identity in pending:
+                try:
+                    send2trash(path)
+                    results.append(ArchiveCleanupResult(path, self.mode, "recycled", attempts,
+                                                       source_identity=identity))
+                except Exception as exc:
+                    code = int(getattr(exc, "winerror", 0) or 0)
+                    if not code:
+                        code = int(getattr(exc, "hresult", 0) or 0) & 0xFFFF
+                    results.append(ArchiveCleanupResult(path, self.mode, "failed", attempts,
+                                                       code, str(exc), source_identity=identity))
+        return results
+
+    def cleanup_archive_file(self, path: str, reason: str | None = None) -> ArchiveCleanupResult:
+        return self.cleanup_success_archives([[path]])[0]
