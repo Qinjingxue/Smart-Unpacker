@@ -386,6 +386,13 @@ def _state_stats(watcher: WatchScheduler, state_path: Path) -> dict[str, Any]:
     except OSError:
         result["state_file_bytes"] = 0
     try:
+        result["state_journal_bytes"] = state.journal_path.stat().st_size
+    except OSError:
+        result["state_journal_bytes"] = 0
+    result["state_storage_bytes"] = (
+        result["state_file_bytes"] + result["state_journal_bytes"]
+    )
+    try:
         result["event_log_bytes"] = state_path.with_name("events.jsonl").stat().st_size
     except OSError:
         result["event_log_bytes"] = 0

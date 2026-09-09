@@ -1,11 +1,18 @@
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Lock
+from types import SimpleNamespace
+
+import pytest
 
 import sunpack.filesystem.watcher.state as watch_state_module
 from sunpack.filesystem.watcher.group_models import WatchGroupState
-from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.filesystem.watcher.state import (
+    WatchStateJournalError,
+    WatchStateStore,
+)
 
 
 def _group_state(tmp_path, name, paths, *, head_path=None, status="done"):
@@ -23,29 +30,242 @@ def _group_state(tmp_path, name, paths, *, head_path=None, status="done"):
     )
 
 
+def _candidate(path: Path, index: int = 1):
+    return SimpleNamespace(
+        path=str(path.resolve()),
+        size=1000 + index,
+        mtime=1720000000.0 + index,
+        file_id=f"file-{index}",
+        change_usn=index,
+    )
+
+
 def test_independent_state_stores_use_unique_atomic_writers(tmp_path, monkeypatch):
     state_path = tmp_path / "state.json"
     stores = [WatchStateStore(str(state_path)), WatchStateStore(str(state_path))]
-    barrier = Barrier(len(stores))
     replace_lock = Lock()
     temporary_paths = []
+    active_replaces = 0
+    max_active_replaces = 0
     real_replace = watch_state_module.os.replace
 
     def synchronized_replace(source, destination):
-        temporary_paths.append(source)
-        barrier.wait()
+        nonlocal active_replaces, max_active_replaces
         with replace_lock:
+            temporary_paths.append(source)
+            active_replaces += 1
+            max_active_replaces = max(max_active_replaces, active_replaces)
+        time.sleep(0.01)
+        try:
             real_replace(source, destination)
+        finally:
+            with replace_lock:
+                active_replaces -= 1
 
     monkeypatch.setattr(watch_state_module.os, "replace", synchronized_replace)
 
     with ThreadPoolExecutor(max_workers=len(stores)) as executor:
         list(executor.map(lambda store: store.save(), stores))
 
-    assert len(set(temporary_paths)) == len(stores)
+    assert len(set(temporary_paths)) == len(stores) * 2
     assert all(path.parent == tmp_path and path.name.endswith(".tmp") for path in temporary_paths)
+    assert max_active_replaces == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["version"] > 0
     assert not list(tmp_path.glob(".state.json.*.tmp"))
+    assert not list(tmp_path.glob(".state.journal.jsonl.*.tmp"))
+
+
+def test_incremental_update_appends_journal_without_replacing_snapshot(tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    state = WatchStateStore(str(state_path))
+    state.save()
+    snapshot_before = state_path.read_text(encoding="utf-8")
+    replacements = []
+    real_replace = watch_state_module.os.replace
+
+    def record_replace(source, destination):
+        replacements.append((source, destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(watch_state_module.os, "replace", record_replace)
+    state.queue_active(_candidate(tmp_path / "queued.7z"))
+
+    assert not replacements
+    assert state_path.read_text(encoding="utf-8") == snapshot_before
+    assert state.journal_path.read_text(encoding="utf-8").endswith("\n")
+    [reloaded] = WatchStateStore(str(state_path)).pending_work_items()
+    assert reloaded.path == str((tmp_path / "queued.7z").resolve())
+
+
+def test_failed_journal_append_does_not_change_memory(tmp_path, monkeypatch):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    state.save()
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(watch_state_module, "open_service_file", fail_open)
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        state.queue_active(_candidate(tmp_path / "queued.7z"))
+    assert not state.pending_work_items()
+
+
+def test_truncated_journal_tail_is_ignored_and_repaired(tmp_path):
+    state_path = tmp_path / "state.json"
+    first = _candidate(tmp_path / "first.7z", 1)
+    second = _candidate(tmp_path / "second.7z", 2)
+    state = WatchStateStore(str(state_path))
+    state.queue_active(first)
+    with open(state.journal_path, "ab") as handle:
+        handle.write(b'{"version":14,"operations":[')
+
+    recovered = WatchStateStore(str(state_path))
+    assert [item.path for item in recovered.pending_work_items()] == [first.path]
+    assert recovered.journal_path.read_bytes().endswith(b"\n")
+
+    recovered.queue_active(second)
+    assert {item.path for item in WatchStateStore(str(state_path)).pending_work_items()} == {
+        first.path,
+        second.path,
+    }
+
+
+def test_corrupt_complete_journal_record_is_reported(tmp_path):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    state.queue_active(_candidate(tmp_path / "queued.7z"))
+    with open(state.journal_path, "ab") as handle:
+        handle.write(b"{not-json}\n")
+
+    with pytest.raises(WatchStateJournalError, match="corrupt watch state journal"):
+        WatchStateStore(str(state.path))
+
+
+def test_duplicate_journal_replay_is_idempotent(tmp_path):
+    state_path = tmp_path / "state.json"
+    archive = tmp_path / "failed.7z"
+    state = WatchStateStore(str(state_path))
+    state.mark(
+        str(archive),
+        10,
+        20.0,
+        status="failed_password",
+        failure_payload={"blockers": ["password"]},
+    )
+    journal = state.journal_path.read_bytes()
+    with open(state.journal_path, "ab") as handle:
+        handle.write(journal)
+
+    entry = WatchStateStore(str(state_path)).latest_entry_for_path(str(archive))
+    assert entry is not None
+    assert entry.attempt_count == 1
+
+
+@pytest.mark.parametrize("failed_target", ["snapshot", "journal"])
+def test_compaction_crash_windows_recover_all_state(tmp_path, monkeypatch, failed_target):
+    state_path = tmp_path / "state.json"
+    candidate = _candidate(tmp_path / "queued.7z")
+    state = WatchStateStore(str(state_path))
+    state.queue_active(candidate)
+    real_replace = watch_state_module.os.replace
+    failed = False
+
+    def fail_one_replace(source, destination):
+        nonlocal failed
+        target = Path(destination)
+        should_fail = (
+            target == state.path
+            if failed_target == "snapshot"
+            else target == state.journal_path
+        )
+        if should_fail and not failed:
+            failed = True
+            raise OSError(f"failed {failed_target} replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(watch_state_module.os, "replace", fail_one_replace)
+    with pytest.raises(OSError, match=f"failed {failed_target} replace"):
+        state.save()
+    monkeypatch.setattr(watch_state_module.os, "replace", real_replace)
+
+    [recovered] = WatchStateStore(str(state_path)).pending_work_items()
+    assert recovered.path == candidate.path
+
+
+def test_soft_threshold_compacts_only_when_requested(tmp_path):
+    state = WatchStateStore(
+        str(tmp_path / "state.json"),
+        compact_records=1,
+        compact_bytes=1024 * 1024,
+        hard_compact_bytes=2 * 1024 * 1024,
+    )
+    state.queue_active(_candidate(tmp_path / "queued.7z"))
+
+    assert state.compaction_due
+    assert state.journal_path.stat().st_size > 0
+    assert state.compact_if_needed()
+    assert state.journal_path.stat().st_size == 0
+    assert not state.compaction_due
+    assert WatchStateStore(str(state.path)).pending_work_items()
+
+
+def test_hard_journal_limit_compacts_synchronously(tmp_path):
+    state = WatchStateStore(
+        str(tmp_path / "state.json"),
+        compact_records=1_000_000,
+        compact_bytes=1,
+        hard_compact_bytes=1,
+    )
+    state.queue_active(_candidate(tmp_path / "queued.7z"))
+
+    assert state.journal_path.stat().st_size == 0
+    assert not state.compaction_due
+    assert WatchStateStore(str(state.path)).pending_work_items()
+
+
+def test_incompatible_journal_is_discarded_without_migration(tmp_path):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    state.save()
+    state.journal_path.write_text(
+        json.dumps({"version": 13, "operations": [{"op": "delete"}]}) + "\n",
+        encoding="utf-8",
+    )
+
+    reloaded = WatchStateStore(str(state.path))
+
+    assert not reloaded.pending_work_items()
+    assert reloaded.journal_path.stat().st_size == 0
+    assert json.loads(reloaded.path.read_text(encoding="utf-8"))["version"] == watch_state_module.STATE_VERSION
+
+
+def test_concurrent_updates_share_one_ordered_journal(tmp_path):
+    state_path = tmp_path / "state.json"
+    state = WatchStateStore(str(state_path))
+    candidates = [_candidate(tmp_path / f"queued-{index}.7z", index) for index in range(100)]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(state.queue_active, candidates))
+
+    reloaded = WatchStateStore(str(state_path))
+    assert {item.path for item in reloaded.pending_work_items()} == {
+        candidate.path for candidate in candidates
+    }
+
+
+def test_independent_state_stores_append_without_losing_transactions(tmp_path):
+    state_path = tmp_path / "state.json"
+    stores = [WatchStateStore(str(state_path)), WatchStateStore(str(state_path))]
+    candidates = [
+        _candidate(tmp_path / "first.7z", 1),
+        _candidate(tmp_path / "second.7z", 2),
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda pair: pair[0].queue_active(pair[1]), zip(stores, candidates)))
+
+    assert {item.path for item in WatchStateStore(str(state_path)).pending_work_items()} == {
+        candidate.path for candidate in candidates
+    }
 
 
 def test_completed_work_is_not_retained_as_processed_history(tmp_path):

@@ -198,9 +198,9 @@ def test_watch_scheduler_prunes_missing_state_before_start(tmp_path, monkeypatch
     try:
         assert not watcher.state.entries
         assert not watcher.state.groups
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-        assert payload["entries"] == {}
-        assert payload["groups"] == {}
+        reloaded = WatchStateStore(str(state_path))
+        assert not reloaded.entries
+        assert not reloaded.groups
     finally:
         watcher._stop_blocking()
 
@@ -2520,7 +2520,11 @@ def test_watch_scheduler_defaults_to_user_and_builtin_password_sources(tmp_path,
 
     assert captured[0]["user_passwords"] == ["user-secret"]
     assert captured[0]["builtin_passwords"] == ["builtin-secret"]
-    state_text = state_path.read_text(encoding="utf-8")
+    state_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (state_path, watcher.state.journal_path)
+        if path.exists()
+    )
     assert "user-secret" not in state_text
     assert "builtin-secret" not in state_text
 
@@ -2853,6 +2857,8 @@ def test_watch_scheduler_silently_ignores_metadata_events(tmp_path, monkeypatch)
     handler = scheduler_module._WatchEventHandler(watcher)
     handler._handle_path(str(log_path))
     watcher.enqueue(str(log_path))
+    handler._handle_path(str(watcher.state.journal_path))
+    watcher.enqueue(str(watcher.state.journal_path))
 
     assert watcher.pending_count == 0
     assert log_path.read_text(encoding="utf-8") == ""

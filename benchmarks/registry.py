@@ -26,6 +26,7 @@ _ROWS = [
     ("watch", "real-file", "benchmarks.scenarios.watch_real_file", "End-to-end watch arrival, extraction, and promotion."),
     ("watch", "arrival-matrix", "benchmarks.scenarios.watch_arrival_matrix", "Watch arrival/move methods versus quiet-window policies."),
     ("watch", "split-arrival", "benchmarks.scenarios.watch_split_arrival", "Split-volume order and slow-arrival watch benchmark."),
+    ("watch", "state-persistence", "benchmarks.scenarios.watch_state_persistence", "Incremental watch-state latency versus retained state size."),
     ("extraction", "format-matrix", "benchmarks.scenarios.extraction_format_matrix", "Format and workload matrix."),
     ("extraction", "real-archive", "benchmarks.scenarios.extraction_real_archive", "Fresh-process real archive baseline."),
     ("extraction", "large-archive-profile", "benchmarks.scenarios.extraction_large_archive", "Large archive pipeline profile."),

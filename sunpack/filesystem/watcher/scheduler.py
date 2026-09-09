@@ -205,6 +205,7 @@ class WatchScheduler:
         self.metadata_dir = os.path.abspath(str(state_parent)) if state_parent.name == ".sunpack_watch" else ""
         self.metadata_files = {
             os.path.abspath(str(Path(state_path))),
+            os.path.abspath(str(self.state.journal_path)),
             os.path.abspath(str(log_path)),
         }
         self._lock = threading.Lock()
@@ -390,6 +391,7 @@ class WatchScheduler:
         else:
             self._release_observer()
         self._clipboard_monitor.stop()
+        self.state.compact_if_needed()
         with self._lock:
             self._cache_cleanup_deadline = None
         self._started = False
@@ -450,6 +452,10 @@ class WatchScheduler:
         self._merge_run_result(result, await self._harvest_completed_requests())
         result.pending = self.pending_count
         await self._maybe_clear_idle_caches()
+        with self._lock:
+            state_is_idle = not self._pending and not self._inflight_requests
+        if state_is_idle:
+            self.state.compact_if_needed()
         return result
 
     def _filter_output_conflicts(self, dispatches):
@@ -1775,8 +1781,9 @@ class WatchScheduler:
     def _mark_all_password_failures_dirty(self) -> None:
         now = time.monotonic()
         marked = False
+        entries = self.state.entry_items()
         with self._lock:
-            for entry in self.state.entries.values():
+            for entry in entries:
                 if entry.status == "failed_password":
                     self._password_dirty_dirs[os.path.dirname(entry.path)] = now
                     marked = True

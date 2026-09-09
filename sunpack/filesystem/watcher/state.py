@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import errno
 import json
 import os
@@ -10,7 +10,11 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from sunpack.support.resource_lifecycle import named_task_temporary_file, read_task_text
+from sunpack.support.resource_lifecycle import (
+    named_task_temporary_file,
+    open_service_file,
+    read_task_text,
+)
 
 from .group_models import (
     BLOCKER_MISSING_VOLUME,
@@ -19,8 +23,29 @@ from .group_models import (
 )
 
 
-STATE_VERSION = 13
+STATE_VERSION = 14
 LOADABLE_STATE_VERSIONS = {STATE_VERSION}
+DEFAULT_JOURNAL_COMPACT_RECORDS = 4096
+DEFAULT_JOURNAL_COMPACT_BYTES = 4 * 1024 * 1024
+DEFAULT_JOURNAL_HARD_BYTES = 64 * 1024 * 1024
+
+
+class WatchStateJournalError(RuntimeError):
+    """The durable watch-state journal is corrupt before its final record."""
+
+
+_STATE_PATH_LOCKS_GUARD = threading.Lock()
+_STATE_PATH_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _state_path_lock(path: Path) -> threading.RLock:
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _STATE_PATH_LOCKS_GUARD:
+        lock = _STATE_PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STATE_PATH_LOCKS[key] = lock
+        return lock
 
 
 @dataclass
@@ -65,9 +90,23 @@ class WatchStateEntry:
 class WatchStateStore:
     """Persistent crash queue and retry blockers for watch mode."""
 
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path: str,
+        *,
+        compact_records: int = DEFAULT_JOURNAL_COMPACT_RECORDS,
+        compact_bytes: int = DEFAULT_JOURNAL_COMPACT_BYTES,
+        hard_compact_bytes: int = DEFAULT_JOURNAL_HARD_BYTES,
+    ):
         self.path = Path(path)
-        self._save_lock = threading.RLock()
+        self.journal_path = self.path.with_name(f"{self.path.stem}.journal.jsonl")
+        self._state_lock = _state_path_lock(self.path)
+        self._compact_records = max(1, int(compact_records))
+        self._compact_bytes = max(1, int(compact_bytes))
+        self._hard_compact_bytes = max(self._compact_bytes, int(hard_compact_bytes))
+        self._journal_records = 0
+        self._journal_bytes = 0
+        self._compaction_due = False
         self.pending_work: dict[str, WatchPendingWork] = {}
         self.entries: dict[str, WatchStateEntry] = {}
         self.groups: dict[str, WatchGroupState] = {}
@@ -76,29 +115,51 @@ class WatchStateStore:
         self.load()
 
     def load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            payload = json.loads(read_task_text(self.path, encoding="utf-8"))
-        except Exception:
-            return
-        if not isinstance(payload, dict):
-            return
-        version = payload.get("version")
-        if version not in LOADABLE_STATE_VERSIONS:
-            # State schemas are intentionally not migrated. Replace an old
-            # or incompatible snapshot immediately so obsolete processed-file
-            # history cannot remain on disk when the watcher is idle.
-            self.save()
-            return
-        try:
-            self.password_generation = max(0, int(payload.get("password_generation", 0)))
-        except (TypeError, ValueError):
-            self.password_generation = 0
-        self.password_source_signature = str(payload.get("password_source_signature") or "")
-        self.pending_work = self._load_records(payload.get("pending_work"), WatchPendingWork)
-        self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
-        self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
+        with self._state_lock:
+            self._reset_memory_locked()
+            incompatible = False
+            if self.path.exists():
+                try:
+                    payload = json.loads(read_task_text(self.path, encoding="utf-8"))
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    version = payload.get("version")
+                    if version not in LOADABLE_STATE_VERSIONS:
+                        incompatible = True
+                    else:
+                        try:
+                            self.password_generation = max(
+                                0,
+                                int(payload.get("password_generation", 0)),
+                            )
+                        except (TypeError, ValueError):
+                            self.password_generation = 0
+                        self.password_source_signature = str(
+                            payload.get("password_source_signature") or ""
+                        )
+                        self.pending_work = self._load_records(
+                            payload.get("pending_work"),
+                            WatchPendingWork,
+                        )
+                        self.entries = self._load_records(
+                            payload.get("entries"),
+                            WatchStateEntry,
+                        )
+                        self.groups = self._load_records(
+                            payload.get("groups"),
+                            WatchGroupState,
+                            normalize_keys=False,
+                        )
+            if incompatible:
+                # State schemas are intentionally not migrated. Replace an old
+                # or incompatible snapshot and its journal as one new empty state.
+                self._reset_memory_locked()
+                self._compact_locked()
+                return
+            if not self._load_journal_locked():
+                self._reset_memory_locked()
+                self._compact_locked()
 
     @staticmethod
     def _load_records(payload, record_type, *, normalize_keys: bool = True) -> dict:
@@ -117,35 +178,269 @@ class WatchStateStore:
         return result
 
     def save(self) -> None:
-        with self._save_lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload: dict[str, Any] = {
-                "version": STATE_VERSION,
-                "password_generation": self.password_generation,
-                "password_source_signature": self.password_source_signature,
-                "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
-                "entries": {key: asdict(value) for key, value in self.entries.items()},
-                "groups": {key: asdict(value) for key, value in self.groups.items()},
-            }
-            temp_path: Path | None = None
+        """Force a compact snapshot for explicit callers and clean shutdowns."""
+
+        with self._state_lock:
+            self._compact_locked()
+
+    def compact_if_needed(self, *, force: bool = False) -> bool:
+        with self._state_lock:
+            if not force and not self._compaction_due:
+                return False
+            self._compact_locked()
+            return True
+
+    @property
+    def compaction_due(self) -> bool:
+        with self._state_lock:
+            return self._compaction_due
+
+    def entry_items(self) -> list[WatchStateEntry]:
+        with self._state_lock:
+            return list(self.entries.values())
+
+    def _reset_memory_locked(self) -> None:
+        self.pending_work = {}
+        self.entries = {}
+        self.groups = {}
+        self.password_generation = 0
+        self.password_source_signature = ""
+        self._journal_records = 0
+        self._journal_bytes = 0
+        self._compaction_due = False
+
+    def _snapshot_payload_locked(self) -> dict[str, Any]:
+        return {
+            "version": STATE_VERSION,
+            "password_generation": self.password_generation,
+            "password_source_signature": self.password_source_signature,
+            "pending_work": {
+                key: asdict(value)
+                for key, value in self.pending_work.items()
+            },
+            "entries": {
+                key: asdict(value)
+                for key, value in self.entries.items()
+            },
+            "groups": {
+                key: asdict(value)
+                for key, value in self.groups.items()
+            },
+        }
+
+    def _write_snapshot_locked(self) -> None:
+        payload = self._snapshot_payload_locked()
+        self._atomic_replace_text_locked(
+            self.path,
+            lambda handle: json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _compact_locked(self) -> None:
+        self._write_snapshot_locked()
+        self._atomic_replace_text_locked(self.journal_path, lambda _handle: None)
+        self._journal_records = 0
+        self._journal_bytes = 0
+        self._compaction_due = False
+
+    def _atomic_replace_text_locked(self, target: Path, writer) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Path | None = None
+        try:
+            with named_task_temporary_file(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp:
+                temp_path = Path(temp.name)
+                writer(temp)
+            os.replace(temp_path, target)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _load_journal_locked(self) -> bool:
+        if not self.journal_path.exists():
+            return True
+        try:
+            content = read_task_text(self.journal_path, encoding="utf-8")
+        except FileNotFoundError:
+            return True
+        complete_content = content
+        if content and not content.endswith("\n"):
+            last_newline = content.rfind("\n")
+            complete_content = content[: last_newline + 1]
+            self._atomic_replace_text_locked(
+                self.journal_path,
+                lambda handle: handle.write(complete_content),
+            )
+
+        decoded_operations = []
+        record_count = 0
+        for line_number, line in enumerate(complete_content.splitlines(), start=1):
+            if not line:
+                continue
             try:
-                with named_task_temporary_file(
-                    mode="w",
-                    encoding="utf-8",
-                    dir=self.path.parent,
-                    prefix=f".{self.path.name}.",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temp:
-                    temp_path = Path(temp.name)
-                    json.dump(payload, temp, ensure_ascii=False, indent=2)
-                os.replace(temp_path, self.path)
-            finally:
-                if temp_path is not None:
-                    try:
-                        temp_path.unlink()
-                    except FileNotFoundError:
-                        pass
+                transaction = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise WatchStateJournalError(
+                    f"corrupt watch state journal at {self.journal_path}:{line_number}"
+                ) from exc
+            if not isinstance(transaction, dict):
+                raise WatchStateJournalError(
+                    f"invalid watch state journal record at {self.journal_path}:{line_number}"
+                )
+            if transaction.get("version") not in LOADABLE_STATE_VERSIONS:
+                return False
+            operations = transaction.get("operations")
+            if not isinstance(operations, list) or not operations:
+                raise WatchStateJournalError(
+                    f"invalid watch state journal operations at {self.journal_path}:{line_number}"
+                )
+            try:
+                decoded_operations.extend(
+                    self._decode_operation(operation)
+                    for operation in operations
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                raise WatchStateJournalError(
+                    f"invalid watch state journal operation at {self.journal_path}:{line_number}"
+                ) from exc
+            record_count += 1
+
+        for operation in decoded_operations:
+            self._apply_decoded_operation_locked(operation)
+        self._journal_records = record_count
+        self._journal_bytes = len(complete_content.encode("utf-8"))
+        self._update_compaction_due_locked()
+        return True
+
+    def _commit_operations_locked(self, operations: list[dict[str, Any]]) -> None:
+        if not operations:
+            return
+        decoded = [self._decode_operation(operation) for operation in operations]
+        if not self.path.exists():
+            # The base snapshot must predate this transaction so a crash after
+            # the append can always reconstruct the complete state.
+            self._write_snapshot_locked()
+        transaction = {
+            "version": STATE_VERSION,
+            "operations": operations,
+        }
+        serialized = (
+            json.dumps(transaction, ensure_ascii=True, separators=(",", ":"))
+            + "\n"
+        )
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        with open_service_file(
+            self.journal_path,
+            "a",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            handle.write(serialized)
+        for operation in decoded:
+            self._apply_decoded_operation_locked(operation)
+        self._journal_records += 1
+        self._journal_bytes += len(serialized.encode("utf-8"))
+        self._update_compaction_due_locked()
+        if self._journal_bytes >= self._hard_compact_bytes:
+            self._compact_locked()
+
+    def _update_compaction_due_locked(self) -> None:
+        self._compaction_due = (
+            self._journal_records >= self._compact_records
+            or self._journal_bytes >= self._compact_bytes
+        )
+
+    @staticmethod
+    def _put_operation(collection: str, key: str, value) -> dict[str, Any]:
+        return {
+            "op": "put",
+            "collection": collection,
+            "key": key,
+            "value": asdict(value),
+        }
+
+    @staticmethod
+    def _delete_operation(collection: str, key: str) -> dict[str, Any]:
+        return {
+            "op": "delete",
+            "collection": collection,
+            "key": key,
+        }
+
+    def _metadata_operation(
+        self,
+        password_generation: int,
+        password_source_signature: str,
+    ) -> dict[str, Any]:
+        return {
+            "op": "set_metadata",
+            "value": {
+                "password_generation": max(0, int(password_generation)),
+                "password_source_signature": str(password_source_signature or ""),
+            },
+        }
+
+    @staticmethod
+    def _decode_operation(operation):
+        if not isinstance(operation, dict):
+            raise TypeError("journal operation must be an object")
+        action = operation.get("op")
+        if action == "set_metadata":
+            value = operation.get("value")
+            if not isinstance(value, dict):
+                raise TypeError("metadata value must be an object")
+            generation = max(0, int(value["password_generation"]))
+            signature = str(value.get("password_source_signature") or "")
+            return action, "", "", (generation, signature)
+
+        collection = str(operation.get("collection") or "")
+        record_types = {
+            "pending_work": WatchPendingWork,
+            "entries": WatchStateEntry,
+            "groups": WatchGroupState,
+        }
+        record_type = record_types.get(collection)
+        if record_type is None:
+            raise ValueError(f"unknown state collection: {collection}")
+        key = str(operation.get("key") or "")
+        if not key:
+            raise ValueError("state operation key must not be empty")
+        if action == "delete":
+            return action, collection, key, None
+        if action != "put":
+            raise ValueError(f"unknown state operation: {action}")
+        value = operation.get("value")
+        if not isinstance(value, dict):
+            raise TypeError("state record value must be an object")
+        record = record_type(**value)
+        if collection in {"pending_work", "entries"}:
+            key = _path_key(record.path)
+        return action, collection, key, record
+
+    def _apply_decoded_operation_locked(self, operation) -> None:
+        action, collection, key, value = operation
+        if action == "set_metadata":
+            self.password_generation, self.password_source_signature = value
+            return
+        records = getattr(self, collection)
+        if action == "delete":
+            records.pop(key, None)
+        else:
+            records[key] = value
 
     def queue_active(self, candidate, *, force: bool = False) -> None:
         pending = WatchPendingWork(
@@ -156,8 +451,11 @@ class WatchStateStore:
             change_usn=int(getattr(candidate, "change_usn", 0) or 0),
             force=bool(force),
         )
-        self.pending_work[_path_key(candidate.path)] = pending
-        self.save()
+        key = _path_key(candidate.path)
+        with self._state_lock:
+            self._commit_operations_locked([
+                self._put_operation("pending_work", key, pending),
+            ])
 
     def record_attempt(
         self,
@@ -167,84 +465,111 @@ class WatchStateStore:
         file_id: str = "",
         change_usn: int = 0,
     ) -> None:
-        pending = WatchPendingWork(
-            path=os.path.abspath(path),
-            size=size,
-            mtime=mtime,
-            file_id=file_id,
-            change_usn=int(change_usn),
-            force=False,
-        )
-        key = _path_key(path)
-        self.pending_work[key] = pending
-        self.save()
+        with self._state_lock:
+            pending = WatchPendingWork(
+                path=os.path.abspath(path),
+                size=size,
+                mtime=mtime,
+                file_id=file_id,
+                change_usn=int(change_usn),
+                force=False,
+            )
+            key = _path_key(path)
+            self._commit_operations_locked([
+                self._put_operation("pending_work", key, pending),
+            ])
 
     def pending_work_items(self) -> list[WatchPendingWork]:
-        return list(self.pending_work.values())
+        with self._state_lock:
+            return list(self.pending_work.values())
 
     def complete_work(self, paths: Iterable[str]) -> None:
-        changed = False
-        for path in paths:
-            changed = self.pending_work.pop(_path_key(path), None) is not None or changed
-        if changed:
-            self.save()
+        with self._state_lock:
+            keys = {
+                _path_key(path)
+                for path in paths
+                if _path_key(path) in self.pending_work
+            }
+            self._commit_operations_locked([
+                self._delete_operation("pending_work", key)
+                for key in sorted(keys)
+            ])
 
     def complete_work_if_matches(self, candidate) -> None:
-        key = _path_key(candidate.path)
-        pending = self.pending_work.get(key)
-        if pending is None:
-            return
-        if (
-            pending.size != int(candidate.size)
-            or pending.mtime != float(candidate.mtime)
-            or pending.file_id != str(candidate.file_id or "")
-            or pending.change_usn != int(candidate.change_usn)
-        ):
-            return
-        self.pending_work.pop(key, None)
-        self.save()
+        with self._state_lock:
+            key = _path_key(candidate.path)
+            pending = self.pending_work.get(key)
+            if pending is None:
+                return
+            if (
+                pending.size != int(candidate.size)
+                or pending.mtime != float(candidate.mtime)
+                or pending.file_id != str(candidate.file_id or "")
+                or pending.change_usn != int(candidate.change_usn)
+            ):
+                return
+            self._commit_operations_locked([
+                self._delete_operation("pending_work", key),
+            ])
 
     def forget_path(self, path: str, *, recursive: bool = False) -> bool:
         normalized = os.path.abspath(path)
-        keys = {
-            key
-            for collection in (self.pending_work, self.entries)
-            for key in collection
-            if _path_matches(key, normalized, recursive=recursive)
-        }
-        changed = False
-        for key in keys:
-            changed = self.pending_work.pop(key, None) is not None or changed
-            changed = self.entries.pop(key, None) is not None or changed
-        for group_id, group in list(self.groups.items()):
-            members = [group.head_path, *group.owned_paths]
-            if any(_path_matches(member, normalized, recursive=recursive) for member in members if member):
-                self.groups.pop(group_id, None)
-                changed = True
-        if changed:
-            self.save()
-        return changed
+        with self._state_lock:
+            operations = []
+            for collection_name, collection in (
+                ("pending_work", self.pending_work),
+                ("entries", self.entries),
+            ):
+                operations.extend(
+                    self._delete_operation(collection_name, key)
+                    for key in collection
+                    if _path_matches(key, normalized, recursive=recursive)
+                )
+            operations.extend(
+                self._delete_operation("groups", group_id)
+                for group_id, group in self.groups.items()
+                if any(
+                    _path_matches(member, normalized, recursive=recursive)
+                    for member in [group.head_path, *group.owned_paths]
+                    if member
+                )
+            )
+            self._commit_operations_locked(operations)
+            return bool(operations)
 
     def latest_entry_for_path(self, path: str) -> WatchStateEntry | None:
-        return self.entries.get(_path_key(path))
+        with self._state_lock:
+            return self.entries.get(_path_key(path))
 
     def advance_entry_observation(self, candidate) -> bool:
-        entry = self.entries.get(_path_key(candidate.path))
-        if entry is None:
-            return False
-        if entry.file_id != str(candidate.file_id or "") or entry.size != int(candidate.size):
-            return False
-        entry.mtime = float(candidate.mtime)
-        entry.change_usn = int(candidate.change_usn)
-        self.save()
-        return True
+        with self._state_lock:
+            key = _path_key(candidate.path)
+            entry = self.entries.get(key)
+            if entry is None:
+                return False
+            if entry.file_id != str(candidate.file_id or "") or entry.size != int(candidate.size):
+                return False
+            updated = replace(
+                entry,
+                mtime=float(candidate.mtime),
+                change_usn=int(candidate.change_usn),
+            )
+            self._commit_operations_locked([
+                self._put_operation("entries", key, updated),
+            ])
+            return True
 
     def clear_entries(self, paths: Iterable[str]) -> None:
-        changed = False
-        for path in paths:
-            changed = self.entries.pop(_path_key(path), None) is not None or changed
-        if changed:
-            self.save()
+        with self._state_lock:
+            keys = {
+                _path_key(path)
+                for path in paths
+                if _path_key(path) in self.entries
+            }
+            self._commit_operations_locked([
+                self._delete_operation("entries", key)
+                for key in sorted(keys)
+            ])
 
     def prune_missing_records(self) -> tuple[int, int]:
         """Remove state records whose recorded filesystem paths are gone.
@@ -260,63 +585,74 @@ class WatchStateStore:
         unknown and retain the record.  This keeps a transient permission or
         volume error from destroying retry state during startup.
         """
-        removed_entries = 0
-        removed_groups = 0
-
-        for key, entry in list(self.entries.items()):
-            if _recorded_file_presence(entry.path) is False:
-                self.entries.pop(key, None)
-                removed_entries += 1
-
-        for group_id, group in list(self.groups.items()):
-            recorded_paths = _group_recorded_paths(group)
-            if not recorded_paths or any(
-                _recorded_file_presence(path) is False
-                for path in recorded_paths
-            ):
-                self.groups.pop(group_id, None)
-                removed_groups += 1
-
-        if removed_entries or removed_groups:
-            self.save()
-        return removed_entries, removed_groups
+        with self._state_lock:
+            entry_keys = [
+                key
+                for key, entry in self.entries.items()
+                if _recorded_file_presence(entry.path) is False
+            ]
+            group_ids = []
+            for group_id, group in self.groups.items():
+                recorded_paths = _group_recorded_paths(group)
+                if not recorded_paths or any(
+                    _recorded_file_presence(path) is False
+                    for path in recorded_paths
+                ):
+                    group_ids.append(group_id)
+            operations = [
+                *(self._delete_operation("entries", key) for key in entry_keys),
+                *(self._delete_operation("groups", group_id) for group_id in group_ids),
+            ]
+            self._commit_operations_locked(operations)
+            return len(entry_keys), len(group_ids)
 
     def mark_password_source_changed(self, signature: str | None = None) -> int:
-        if signature is not None:
-            self.password_source_signature = signature
-        self.password_generation += 1
-        self.save()
-        return self.password_generation
+        with self._state_lock:
+            next_signature = (
+                self.password_source_signature
+                if signature is None
+                else str(signature or "")
+            )
+            next_generation = self.password_generation + 1
+            self._commit_operations_locked([
+                self._metadata_operation(next_generation, next_signature),
+            ])
+            return self.password_generation
 
     def record_password_source_signature(self, signature: str) -> bool:
-        signature = str(signature or "")
-        previous = self.password_source_signature
-        changed = bool(previous and previous != signature)
-        if not previous and any(entry.status == "failed_password" for entry in self.entries.values()):
-            changed = True
-        self.password_source_signature = signature
-        if changed:
-            self.password_generation += 1
-        if previous != signature or changed:
-            self.save()
-        return changed
+        with self._state_lock:
+            signature = str(signature or "")
+            previous = self.password_source_signature
+            changed = bool(previous and previous != signature)
+            if not previous and any(
+                entry.status == "failed_password"
+                for entry in self.entries.values()
+            ):
+                changed = True
+            next_generation = self.password_generation + (1 if changed else 0)
+            if previous != signature or changed:
+                self._commit_operations_locked([
+                    self._metadata_operation(next_generation, signature),
+                ])
+            return changed
 
     def failed_password_entries_under(self, directory: str, *, include_subtree: bool = True) -> list[WatchStateEntry]:
-        root = Path(directory).resolve()
-        result: list[WatchStateEntry] = []
-        for entry in self.entries.values():
-            if entry.status != "failed_password":
-                continue
-            try:
-                parent = Path(entry.path).resolve().parent
-                if include_subtree:
-                    parent.relative_to(root)
-                elif parent != root:
+        with self._state_lock:
+            root = Path(directory).resolve()
+            result: list[WatchStateEntry] = []
+            for entry in self.entries.values():
+                if entry.status != "failed_password":
                     continue
-            except ValueError:
-                continue
-            result.append(entry)
-        return result
+                try:
+                    parent = Path(entry.path).resolve().parent
+                    if include_subtree:
+                        parent.relative_to(root)
+                    elif parent != root:
+                        continue
+                except ValueError:
+                    continue
+                result.append(entry)
+            return result
 
     def mark(
         self,
@@ -330,74 +666,93 @@ class WatchStateStore:
         error: str = "",
         failure_payload: dict[str, Any] | None = None,
     ) -> None:
-        key = _path_key(path)
-        previous = self.entries.get(key)
-        payload = dict(failure_payload or {})
-        blockers = {str(value) for value in payload.get("blockers") or []}
-        if status not in {"failed_password", "suspended_missing_volume"} and not blockers:
-            changed = self.entries.pop(key, None) is not None
-            if changed:
-                self.save()
-            return
-        self.entries[key] = WatchStateEntry(
-            path=os.path.abspath(path),
-            size=size,
-            mtime=mtime,
-            file_id=file_id,
-            change_usn=int(change_usn),
-            status=status,
-            last_error=error,
-            attempt_count=(previous.attempt_count + 1) if previous else 1,
-            failure_kind=str(payload.get("kind") or ""),
-            failure_stage=str(payload.get("stage") or ""),
-            failure_payload=payload,
-            last_attempt_at=time.time(),
-            password_generation=self.password_generation,
-        )
-        self.save()
+        with self._state_lock:
+            key = _path_key(path)
+            previous = self.entries.get(key)
+            payload = dict(failure_payload or {})
+            blockers = {str(value) for value in payload.get("blockers") or []}
+            if status not in {"failed_password", "suspended_missing_volume"} and not blockers:
+                if previous is not None:
+                    self._commit_operations_locked([
+                        self._delete_operation("entries", key),
+                    ])
+                return
+            entry = WatchStateEntry(
+                path=os.path.abspath(path),
+                size=size,
+                mtime=mtime,
+                file_id=file_id,
+                change_usn=int(change_usn),
+                status=status,
+                last_error=error,
+                attempt_count=(previous.attempt_count + 1) if previous else 1,
+                failure_kind=str(payload.get("kind") or ""),
+                failure_stage=str(payload.get("stage") or ""),
+                failure_payload=payload,
+                last_attempt_at=time.time(),
+                password_generation=self.password_generation,
+            )
+            self._commit_operations_locked([
+                self._put_operation("entries", key, entry),
+            ])
 
     def group_state(self, group_id: str) -> WatchGroupState | None:
-        return self.groups.get(group_id)
+        with self._state_lock:
+            return self.groups.get(group_id)
 
     def record_group_waiting(self, snapshot: WatchGroupSnapshot) -> None:
-        previous = self.groups.get(snapshot.group_id)
-        blockers = set(previous.blockers if previous else [])
-        blockers.discard(BLOCKER_MISSING_VOLUME)
-        self.groups[snapshot.group_id] = self._group_record(
-            snapshot,
-            previous=previous,
-            status="waiting",
-            blockers=sorted(blockers),
-            last_attempted_input_fingerprint=snapshot.input_fingerprint,
-            password_generation=previous.password_generation if previous else self.password_generation,
-            failure_payload={
-                "kind": "relation_waiting",
-                "stage": "relation",
-                "message": "waiting for a split volume indicated by strong relation evidence",
-                "details": {
-                    "observed_reason": snapshot.missing_reason,
-                    "observed_indices": list(snapshot.missing_indices),
-                    "completeness_status": snapshot.completeness_status,
-                    "completeness_confidence": snapshot.completeness_confidence,
-                    "completeness_basis": list(snapshot.completeness_basis),
+        with self._state_lock:
+            previous = self.groups.get(snapshot.group_id)
+            blockers = set(previous.blockers if previous else [])
+            blockers.discard(BLOCKER_MISSING_VOLUME)
+            record = self._group_record(
+                snapshot,
+                previous=previous,
+                status="waiting",
+                blockers=sorted(blockers),
+                last_attempted_input_fingerprint=snapshot.input_fingerprint,
+                password_generation=(
+                    previous.password_generation
+                    if previous
+                    else self.password_generation
+                ),
+                failure_payload={
+                    "kind": "relation_waiting",
+                    "stage": "relation",
+                    "message": "waiting for a split volume indicated by strong relation evidence",
+                    "details": {
+                        "observed_reason": snapshot.missing_reason,
+                        "observed_indices": list(snapshot.missing_indices),
+                        "completeness_status": snapshot.completeness_status,
+                        "completeness_confidence": snapshot.completeness_confidence,
+                        "completeness_basis": list(snapshot.completeness_basis),
+                    },
                 },
-            },
-        )
-        self.save()
+            )
+            self._commit_operations_locked([
+                self._put_operation("groups", snapshot.group_id, record),
+            ])
 
     def record_group_attempt(self, snapshot: WatchGroupSnapshot) -> None:
-        previous = self.groups.get(snapshot.group_id)
-        self.groups[snapshot.group_id] = self._group_record(
-            snapshot,
-            previous=previous,
-            status="running",
-            blockers=list(previous.blockers if previous else []),
-            last_attempted_input_fingerprint=snapshot.input_fingerprint,
-            password_generation=previous.password_generation if previous else self.password_generation,
-            failure_payload=dict(previous.failure_payload if previous else {}),
-            increment_attempt=True,
-        )
-        self.save()
+        with self._state_lock:
+            previous = self.groups.get(snapshot.group_id)
+            record = self._group_record(
+                snapshot,
+                previous=previous,
+                status="running",
+                blockers=list(previous.blockers if previous else []),
+                last_attempted_input_fingerprint=snapshot.input_fingerprint,
+                password_generation=(
+                    previous.password_generation
+                    if previous
+                    else self.password_generation
+                ),
+                failure_payload=dict(previous.failure_payload if previous else {}),
+                increment_attempt=True,
+            )
+            self._commit_operations_locked([
+                self._put_operation("groups", snapshot.group_id, record),
+            ])
 
     def record_group_suspended(
         self,
@@ -406,17 +761,20 @@ class WatchStateStore:
         blockers: list[str],
         failure_payload: dict[str, Any] | None = None,
     ) -> None:
-        previous = self.groups.get(snapshot.group_id)
-        self.groups[snapshot.group_id] = self._group_record(
-            snapshot,
-            previous=previous,
-            status="suspended",
-            blockers=sorted(set(blockers)),
-            last_attempted_input_fingerprint=snapshot.input_fingerprint,
-            password_generation=self.password_generation,
-            failure_payload=dict(failure_payload or {}),
-        )
-        self.save()
+        with self._state_lock:
+            previous = self.groups.get(snapshot.group_id)
+            record = self._group_record(
+                snapshot,
+                previous=previous,
+                status="suspended",
+                blockers=sorted(set(blockers)),
+                last_attempted_input_fingerprint=snapshot.input_fingerprint,
+                password_generation=self.password_generation,
+                failure_payload=dict(failure_payload or {}),
+            )
+            self._commit_operations_locked([
+                self._put_operation("groups", snapshot.group_id, record),
+            ])
 
     def record_group_terminal(
         self,
@@ -425,26 +783,32 @@ class WatchStateStore:
         status: str,
         failure_payload: dict[str, Any] | None = None,
     ) -> None:
-        previous = self.groups.get(snapshot.group_id)
-        self.groups[snapshot.group_id] = self._group_record(
-            snapshot,
-            previous=previous,
-            status=status,
-            blockers=[],
-            last_attempted_input_fingerprint=snapshot.input_fingerprint,
-            password_generation=self.password_generation,
-            failure_payload=dict(failure_payload or {}),
-        )
-        self.save()
+        with self._state_lock:
+            previous = self.groups.get(snapshot.group_id)
+            record = self._group_record(
+                snapshot,
+                previous=previous,
+                status=status,
+                blockers=[],
+                last_attempted_input_fingerprint=snapshot.input_fingerprint,
+                password_generation=self.password_generation,
+                failure_payload=dict(failure_payload or {}),
+            )
+            self._commit_operations_locked([
+                self._put_operation("groups", snapshot.group_id, record),
+            ])
 
     def record_group_done(self, snapshot: WatchGroupSnapshot) -> None:
         self.record_group_terminal(snapshot, status="done")
 
     def clear_group(self, group_id: str) -> bool:
-        if self.groups.pop(group_id, None) is None:
-            return False
-        self.save()
-        return True
+        with self._state_lock:
+            if group_id not in self.groups:
+                return False
+            self._commit_operations_locked([
+                self._delete_operation("groups", group_id),
+            ])
+            return True
 
     def _group_record(
         self,
