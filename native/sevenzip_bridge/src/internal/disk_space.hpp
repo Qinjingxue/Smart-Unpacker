@@ -15,7 +15,7 @@
 
 namespace sunpack::sevenzip {
 struct DiskSpacePolicy {
-    uint64_t reserve_bytes = 256ULL << 20;
+    uint64_t reserve_bytes = 0;
     uint64_t quantum_bytes = 64ULL << 20;
     uint64_t sample_ms = 500;
 };

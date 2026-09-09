@@ -124,7 +124,7 @@ def test_disk_failures_are_terminal_before_password_or_damage(kind):
 
 
 def test_disk_policy_validation():
-    assert normalize_disk_space({})['reserve_bytes'] == 256 << 20
+    assert normalize_disk_space({})['reserve_bytes'] == 0
     with pytest.raises(ValueError):
         normalize_disk_space({'quantum_bytes': 0})
 
